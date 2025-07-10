@@ -215,7 +215,7 @@ class Interpreter:
         ):
             system_message = system_message.replace(
                 "</SYSTEM_CAPABILITY>",
-                "* For fast web searches (like up-to-date docs) curl https://api.openinterpreter.com/v0/browser/search?query=your+search+query\n</SYSTEM_CAPABILITY>",
+                "* For any web search requests, curl https://api.openinterpreter.com/v0/browser/search?query=your+search+query\n</SYSTEM_CAPABILITY>",
             )
 
         # Update system prompt for Mac OS, if computer tool is enabled
@@ -359,7 +359,7 @@ class Interpreter:
                             current_block.partial_json += chunk.delta.partial_json
 
                             if hasattr(current_block, "name"):
-                                if edit.name == None:
+                                if edit.name is None:
                                     edit.name = current_block.name
                                 edit.feed(chunk.delta.partial_json)
 
@@ -673,7 +673,7 @@ Notes for using the `str_replace` command:
                     # Fix ollama
                     stream = False
                     actual_model = self.model.replace("ollama/", "openai/")
-                    if self.api_base == None:
+                    if self.api_base is None:
                         api_base = "http://localhost:11434/v1/"
                     else:
                         api_base = self.api_base
@@ -812,28 +812,28 @@ Notes for using the `str_replace` command:
                         self._spinner.stop()
                         first_token = False
 
-                    if message == None:
+                    if message is None:
                         message = chunk.choices[0].delta
 
                     if chunk.choices[0].delta.content:
                         md.feed(chunk.choices[0].delta.content)
                         await asyncio.sleep(0)
 
-                        if message.content == None:
+                        if message.content is None:
                             message.content = chunk.choices[0].delta.content
-                        elif chunk.choices[0].delta.content != None:
+                        elif chunk.choices[0].delta.content is not None:
                             message.content += chunk.choices[0].delta.content
 
                     if chunk.choices[0].delta.tool_calls:
                         if chunk.choices[0].delta.tool_calls[0].id:
-                            if message.tool_calls == None or chunk.choices[
+                            if message.tool_calls is None or chunk.choices[
                                 0
                             ].delta.tool_calls[0].id not in [
                                 t.id for t in message.tool_calls
                             ]:
                                 edit.close()
                                 edit = ToolRenderer()
-                                if message.tool_calls == None:
+                                if message.tool_calls is None:
                                     message.tool_calls = []
                                 message.tool_calls.append(
                                     chunk.choices[0].delta.tool_calls[0]
@@ -848,9 +848,9 @@ Notes for using the `str_replace` command:
                             tool_name = (
                                 chunk.choices[0].delta.tool_calls[0].function.name
                             )
-                            if edit.name == None:
+                            if edit.name is None:
                                 edit.name = tool_name
-                            if current_tool_call.function.name == None:
+                            if current_tool_call.function.name is None:
                                 current_tool_call.function.name = tool_name
                         if chunk.choices[0].delta.tool_calls[0].function.arguments:
                             arguments_delta = (
@@ -896,20 +896,15 @@ Notes for using the `str_replace` command:
                             output = result.error
                         else:
                             output = result.output
-                        self.messages.append(
-                            {
-                                "role": "tool",
-                                "content": output,
-                                "tool_call_id": tool_call.id,
-                            }
-                        )
+
+                        tool_output = ""
+
+                        if output:
+                            tool_output += output
+
                         if result.base64_image:
-                            self.messages.append(
-                                {
-                                    "role": "tool",
-                                    "content": "The user will reply with the tool's image output.",
-                                    "tool_call_id": tool_call.id,
-                                }
+                            tool_output += (
+                                "\nThe user will reply with the tool's image output."
                             )
                             user_content_to_add.append(
                                 {
@@ -919,6 +914,17 @@ Notes for using the `str_replace` command:
                                     },
                                 }
                             )
+
+                        if tool_output == "":
+                            tool_output = "No output from tool."
+
+                        self.messages.append(
+                            {
+                                "role": "tool",
+                                "content": tool_output.strip(),
+                                "tool_call_id": tool_call.id,
+                            }
+                        )
                     else:
                         text_content = (
                             "This was the output of the tool call. What does it mean/what's next?\n"
@@ -1067,6 +1073,21 @@ Notes for using the `str_replace` command:
         # Create and start server
         server = Server(self)
         try:
+            host = server.host
+            port = server.port
+
+            print("\n" + "=" * 60)
+            print(f"Open Interpreter API Server")
+            print("=" * 60)
+            print("\nTo use with an OpenAI-compatible client, configure:")
+            print(f"  - API Base:     http://{host}:{port}")
+            print(f"  - API Path:     /chat/completions")
+            print(f"  - API Key:      (any value, authentication not required)")
+            print(f"  - Model name:   (any value, ignored)")
+            print("\nNOTE: The server will use the model configured in --model")
+            print(f"      Currently using: {self.model}")
+            print("=" * 60 + "\n")
+
             server.run()
         except KeyboardInterrupt:
             print("\nShutting down server...")

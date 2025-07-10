@@ -9,7 +9,8 @@ if "--help" in sys.argv:
 
 # Version message
 if "--version" in sys.argv:
-    print("Open Interpreter 1.0.0")
+    from interpreter import __version__
+    print(f"Open Interpreter {__version__}")
     sys.exit(0)
 
 import argparse
@@ -185,12 +186,6 @@ async def async_load_interpreter(args):
 
 async def async_main(args):
     global global_interpreter
-
-    if args["serve"]:
-        global_interpreter = await async_load_interpreter(args)
-        print("Starting server...")
-        global_interpreter.server()
-        return
 
     if (
         args["input"] is None
