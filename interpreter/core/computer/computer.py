@@ -17,6 +17,9 @@ from .skills.skills import Skills
 from .sms.sms import SMS
 from .terminal.terminal import Terminal
 from .vision.vision import Vision
+from .action_planner import ActionPlanner
+from .visible_terminal import VisibleTerminal
+from .window_manager import WindowManager
 
 
 class Computer:
@@ -44,6 +47,11 @@ class Computer:
         self.docs = Docs(self)
         self.ai = Ai(self)
         self.files = Files(self)
+
+        # Enhanced components
+        self.action_planner = ActionPlanner(self)
+        self.visible_terminal = VisibleTerminal(self)
+        self.window_manager = WindowManager(self)
 
         self.emit_images = True
         self.api_base = "https://api.openinterpreter.com/v0"

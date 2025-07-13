@@ -15,8 +15,10 @@ from ..terminal_interface.utils.local_storage_path import get_storage_path
 from ..terminal_interface.utils.oi_dir import oi_dir
 from .computer.computer import Computer
 from .default_system_message import default_system_message
+from .enhanced_system_message import enhanced_system_message
 from .llm.llm import Llm
 from .respond import respond
+from .enhanced_respond import enhanced_respond
 from .utils.telemetry import send_telemetry
 from .utils.truncate_output import truncate_output
 
@@ -66,6 +68,7 @@ class OpenInterpreter:
         speak_messages=False,
         llm=None,
         system_message=default_system_message,
+        enhanced_mode=False,
         custom_instructions="",
         user_message_template="{content}",
         always_apply_user_message_template=False,
@@ -129,8 +132,12 @@ class OpenInterpreter:
         # LLM
         self.llm = Llm(self) if llm is None else llm
 
-        # These are LLM related
-        self.system_message = system_message
+        # Enhanced mode
+        self.enhanced_mode = enhanced_mode
+        if enhanced_mode:
+            self.system_message = enhanced_system_message
+        else:
+            self.system_message = system_message
         self.custom_instructions = custom_instructions
         self.user_message_template = user_message_template
         self.always_apply_user_message_template = always_apply_user_message_template
@@ -315,7 +322,10 @@ class OpenInterpreter:
         last_flag_base = None
 
         try:
-            for chunk in respond(self):
+            # Choose the appropriate respond function
+            respond_func = enhanced_respond if self.enhanced_mode else respond
+            
+            for chunk in respond_func(self):
                 # For async usage
                 if hasattr(self, "stop_event") and self.stop_event.is_set():
                     print("Open Interpreter stopping.")
