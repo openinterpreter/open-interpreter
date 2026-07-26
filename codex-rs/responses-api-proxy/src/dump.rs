@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::io::Read;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -23,6 +24,12 @@ pub(crate) struct ExchangeDumper {
 
 impl ExchangeDumper {
     pub(crate) fn new(dump_dir: PathBuf) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new().mode(0o700).recursive(true).create(&dump_dir)?;
+        }
+        #[cfg(not(unix))]
         fs::create_dir_all(&dump_dir)?;
 
         Ok(Self {
@@ -197,6 +204,13 @@ fn write_json_dump(path: &PathBuf, dump: &impl Serialize) -> io::Result<()> {
     let mut bytes = serde_json::to_vec_pretty(dump)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     bytes.push(b'\n');
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?.write_all(&bytes)?;
+        return Ok(());
+    }
+    #[cfg(not(unix))]
     fs::write(path, bytes)
 }
 
