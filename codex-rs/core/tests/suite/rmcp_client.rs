@@ -2132,13 +2132,14 @@ async fn remote_stdio_env_var_source_does_not_copy_local_env() -> anyhow::Result
             insert_mcp_server(
                 config,
                 server_name,
-                stdio_transport(
+                stdio_transport_with_cwd(
                     rmcp_test_server_bin,
                     /*env*/ None,
                     vec![McpServerEnvVar::Config {
                         name: env_name.to_string(),
                         source: Some("remote".to_string()),
                     }],
+                    Some(PathBuf::from("/tmp")),
                 ),
                 TestMcpServerOptions {
                     environment_id: remote_aware_environment_id(),

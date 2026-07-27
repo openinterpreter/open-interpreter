@@ -253,10 +253,11 @@ async fn installed_apps_failed_force_refresh_retains_previous_snapshot() -> Resu
     )
     .await??;
     assert_eq!(error.error.code, -32603);
+    let calls_after_failed_refresh = fixture.list_tools_calls();
 
     let retained = send_installed_request(&mut app_server, /*force_refresh*/ false).await?;
     assert_eq!(retained, committed);
-    assert_eq!(fixture.list_tools_calls(), 2);
+    assert_eq!(fixture.list_tools_calls(), calls_after_failed_refresh);
     Ok(())
 }
 

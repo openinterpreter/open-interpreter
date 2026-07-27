@@ -1429,10 +1429,23 @@ async fn expect_network_approval_target(
     .await;
     match event {
         EventMsg::ExecApprovalRequest(approval) => {
-            assert_eq!(
-                approval.command,
+            let expected_command = if expected_environment_id == REMOTE_ENVIRONMENT_ID {
+                let args = network_fetch_args(expected_environment_id);
+                vec![
+                    args["shell"]
+                        .as_str()
+                        .context("expected network shell")?
+                        .to_string(),
+                    "-c".to_string(),
+                    args["cmd"]
+                        .as_str()
+                        .context("expected network command")?
+                        .to_string(),
+                ]
+            } else {
                 vec!["network-access".to_string(), expected_target.to_string()]
-            );
+            };
+            assert_eq!(approval.command, expected_command);
             assert_eq!(
                 approval.network_approval_context,
                 Some(NetworkApprovalContext {

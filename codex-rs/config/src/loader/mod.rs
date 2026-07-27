@@ -100,7 +100,9 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 /// - user      `${CODEX_HOME}/config.toml`
 /// - profile   `${CODEX_HOME}/<name>.config.toml`, when selected
 /// - cwd       `${PWD}/config.toml` (loaded but disabled when the directory is untrusted)
-/// - tree      parent directories up to root looking for `./.codex/config.toml` (loaded but disabled when untrusted)
+/// - tree      parent directories up to root looking for the product's project
+///   config folder (`./.openinterpreter/config.toml` for Open Interpreter,
+///   `./.codex/config.toml` for Codex; loaded but disabled when untrusted)
 /// - repo      `$(git rev-parse --show-toplevel)/.codex/config.toml` (loaded but disabled when untrusted)
 /// - runtime   e.g., --config flags, model selector in UI
 ///
@@ -912,7 +914,18 @@ impl ProjectTrustContext {
         }
 
         let relative_dir = dir.as_path().strip_prefix(checkout_root.as_path()).ok()?;
-        Some(repo_root.join(relative_dir).join(".codex"))
+        Some(repo_root.join(relative_dir).join(project_config_dir_name()))
+    }
+}
+
+/// Returns the project-local config folder for the active product.
+///
+/// Keeping these folders distinct prevents Open Interpreter from consuming
+/// Codex-specific project configuration and credentials.
+fn project_config_dir_name() -> &'static str {
+    match codex_product_info::Product::current() {
+        codex_product_info::Product::Codex => ".codex",
+        codex_product_info::Product::OpenInterpreter => ".openinterpreter",
     }
 }
 
@@ -1221,7 +1234,7 @@ async fn load_project_layers(
     let mut layers = Vec::new();
     let mut startup_warnings = Vec::new();
     for dir in dirs {
-        let dot_codex_abs = dir.join(".codex");
+        let dot_codex_abs = dir.join(project_config_dir_name());
         let dot_codex_uri = PathUri::from_abs_path(&dot_codex_abs);
         if !fs
             .get_metadata(&dot_codex_uri, /*sandbox*/ None)

@@ -424,15 +424,15 @@ jobs:
           if [[ "${{ inputs.test_threads }}" != "0" ]]; then
             nextest_args+=(--test-threads "${{ inputs.test_threads }}")
           elif [[ "${{ inputs.remote_env }}" == "true" ]]; then
-            # The remote lane validates the codex-core integration suite, which
-            # is where TestCodex selects the shared exec-server. Do not run
-            # unrelated crate unit tests under CODEX_TEST_ENVIRONMENT=docker:
-            # they neither exercise the remote executor nor expect its global
-            # environment. Serialize this suite because every test process in
-            # a shard shares one exec-server transport and process-id space.
+            # CODEX_TEST_ENVIRONMENT=docker changes the default executor for
+            # every test process. Run only tests that explicitly opt into the
+            # remote fixture; ordinary codex-core tests validate local behavior
+            # on the other platform lanes. Serialize this suite because every
+            # test process in a shard shares one exec-server transport and
+            # process-id space.
             nextest_args+=(
               --test-threads 1
-              --filter-expr 'package(codex-core) & binary(all)'
+              --filter-expr 'package(codex-core) & binary(all) & test(/^(multi_environment_thread_loads_every_project_and_keeps_creation_snapshot|apply_patch_turn_diff_tracks_local_and_remote_environment_paths|approved_network_host_for_one_environment_still_prompts_in_another|apply_patch_approvals_are_remembered_per_environment|apply_patch_freeform_routes_to_selected_remote_environment|apply_patch_intercepted_exec_command_routes_to_selected_remote_environment|exec_command_routes_to_selected_remote_environment|explicit_remote_shell_runs_in_remote_cwd|remote_exec_materializes_target_roots_before_sandbox_selection|remote_request_permissions_grant_unblocks_later_remote_exec|remote_test_env_can_connect_and_use_filesystem|remote_test_env_copy_preserves_symlink_source|remote_test_env_exposes_target_shell_to_model|remote_test_env_remove_removes_symlink_not_target|remote_test_env_sandboxed_read_allows_readable_root|remote_test_env_sandboxed_read_rejects_symlink_parent_dotdot_escape|remote_stdio_env_var_source_does_not_copy_local_env|view_image_routes_to_selected_remote_environment)$/)'
             )
           fi
 
