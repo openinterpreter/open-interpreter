@@ -89,6 +89,17 @@ wire_api = "chat"
 
 使用 `wire_api = "responses"` 为 OpenAI Responses‑compatible 提供商，`wire_api = "chat"` 为兼容 OpenAI 的 chat‑completions 提供商，`wire_api = "messages"` 仅用于兼容 Anthropic Messages 的提供商。
 
+例如，托管的 [app.nz](https://app.nz/) 网关是兼容 OpenAI 的 chat-completions
+提供商，其 `app/auto` 模型会在上游提供商之间自动路由：
+
+```toml
+[model_providers.appnz]
+name = "app.nz"
+base_url = "https://app.nz/v1"
+env_key = "APPNZ_API_KEY"
+wire_api = "chat"
+```
+
 ## 身份验证
 
 提供商的身份验证可以来源于：

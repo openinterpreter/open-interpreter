@@ -126,6 +126,24 @@ wire_api = "responses"
 
 提供商凭证通常应来自环境变量或凭证存储，而不是内联令牌。
 
+### app.nz
+
+[app.nz](https://app.nz/) 是一个托管的 OpenAI 兼容网关。可以将它添加为自定义
+chat-completions 提供商，并将 `model` 指向其 `app/auto` 自动路由器：
+
+```toml
+model_provider = "appnz"
+model = "app/auto"
+
+[model_providers.appnz]
+name = "app.nz"
+base_url = "https://app.nz/v1"
+env_key = "APPNZ_API_KEY"
+wire_api = "chat"
+```
+
+将 `APPNZ_API_KEY` 设置为你的 app.nz API 密钥。
+
 ## Harness
 
 Open Interpreter 增加了 `harness` 设置，用于兼容模式，使代理的交互界面类似其他编码 harness，同时仍在原生 Open Interpreter 运行时中运行。

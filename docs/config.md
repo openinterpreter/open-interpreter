@@ -132,9 +132,9 @@ credential store rather than inline tokens.
 
 ### app.nz
 
-[app.nz](https://app.nz/docs) is a hosted OpenAI-compatible gateway. Add it as
-a custom chat-completions provider and point `model` at its auto-router
-(`app/auto`) or any `provider/model`:
+[app.nz](https://app.nz/) is a hosted OpenAI-compatible gateway. Add it as a
+custom chat-completions provider and point `model` at its `app/auto`
+auto-router:
 
 ```toml
 model_provider = "appnz"
@@ -147,9 +147,7 @@ env_key = "APPNZ_API_KEY"
 wire_api = "chat"
 ```
 
-Set `APPNZ_API_KEY` to your `app_live_...` key. Routing variants such as
-`app/auto-code`, `app/auto-reasoning`, `app/auto-fast`, `app/auto-cheap`, and
-`app/auto-vision` are also valid `model` values.
+Set `APPNZ_API_KEY` to your app.nz API key.
 
 ## Harness
 

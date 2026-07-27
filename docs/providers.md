@@ -103,7 +103,7 @@ Use `wire_api = "responses"` for OpenAI Responses-compatible providers,
 `wire_api = "chat"` for OpenAI-compatible chat-completions providers, and
 `wire_api = "messages"` only for Anthropic Messages-compatible providers.
 
-For example, the hosted [app.nz](https://app.nz/docs) gateway is an
+For example, the hosted [app.nz](https://app.nz/) gateway is an
 OpenAI-compatible chat-completions provider whose `app/auto` model auto-routes
 across upstream providers:
 
