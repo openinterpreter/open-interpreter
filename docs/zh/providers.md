@@ -23,6 +23,10 @@ description: 选择提供商，连接账户或 API 密钥，并为其模型使�
 
 这些指南涵盖提供商 ID、当前模型选择路径、API 或订阅设置、harness 行为、直接 CLI 使用以及常见错误。
 
+Google AI Studio 可通过提供商 `google` 使用。设置 `GEMINI_API_KEY`，然后在
+`/model` 中选择 Google 和当前的 Gemini 模型。请求使用 Google 兼容 OpenAI
+的 Chat Completions 端点以及通用 chat harness。
+
 ## 提供商、模型和 Harness
 
 排查问题时请保持这三层分离：

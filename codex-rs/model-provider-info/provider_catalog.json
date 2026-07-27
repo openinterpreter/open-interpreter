@@ -318,35 +318,299 @@
     },
     {
       "id": "google",
-      "name": "Google AI Studio",
+      "name": "Google",
       "env_key": "GEMINI_API_KEY",
       "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
       "wire_api": "chat",
       "sort_priority": 3,
       "models": [
         {
-          "id": "gemini-3.5-flash",
-          "display_name": "Gemini 3.5 Flash",
-          "description": "gemini-flash • Reasoning • Tool calling • Image input • PDF input",
+          "id": "gemini-2.5-computer-use-preview-10-2025",
+          "display_name": "Gemini 2.5 Computer Use Preview 10-2025",
+          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 131072,
+          "priority": 0
+        },
+        {
+          "id": "deep-research-preview-04-2026",
+          "display_name": "Deep Research Preview (Apr-21-2026)",
+          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 131072,
+          "priority": 1
+        },
+        {
+          "id": "gemini-flash-latest",
+          "display_name": "Gemini Flash Latest",
+          "description": "gemini-flash \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
           "reasoning": true,
           "input_modalities": [
             "text",
             "image"
           ],
           "context_window": 1048576,
-          "priority": 0
+          "priority": 3
+        },
+        {
+          "id": "gemini-3.5-flash",
+          "display_name": "Gemini 3.5 Flash",
+          "description": "gemini-flash \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 6
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "display_name": "Gemini 2.5 Flash",
+          "description": "gemini-flash \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 7
+        },
+        {
+          "id": "gemini-3.5-flash-lite",
+          "display_name": "Gemini 3.5 Flash Lite",
+          "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 8
+        },
+        {
+          "id": "deep-research-max-preview-04-2026",
+          "display_name": "Deep Research Max Preview (Apr-21-2026)",
+          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 131072,
+          "priority": 12
+        },
+        {
+          "id": "gemini-3.1-flash-lite-preview",
+          "display_name": "Gemini 3.1 Flash Lite Preview",
+          "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 14
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "display_name": "Gemini 3 Flash Preview",
+          "description": "gemini-flash \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 16
+        },
+        {
+          "id": "gemini-3.1-pro-preview-customtools",
+          "display_name": "Gemini 3.1 Pro Preview Custom Tools",
+          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 17
+        },
+        {
+          "id": "gemini-3.1-flash-lite-image",
+          "display_name": "Nano Banana 2 Lite",
+          "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 65536,
+          "priority": 18
+        },
+        {
+          "id": "gemini-robotics-er-1.6-preview",
+          "display_name": "Gemini Robotics-ER 1.6 Preview",
+          "description": "gemini \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 131072,
+          "priority": 20
+        },
+        {
+          "id": "gemma-4-26b-a4b-it",
+          "display_name": "Gemma 4 26B A4B IT",
+          "description": "gemma \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 21
+        },
+        {
+          "id": "gemini-2.0-flash",
+          "display_name": "Gemini 2.0 Flash",
+          "description": "gemini-flash \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": false,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 24
+        },
+        {
+          "id": "gemini-3.6-flash",
+          "display_name": "Gemini 3.6 Flash",
+          "description": "gemini-flash \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 25
+        },
+        {
+          "id": "gemini-3.1-flash-lite",
+          "display_name": "Gemini 3.1 Flash Lite",
+          "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 27
+        },
+        {
+          "id": "gemma-4-31b-it",
+          "display_name": "Gemma 4 31B IT",
+          "description": "gemma \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 28
         },
         {
           "id": "gemini-3.1-pro-preview",
           "display_name": "Gemini 3.1 Pro Preview",
-          "description": "gemini-pro • Reasoning • Tool calling • Image input • PDF input",
+          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
           "reasoning": true,
           "input_modalities": [
             "text",
             "image"
           ],
           "context_window": 1048576,
-          "priority": 1
+          "priority": 33
+        },
+        {
+          "id": "gemini-flash-lite-latest",
+          "display_name": "Gemini Flash-Lite Latest",
+          "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 34
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "display_name": "Gemini 2.5 Pro",
+          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 35
+        },
+        {
+          "id": "gemini-3-pro-preview",
+          "display_name": "Gemini 3 Pro Preview",
+          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 36
+        },
+        {
+          "id": "gemini-2.5-flash-lite",
+          "display_name": "Gemini 2.5 Flash-Lite",
+          "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 37
+        },
+        {
+          "id": "gemini-2.0-flash-lite",
+          "display_name": "Gemini 2.0 Flash-Lite",
+          "description": "gemini-flash-lite \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": false,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 39
+        },
+        {
+          "id": "gemini-3.1-flash-live-preview",
+          "display_name": "Gemini 3.1 Flash Live Preview",
+          "description": "gemini-flash \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 131072,
+          "priority": 40
         }
       ]
     },

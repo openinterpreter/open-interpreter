@@ -29,6 +29,10 @@ override it with `/harness`.
 These guides cover the provider IDs, current model-selection path, API or
 subscription setup, harness behavior, direct CLI use, and common mistakes.
 
+Google AI Studio is available as provider `google`. Set `GEMINI_API_KEY`, then
+select Google and a current Gemini model with `/model`. Requests use Google's
+OpenAI-compatible Chat Completions endpoint and the generic chat harness.
+
 ## Provider, Model, and Harness
 
 Keep the three layers separate when troubleshooting:
