@@ -802,6 +802,63 @@ function Test-VisibleCodexCommand {
     }
 }
 
+function Resolve-WindowsArchitecture {
+    param(
+        [AllowNull()]
+        [string]$RuntimeArchitecture,
+        [AllowNull()]
+        [string]$Wow64Architecture,
+        [AllowNull()]
+        [string]$ProcessArchitecture
+    )
+
+    $rawArchitecture = if (-not [string]::IsNullOrWhiteSpace($RuntimeArchitecture)) {
+        $RuntimeArchitecture
+    } elseif (-not [string]::IsNullOrWhiteSpace($Wow64Architecture)) {
+        $Wow64Architecture
+    } else {
+        $ProcessArchitecture
+    }
+
+    switch -Regex ([string]$rawArchitecture) {
+        "^(?i:arm64)$" { return "Arm64" }
+        "^(?i:(?:amd64|x64))$" { return "X64" }
+        default { throw "Unsupported architecture: $rawArchitecture" }
+    }
+}
+
+function Get-WindowsRuntimeArchitecture {
+    try {
+        $runtimeInformation = [type]::GetType(
+            "System.Runtime.InteropServices.RuntimeInformation, System.Runtime.InteropServices.RuntimeInformation",
+            $false
+        )
+        if ($null -eq $runtimeInformation) {
+            $runtimeInformation = [AppDomain]::CurrentDomain.GetAssemblies() |
+                ForEach-Object {
+                    $_.GetType("System.Runtime.InteropServices.RuntimeInformation", $false)
+                } |
+                Where-Object { $null -ne $_ } |
+                Select-Object -First 1
+        }
+        if ($null -eq $runtimeInformation) {
+            return $null
+        }
+
+        $property = $runtimeInformation.GetProperty(
+            "OSArchitecture",
+            [System.Reflection.BindingFlags]"Public,Static"
+        )
+        if ($null -eq $property) {
+            return $null
+        }
+
+        return $property.GetValue($null).ToString()
+    } catch {
+        return $null
+    }
+}
+
 if ($env:OS -ne "Windows_NT") {
     Write-Error "install.ps1 supports Windows only. Use install.sh on macOS or Linux."
     exit 1
@@ -812,33 +869,10 @@ if (-not [Environment]::Is64BitOperatingSystem) {
     exit 1
 }
 
-# Prefer RuntimeInformation.OSArchitecture when present. Under Set-StrictMode
-# some Windows/PowerShell combinations throw PropertyNotFoundException for that
-# static property (see #1821), so fall back to PROCESSOR_ARCHITECTURE.
-$architecture = $null
-$runtimeInformation = [type]::GetType("System.Runtime.InteropServices.RuntimeInformation")
-if ($null -ne $runtimeInformation -and $null -ne $runtimeInformation.GetProperty("OSArchitecture")) {
-    try {
-        $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-    } catch {
-        $architecture = $null
-    }
-}
-if ([string]::IsNullOrWhiteSpace($architecture)) {
-    $rawArch = if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITEW6432)) {
-        $env:PROCESSOR_ARCHITEW6432
-    } else {
-        $env:PROCESSOR_ARCHITECTURE
-    }
-    switch -Regex ($rawArch) {
-        "^(?i)ARM64$" { $architecture = "Arm64" }
-        "^(?i)AMD64$" { $architecture = "X64" }
-        default {
-            Write-Error "Unsupported architecture: $rawArch"
-            exit 1
-        }
-    }
-}
+$architecture = Resolve-WindowsArchitecture `
+    (Get-WindowsRuntimeArchitecture) `
+    $env:PROCESSOR_ARCHITEW6432 `
+    $env:PROCESSOR_ARCHITECTURE
 
 $target = $null
 $platformLabel = $null
