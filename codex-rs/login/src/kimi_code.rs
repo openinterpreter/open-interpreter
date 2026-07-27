@@ -230,7 +230,28 @@ fn device_id_path(codex_home: &Path) -> PathBuf {
 }
 
 fn load_token(codex_home: &Path) -> Result<KimiCodeToken, KimiCodeAuthError> {
+    create_credentials_dir(&credentials_dir(codex_home))
+        .map_err(KimiCodeAuthError::CredentialsDir)?;
     let path = credentials_path(codex_home);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(KimiCodeAuthError::CredentialsRead(io::Error::other(
+                "credential file must not be a symbolic link",
+            )));
+        }
+        #[cfg(unix)]
+        Ok(_) => {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .map_err(KimiCodeAuthError::CredentialsRead)?;
+        }
+        #[cfg(not(unix))]
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(KimiCodeAuthError::MissingCredentials);
+        }
+        Err(err) => return Err(KimiCodeAuthError::CredentialsRead(err)),
+    }
     let raw = fs::read_to_string(path).map_err(|err| {
         if err.kind() == io::ErrorKind::NotFound {
             KimiCodeAuthError::MissingCredentials
@@ -248,14 +269,19 @@ fn save_token(codex_home: &Path, token: KimiCodeToken) -> Result<(), KimiCodeAut
     let temp_path = path.with_extension("json.tmp");
     let contents = serde_json::to_vec(&token).map_err(KimiCodeAuthError::CredentialsParse)?;
     write_private_file(&temp_path, &contents).map_err(KimiCodeAuthError::CredentialsWrite)?;
+    #[cfg(windows)]
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(KimiCodeAuthError::CredentialsWrite(err)),
+    }
     fs::rename(temp_path, path).map_err(KimiCodeAuthError::CredentialsWrite)?;
     Ok(())
 }
 
 /// Creates `dir` and any missing parents, restricted to the current user
-/// (`0o700`) on Unix. Mirrors the owner-only handling used for `auth.json`, and
-/// also tightens a directory that an earlier version may have left world- or
-/// group-readable.
+/// (`0o700`) on Unix. Also tightens a directory that an earlier version may
+/// have left world- or group-readable.
 fn create_credentials_dir(dir: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -265,6 +291,12 @@ fn create_credentials_dir(dir: &Path) -> io::Result<()> {
         builder.mode(0o700);
     }
     builder.create(dir)?;
+    let metadata = fs::symlink_metadata(dir)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(io::Error::other(
+            "credential directory must be a real directory",
+        ));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -468,6 +500,17 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
 
+    fn test_token() -> KimiCodeToken {
+        KimiCodeToken {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: 123,
+            scope: "scope".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 456,
+        }
+    }
+
     #[test]
     fn refresh_threshold_uses_half_lifetime_or_minimum_floor() {
         let token = KimiCodeToken {
@@ -490,14 +533,7 @@ mod tests {
     #[test]
     fn save_and_load_token_round_trip() {
         let temp_dir = tempdir().expect("tempdir");
-        let token = KimiCodeToken {
-            access_token: "access".to_string(),
-            refresh_token: "refresh".to_string(),
-            expires_at: 123,
-            scope: "scope".to_string(),
-            token_type: "Bearer".to_string(),
-            expires_in: 456,
-        };
+        let token = test_token();
         save_token(temp_dir.path(), token.clone()).expect("save token");
         let loaded = load_token(temp_dir.path()).expect("load token");
         assert_eq!(loaded, token);
@@ -509,15 +545,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp_dir = tempdir().expect("tempdir");
-        let token = KimiCodeToken {
-            access_token: "access".to_string(),
-            refresh_token: "refresh".to_string(),
-            expires_at: 123,
-            scope: "scope".to_string(),
-            token_type: "Bearer".to_string(),
-            expires_in: 456,
-        };
-        save_token(temp_dir.path(), token).expect("save token");
+        save_token(temp_dir.path(), test_token()).expect("save token");
 
         let file_mode = std::fs::metadata(credentials_path(temp_dir.path()))
             .expect("credentials metadata")
@@ -551,15 +579,7 @@ mod tests {
         std::fs::set_permissions(&stale_temp, std::fs::Permissions::from_mode(0o644))
             .expect("chmod stale temp");
 
-        let token = KimiCodeToken {
-            access_token: "access".to_string(),
-            refresh_token: "refresh".to_string(),
-            expires_at: 123,
-            scope: "scope".to_string(),
-            token_type: "Bearer".to_string(),
-            expires_in: 456,
-        };
-        save_token(temp_dir.path(), token).expect("save token");
+        save_token(temp_dir.path(), test_token()).expect("save token");
 
         let file_mode = std::fs::metadata(credentials_path(temp_dir.path()))
             .expect("credentials metadata")
@@ -574,5 +594,84 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(dir_mode, 0o700, "loose credentials dir must be tightened");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_token_repairs_preexisting_loose_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempdir().expect("tempdir");
+        let dir = credentials_dir(temp_dir.path());
+        std::fs::create_dir_all(&dir).expect("create dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod dir");
+        let path = credentials_path(temp_dir.path());
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&test_token()).expect("serialize token"),
+        )
+        .expect("write credentials");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod credentials");
+
+        assert_eq!(
+            load_token(temp_dir.path()).expect("load token"),
+            test_token()
+        );
+
+        let file_mode = std::fs::metadata(path)
+            .expect("credentials metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600, "loose credential file must be tightened");
+        let dir_mode = std::fs::metadata(dir)
+            .expect("credentials dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "loose credentials dir must be tightened");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_token_rejects_symlinked_credentials_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempdir().expect("tempdir");
+        let outside = tempdir().expect("outside tempdir");
+        symlink(outside.path(), credentials_dir(temp_dir.path())).expect("symlink credentials dir");
+
+        let error = save_token(temp_dir.path(), test_token()).expect_err("reject symlink");
+        assert!(matches!(error, KimiCodeAuthError::CredentialsDir(_)));
+        assert!(
+            !outside.path().join(KIMI_CODE_CREDENTIALS_FILE).exists(),
+            "must not write through a symlinked credentials directory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_token_replaces_file_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempdir().expect("tempdir");
+        let dir = credentials_dir(temp_dir.path());
+        std::fs::create_dir_all(&dir).expect("create credentials dir");
+        let outside_dir = tempdir().expect("outside tempdir");
+        let outside = outside_dir.path().join("target");
+        std::fs::write(&outside, b"do not replace").expect("write target");
+        symlink(&outside, credentials_path(temp_dir.path())).expect("symlink credentials file");
+
+        save_token(temp_dir.path(), test_token()).expect("save token");
+
+        assert_eq!(
+            std::fs::read(&outside).expect("read target"),
+            b"do not replace"
+        );
+        assert_eq!(
+            load_token(temp_dir.path()).expect("load token"),
+            test_token()
+        );
     }
 }
