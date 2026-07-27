@@ -17,9 +17,6 @@ use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 #[cfg(test)]
 use crate::session::PreviousTurnSettings;
-
-pub(crate) const KIMI_CLI_COMPACTION_SYSTEM_PROMPT: &str =
-    "You are a helpful assistant that compacts conversation context.";
 use crate::session::session::Session;
 use crate::session::turn::get_last_assistant_message_from_turn;
 use crate::session::turn_context::TurnContext;
@@ -42,7 +39,11 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+
+pub(crate) const KIMI_CLI_COMPACTION_SYSTEM_PROMPT: &str =
+    include_str!("harness/kimi_cli_compaction_prompt.md");
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
 use codex_rollout_trace::InferenceTraceContext;
@@ -138,19 +139,9 @@ pub(crate) async fn run_compact_task(
         trace_id: turn_context.trace_id.clone(),
         started_at: turn_context.turn_timing_state.started_at_unix_secs().await,
         model_context_window: turn_context.model_context_window(),
-        collaboration_mode_kind: turn_context.collaboration_mode.mode,
+        collaboration_mode_kind: turn_context.mode,
     });
     sess.send_event(&turn_context, start_event).await;
-    if should_skip_zcode_manual_compact(sess.as_ref(), turn_context.as_ref()).await {
-        sess.send_event(
-            &turn_context,
-            EventMsg::Warning(WarningEvent {
-                message: "Context is up to date; no compression needed".to_string(),
-            }),
-        )
-        .await;
-        return Ok(());
-    }
     run_compact_task_inner(
         sess.clone(),
         turn_context,
@@ -162,40 +153,6 @@ pub(crate) async fn run_compact_task(
     )
     .await?;
     Ok(())
-}
-
-pub(crate) async fn should_skip_zcode_manual_compact(
-    sess: &Session,
-    turn_context: &TurnContext,
-) -> bool {
-    if turn_context.config.harness.as_deref() != Some("zcode") {
-        return false;
-    }
-    let history = sess.clone_history().await;
-    !history
-        .raw_items()
-        .iter()
-        .any(is_zcode_compactable_history_item)
-}
-
-fn is_zcode_compactable_history_item(item: &ResponseItem) -> bool {
-    matches!(
-        item,
-        ResponseItem::Message { role, .. } if role == "assistant"
-    ) || matches!(
-        item,
-        ResponseItem::Reasoning { .. }
-            | ResponseItem::FunctionCall { .. }
-            | ResponseItem::FunctionCallOutput { .. }
-            | ResponseItem::AgentMessage { .. }
-            | ResponseItem::CustomToolCall { .. }
-            | ResponseItem::CustomToolCallOutput { .. }
-            | ResponseItem::LocalShellCall { .. }
-            | ResponseItem::ToolSearchCall { .. }
-            | ResponseItem::ToolSearchOutput { .. }
-            | ResponseItem::WebSearchCall { .. }
-            | ResponseItem::ImageGenerationCall { .. }
-    )
 }
 
 async fn run_compact_task_inner(
@@ -309,11 +266,6 @@ async fn run_compact_task_inner_impl(
         let prompt = Prompt {
             input: turn_input,
             base_instructions: sess.get_base_instructions().await,
-            cwd: turn_context
-                .environments
-                .primary()
-                .and_then(|environment| environment.cwd().to_abs_path().ok())
-                .map(codex_utils_absolute_path::AbsolutePathBuf::into_path_buf),
             ..Default::default()
         };
         let attempt_result = drain_to_completed(
@@ -355,7 +307,7 @@ async fn run_compact_task_inner_impl(
                 return Err(e);
             }
             Err(e) => {
-                if should_retry_failed_compact(turn_context.as_ref()) && retries < max_retries {
+                if retries < max_retries {
                     retries += 1;
                     let delay = backoff(retries);
                     sess.notify_stream_error(
@@ -367,9 +319,6 @@ async fn run_compact_task_inner_impl(
                     tokio::time::sleep(delay).await;
                     continue;
                 } else {
-                    if should_advance_window_after_failed_compact(turn_context.as_ref()) {
-                        sess.advance_auto_compact_window().await;
-                    }
                     sess.track_turn_codex_error(turn_context.as_ref(), &e);
                     let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
                     sess.send_event(&turn_context, event).await;
@@ -390,6 +339,11 @@ async fn run_compact_task_inner_impl(
         &user_messages,
         &summary_suffix,
     );
+    if let Some(summary_item) = new_history.last_mut() {
+        // This replacement history skips `record_conversation_items`; only the appended summary
+        // belongs to this compaction turn.
+        summary_item.set_turn_id_if_missing(&turn_context.sub_id);
+    }
     let (window_number, window_ids) = sess.advance_auto_compact_window().await;
 
     let (initial_context, world_state_baseline) = build_compaction_initial_context(
@@ -435,14 +389,6 @@ async fn run_compact_task_inner_impl(
     Ok(summary_suffix)
 }
 
-fn should_advance_window_after_failed_compact(turn_context: &TurnContext) -> bool {
-    turn_context.config.harness.as_deref() == Some("zcode")
-}
-
-fn should_retry_failed_compact(turn_context: &TurnContext) -> bool {
-    turn_context.config.harness.as_deref() != Some("zcode")
-}
-
 pub(crate) struct CompactionAnalyticsAttempt {
     thread_id: String,
     turn_id: String,
@@ -461,6 +407,7 @@ pub(crate) struct CompactionAnalyticsDetails {
     pub(crate) retained_image_count: Option<usize>,
     pub(crate) compaction_summary_tokens: Option<i64>,
     pub(crate) cached_input_tokens: Option<i64>,
+    pub(crate) cache_write_input_tokens: Option<i64>,
 }
 
 impl CompactionAnalyticsAttempt {
@@ -498,6 +445,7 @@ impl CompactionAnalyticsAttempt {
             retained_image_count,
             compaction_summary_tokens,
             cached_input_tokens,
+            cache_write_input_tokens,
         } = details;
         let active_context_tokens_before =
             active_context_tokens_before.unwrap_or(self.active_context_tokens_before);
@@ -521,6 +469,7 @@ impl CompactionAnalyticsAttempt {
                 retained_image_count,
                 compaction_summary_tokens,
                 cached_input_tokens,
+                cache_write_input_tokens,
                 started_at: self.started_at,
                 completed_at: now_unix_seconds(),
                 duration_ms: Some(
@@ -547,7 +496,7 @@ pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
                     pieces.push(text.as_str());
                 }
             }
-            ContentItem::InputImage { .. } => {}
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {}
         }
     }
     if pieces.is_empty() {
@@ -975,7 +924,19 @@ async fn drain_to_completed(
             Ok(ResponseEvent::RateLimits(snapshot)) => {
                 sess.update_rate_limits(turn_context, snapshot).await;
             }
-            Ok(ResponseEvent::Completed { token_usage, .. }) => {
+            Ok(ResponseEvent::Completed {
+                response_id,
+                token_usage,
+                ..
+            }) => {
+                sess.send_event(
+                    turn_context,
+                    EventMsg::RawResponseCompleted(RawResponseCompletedEvent {
+                        response_id,
+                        token_usage: token_usage.clone(),
+                    }),
+                )
+                .await;
                 sess.update_token_usage_info(turn_context, token_usage.as_ref())
                     .await?;
                 return Ok(());

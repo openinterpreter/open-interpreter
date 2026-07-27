@@ -29,10 +29,6 @@ pub struct ConfigProfile {
     /// The key in the `model_providers` map identifying the
     /// [`ModelProviderInfo`] to use.
     pub model_provider: Option<String>,
-    /// Optional harness family to emulate for this profile, such as `claude-code`.
-    pub harness: Option<String>,
-    /// Whether to include Open Interpreter guidance for the selected harness.
-    pub harness_guidance: Option<bool>,
     pub approval_policy: Option<AskForApproval>,
     pub approvals_reviewer: Option<ApprovalsReviewer>,
     pub sandbox_mode: Option<SandboxMode>,

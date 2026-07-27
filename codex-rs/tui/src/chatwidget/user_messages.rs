@@ -21,6 +21,8 @@ use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::models::local_image_label_text;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
+use codex_utils_plugins::mention_syntax::PLUGIN_TEXT_MENTION_SIGIL;
+use codex_utils_plugins::mention_syntax::TOOL_MENTION_SIGIL;
 
 use super::ChatWidget;
 
@@ -121,6 +123,7 @@ impl ThreadComposerState {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ThreadInputState {
     pub(super) composer: Option<ThreadComposerState>,
+    pub(super) safety_buffering_prompt: Option<UserMessage>,
     pub(super) pending_steers: VecDeque<UserMessage>,
     pub(super) pending_steer_history_records: VecDeque<UserMessageHistoryRecord>,
     pub(super) pending_steer_compare_keys: VecDeque<PendingSteerCompareKey>,
@@ -129,10 +132,16 @@ pub(crate) struct ThreadInputState {
     pub(super) queued_user_messages: VecDeque<QueuedUserMessage>,
     pub(super) queued_user_message_history_records: VecDeque<UserMessageHistoryRecord>,
     pub(super) user_turn_pending_start: bool,
+    pub(super) submit_pending_steers_after_interrupt: bool,
     pub(super) current_collaboration_mode: CollaborationMode,
     pub(super) active_collaboration_mask: Option<CollaborationModeMask>,
     pub(super) task_running: bool,
     pub(super) agent_turn_running: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ThreadInputStateRestoreMode {
+    pub(crate) preserve_in_flight_turn: bool,
 }
 
 impl From<String> for UserMessage {
@@ -524,11 +533,73 @@ pub(super) fn merge_user_messages_with_history_record(
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct UserMessageDisplay {
-    pub(super) message: String,
-    pub(super) remote_image_urls: Vec<String>,
-    pub(super) local_images: Vec<PathBuf>,
-    pub(super) text_elements: Vec<TextElement>,
+pub(crate) struct UserMessageDisplay {
+    pub(crate) message: String,
+    pub(crate) remote_image_urls: Vec<String>,
+    pub(crate) local_images: Vec<PathBuf>,
+    pub(crate) text_elements: Vec<TextElement>,
+}
+
+pub(crate) fn mention_bindings_from_user_inputs(
+    items: &[UserInput],
+    message: &str,
+) -> Vec<MentionBinding> {
+    let mention_start = |sigil: char, mention: &str| {
+        let token = format!("{sigil}{mention}");
+        message.match_indices(&token).find_map(|(start, _)| {
+            let end = start + token.len();
+            message
+                .as_bytes()
+                .get(end)
+                .is_none_or(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'-'))
+                .then_some(start)
+        })
+    };
+    let mut mention_bindings: Vec<MentionBinding> = items
+        .iter()
+        .filter_map(|item| match item {
+            UserInput::Skill { name, path } => Some(MentionBinding {
+                sigil: TOOL_MENTION_SIGIL,
+                mention: name.clone(),
+                path: path.to_string_lossy().into_owned(),
+            }),
+            UserInput::Mention { name, path } => {
+                let plugin_id = path.strip_prefix("plugin://");
+                let mention = if let Some(plugin_id) = plugin_id {
+                    plugin_id
+                        .split_once('@')
+                        .map(|(plugin_name, _)| plugin_name)
+                        .unwrap_or(plugin_id)
+                        .to_string()
+                } else if path.starts_with("app://") {
+                    codex_connectors::metadata::connector_mention_slug_from_name(name)
+                } else {
+                    name.clone()
+                };
+                let sigil = if plugin_id.is_some()
+                    && mention_start(PLUGIN_TEXT_MENTION_SIGIL, &mention).is_some()
+                {
+                    PLUGIN_TEXT_MENTION_SIGIL
+                } else {
+                    TOOL_MENTION_SIGIL
+                };
+                Some(MentionBinding {
+                    sigil,
+                    mention,
+                    path: path.clone(),
+                })
+            }
+            UserInput::Text { .. }
+            | UserInput::Image { .. }
+            | UserInput::LocalImage { .. }
+            | UserInput::Audio { .. }
+            | UserInput::LocalAudio { .. } => None,
+        })
+        .collect();
+    mention_bindings.sort_by_key(|binding| {
+        mention_start(binding.sigil, &binding.mention).unwrap_or(usize::MAX)
+    });
+    mention_bindings
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -588,7 +659,10 @@ impl ChatWidget {
             match item {
                 UserInput::Text { text, .. } => message.push_str(text),
                 UserInput::Image { .. } | UserInput::LocalImage { .. } => image_count += 1,
-                UserInput::Skill { .. } | UserInput::Mention { .. } => {}
+                UserInput::Audio { .. } // TODO: Include audio inputs in pending steer comparison.
+                | UserInput::LocalAudio { .. } // TODO: Include audio inputs in pending steer comparison.
+                | UserInput::Skill { .. }
+                | UserInput::Mention { .. } => {}
             }
         }
 
@@ -598,7 +672,13 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn user_message_display_from_inputs(items: &[UserInput]) -> UserMessageDisplay {
+    pub(crate) fn user_message_display_from_inputs(items: &[UserInput]) -> UserMessageDisplay {
+        if items
+            .iter()
+            .any(|item| matches!(item, UserInput::Audio { .. } | UserInput::LocalAudio { .. }))
+        {
+            tracing::warn!("audio user inputs are not supported by the TUI and will be omitted");
+        }
         let mut message = String::new();
         let mut remote_image_urls = Vec::new();
         let mut local_images = Vec::new();
@@ -627,7 +707,10 @@ impl ChatWidget {
                 ),
                 UserInput::Image { url, .. } => remote_image_urls.push(url.clone()),
                 UserInput::LocalImage { path, .. } => local_images.push(path.clone()),
-                UserInput::Skill { .. } | UserInput::Mention { .. } => {}
+                UserInput::Audio { .. } // TODO: Include audio inputs in the user message display.
+                | UserInput::LocalAudio { .. } // TODO: Include audio inputs in the user message display.
+                | UserInput::Skill { .. }
+                | UserInput::Mention { .. } => {}
             }
         }
 

@@ -147,10 +147,8 @@ impl ViewImageHandler {
             ))
         })?;
         let model_visible_path = path_uri.inferred_native_path_string();
-        let sandbox = turn.file_system_sandbox_context(
-            /*additional_permissions*/ None,
-            turn_environment.cwd(),
-        );
+        let sandbox = turn
+            .file_system_sandbox_context(/*additional_permissions*/ None, turn_environment);
         let fs = turn_environment.environment.get_filesystem();
 
         let metadata = fs
@@ -246,6 +244,7 @@ impl ToolOutput for ViewImageOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::environment_selection::TurnEnvironmentState;
     use crate::session::step_context::StepContext;
     use crate::session::tests::make_session_and_context;
     use crate::session::turn_context::TurnEnvironment;
@@ -264,16 +263,17 @@ mod tests {
     fn replace_primary_environment_cwd(turn: &mut crate::TurnContext, cwd: AbsolutePathBuf) {
         let current = turn
             .environments
-            .turn_environments
-            .first()
+            .turn_environments()
+            .next()
             .cloned()
             .expect("default local turn environment");
-        turn.environments.turn_environments[0] = TurnEnvironment::new(
+        turn.environments.environments[0] = TurnEnvironmentState::Ready(TurnEnvironment::new(
             current.environment_id,
             current.environment,
             PathUri::from_abs_path(&cwd),
+            Vec::new(),
             current.shell,
-        );
+        ));
     }
 
     #[test]
@@ -382,7 +382,10 @@ mod tests {
         replace_primary_environment_cwd(&mut turn, image_cwd.clone());
         let image_path = image_cwd.join("image.png");
         std::fs::write(image_path.as_path(), b"not a real image").expect("write test image");
-        turn.permission_profile = PermissionProfile::Disabled;
+        Arc::make_mut(&mut turn.config)
+            .permissions
+            .set_permission_profile(PermissionProfile::Disabled)
+            .expect("set permission profile");
         let turn = Arc::new(turn);
 
         let result = ViewImageHandler::default()

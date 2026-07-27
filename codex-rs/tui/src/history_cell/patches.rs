@@ -43,11 +43,7 @@ pub(crate) fn new_patch_apply_failure(stderr: String) -> PlainHistoryCell {
 
     if !stderr.trim().is_empty() {
         let output = output_lines(
-            Some(&CommandOutput {
-                exit_code: 1,
-                formatted_output: String::new(),
-                aggregated_output: stderr,
-            }),
+            Some(&CommandOutput::new(/*exit_code*/ 1, stderr)),
             OutputLinesParams {
                 line_limit: TOOL_CALL_MAX_LINES,
                 only_err: true,

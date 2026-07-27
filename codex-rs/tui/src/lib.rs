@@ -1,7 +1,6 @@
 // Forbid accidental stdout/stderr writes in the *library* portion of the TUI.
 // The standalone `codex-tui` binary prints a short help message before the
 // alternate‑screen mode starts; that file opts‑out locally via `allow`.
-#![recursion_limit = "256"]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 #![deny(clippy::disallowed_methods)]
 use crate::legacy_core::config::Config;
@@ -14,6 +13,8 @@ use crate::legacy_core::config::resolve_bootstrap_auth_route_config;
 use crate::legacy_core::config::resolve_oss_provider;
 use crate::legacy_core::config::resolve_profile_v2_config_path;
 use crate::session_resume::ResolveCwdOutcome;
+use crate::session_resume::ResumeCwdContext;
+use crate::session_resume::effective_resume_cwd_mode;
 use crate::session_resume::resolve_cwd_for_resume_or_fork;
 pub use crate::startup_error::LocalStateDbStartupError;
 use additional_dirs::add_dir_warning_message;
@@ -42,6 +43,7 @@ use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLoadError;
 use codex_config::LoaderOverrides;
 use codex_config::format_config_error_with_source;
+use codex_config::types::ResumeCwdMode;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimePaths;
 use codex_login::AuthConfig;
@@ -117,6 +119,7 @@ mod exec_command;
 mod external_agent_config_migration;
 mod external_agent_config_migration_flow;
 mod external_agent_config_migration_model;
+mod external_agent_config_migration_source;
 mod external_editor;
 mod file_search;
 mod frames;
@@ -127,6 +130,7 @@ mod goal_files;
 mod history_cell;
 mod hooks_rpc;
 mod ide_context;
+mod inline_visualization;
 pub(crate) mod insert_history;
 pub use insert_history::insert_history_lines;
 mod key_hint;
@@ -761,11 +765,7 @@ fn config_cwd_for_app_server_target(
     app_server_target: &AppServerTarget,
     environment_manager: &EnvironmentManager,
 ) -> std::io::Result<Option<AbsolutePathBuf>> {
-    if app_server_target.uses_remote_workspace()
-        || environment_manager
-            .default_environment()
-            .is_some_and(|environment| environment.is_remote())
-    {
+    if uses_remote_workspace_or_environment(app_server_target, environment_manager) {
         return Ok(None);
     }
 
@@ -776,6 +776,65 @@ fn config_cwd_for_app_server_target(
         None => AbsolutePathBuf::current_dir(),
     }?;
     Ok(Some(cwd))
+}
+
+fn uses_remote_workspace_or_environment(
+    app_server_target: &AppServerTarget,
+    environment_manager: &EnvironmentManager,
+) -> bool {
+    app_server_target.uses_remote_workspace()
+        || environment_manager
+            .default_environment()
+            .is_some_and(|environment| environment.is_remote())
+}
+
+async fn resolve_startup_resume_or_fork_cwd(
+    tui: &mut Tui,
+    config: &Config,
+    state_db: Option<&codex_state::StateRuntime>,
+    session_selection: &resume_picker::SessionSelection,
+    cwd_override: Option<&Path>,
+    uses_remote_workspace: bool,
+    uses_remote_workspace_or_environment: bool,
+) -> color_eyre::Result<ResolveCwdOutcome> {
+    let Some((action, target_session)) = (match session_selection {
+        resume_picker::SessionSelection::Resume(target_session) => {
+            Some((CwdPromptAction::Resume, target_session))
+        }
+        resume_picker::SessionSelection::Fork(target_session) => {
+            Some((CwdPromptAction::Fork, target_session))
+        }
+        _ => None,
+    }) else {
+        return Ok(ResolveCwdOutcome::Continue(None));
+    };
+    let resume_cwd_mode = effective_resume_cwd_mode(config.tui_resume_cwd, cwd_override);
+    if uses_remote_workspace_or_environment
+        && cwd_override.is_none()
+        && matches!(resume_cwd_mode, Some(ResumeCwdMode::Current))
+    {
+        color_eyre::eyre::bail!(
+            "`tui.resume_cwd = \"current\"` requires `--cd` when using a remote workspace"
+        );
+    }
+    if uses_remote_workspace {
+        return Ok(ResolveCwdOutcome::Continue(Some(config.cwd.to_path_buf())));
+    }
+
+    resolve_cwd_for_resume_or_fork(
+        tui,
+        config,
+        state_db,
+        target_session,
+        action,
+        ResumeCwdContext {
+            current_cwd: config.cwd.as_path(),
+            remembered_current_cwd: config.cwd.as_path(),
+            allow_remember_current: !uses_remote_workspace_or_environment || cwd_override.is_some(),
+            mode: resume_cwd_mode,
+        },
+    )
+    .await
 }
 
 fn should_load_configured_environments(
@@ -1065,7 +1124,7 @@ pub async fn run_main(
         ..Default::default()
     };
 
-    let mut config = load_config_or_exit(
+    let config = load_config_or_exit(
         cli_kv_overrides.clone(),
         overrides.clone(),
         loader_overrides.clone(),
@@ -1108,37 +1167,6 @@ pub async fn run_main(
         let _ = codex_state::install_process_db_telemetry(telemetry);
     }
     let state_db = init_state_db_for_app_server_target(&config, &app_server_target).await?;
-
-    let effective_toml = config.config_layer_stack.effective_config();
-    match effective_toml.try_into() {
-        Ok(config_toml) => {
-            match codex_app_server_client::migrate_personality_if_needed(
-                &config.codex_home,
-                &config_toml,
-                state_db.clone(),
-            )
-            .await
-            {
-                Ok(true) => {
-                    config = load_config_or_exit(
-                        cli_kv_overrides.clone(),
-                        overrides.clone(),
-                        loader_overrides.clone(),
-                        cloud_config_bundle.clone(),
-                        strict_config,
-                    )
-                    .await;
-                }
-                Ok(false) => {}
-                Err(err) => {
-                    tracing::warn!(error = %err, "failed to run personality migration");
-                }
-            }
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to deserialize config for personality migration");
-        }
-    }
     let config_toml_log_dir_configured = config
         .config_layer_stack
         .effective_config()
@@ -1600,48 +1628,34 @@ async fn run_ratatui_app(
     };
 
     let current_cwd = config.cwd.clone();
-    let allow_prompt = !uses_remote_workspace && cli.cwd.is_none();
-    let action_and_target_session_if_resume_or_fork = match &session_selection {
-        resume_picker::SessionSelection::Resume(target_session) => {
-            Some((CwdPromptAction::Resume, target_session))
+    let fallback_cwd = match resolve_startup_resume_or_fork_cwd(
+        &mut tui,
+        &config,
+        state_db.as_deref(),
+        &session_selection,
+        cli.cwd.as_deref(),
+        uses_remote_workspace,
+        uses_remote_workspace_or_environment(&app_server_target, &environment_manager),
+    )
+    .await
+    {
+        Ok(ResolveCwdOutcome::Continue(cwd)) => cwd,
+        Ok(ResolveCwdOutcome::Exit) => {
+            terminal_restore_guard.restore_silently();
+            session_log::log_session_end();
+            return Ok(AppExitInfo {
+                token_usage: crate::token_usage::TokenUsage::default(),
+                thread_id: None,
+                resume_hint: None,
+                update_action: None,
+                exit_reason: ExitReason::UserRequested,
+            });
         }
-        resume_picker::SessionSelection::Fork(target_session) => {
-            Some((CwdPromptAction::Fork, target_session))
+        Err(err) => {
+            terminal_restore_guard.restore_silently();
+            session_log::log_session_end();
+            return Err(err);
         }
-        _ => None,
-    };
-    let fallback_cwd = match action_and_target_session_if_resume_or_fork {
-        Some((action, target_session)) => {
-            if uses_remote_workspace {
-                Some(current_cwd.to_path_buf())
-            } else {
-                match resolve_cwd_for_resume_or_fork(
-                    &mut tui,
-                    state_db.as_deref(),
-                    &current_cwd,
-                    target_session.thread_id,
-                    target_session.path.as_deref(),
-                    action,
-                    allow_prompt,
-                )
-                .await?
-                {
-                    ResolveCwdOutcome::Continue(cwd) => cwd,
-                    ResolveCwdOutcome::Exit => {
-                        terminal_restore_guard.restore_silently();
-                        session_log::log_session_end();
-                        return Ok(AppExitInfo {
-                            token_usage: crate::token_usage::TokenUsage::default(),
-                            thread_id: None,
-                            resume_hint: None,
-                            update_action: None,
-                            exit_reason: ExitReason::UserRequested,
-                        });
-                    }
-                }
-            }
-        }
-        None => None,
     };
 
     let picker_cancelled_without_selection = matches!(
@@ -1778,6 +1792,7 @@ async fn run_ratatui_app(
         &mut tui,
         app_server,
         config,
+        current_cwd.to_path_buf(),
         cli_kv_overrides.clone(),
         overrides.clone(),
         loader_overrides.clone(),
@@ -1854,8 +1869,7 @@ impl Drop for TerminalRestoreGuard {
 /// - Otherwise, respect the `tui.alternate_screen` config setting:
 ///   - `always`: Use alternate screen
 ///   - `never`: Inline mode only, preserves scrollback
-///   - `auto` (default): Use alternate screen for Codex; Open Interpreter
-///     deliberately starts inline to preserve terminal scrollback
+///   - `auto` (default): Use alternate screen
 fn determine_alt_screen_mode(no_alt_screen: bool, tui_alternate_screen: AltScreenMode) -> bool {
     if no_alt_screen {
         return false;
@@ -2142,6 +2156,194 @@ mod tests {
             Arc::new(EnvironmentManager::default_for_tests()),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn startup_resume_and_fork_use_configured_or_explicit_cwd() -> color_eyre::Result<()> {
+        for (action, configured_mode, has_explicit_cwd, expected_directory) in [
+            (CwdPromptAction::Resume, "current", false, "launch"),
+            (CwdPromptAction::Resume, "session", false, "session"),
+            (CwdPromptAction::Resume, "session", true, "explicit"),
+            (CwdPromptAction::Fork, "current", false, "launch"),
+            (CwdPromptAction::Fork, "session", false, "session"),
+            (CwdPromptAction::Fork, "session", true, "explicit"),
+        ] {
+            let temp_dir = TempDir::new()?;
+            let codex_home = temp_dir.path().join("codex-home");
+            let launch_cwd = temp_dir.path().join("launch");
+            let session_cwd = temp_dir.path().join("session");
+            let explicit_cwd = temp_dir.path().join("explicit");
+            std::fs::create_dir_all(&codex_home)?;
+            std::fs::create_dir_all(&launch_cwd)?;
+            std::fs::create_dir_all(&session_cwd)?;
+            std::fs::create_dir_all(&explicit_cwd)?;
+            std::fs::write(
+                codex_home.join("config.toml"),
+                format!("[tui]\nresume_cwd = \"{configured_mode}\"\n"),
+            )?;
+            let cwd_override = has_explicit_cwd.then_some(explicit_cwd.as_path());
+            let config = ConfigBuilder::default()
+                .codex_home(codex_home.clone())
+                .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+                .harness_overrides(ConfigOverrides {
+                    cwd: Some(cwd_override.unwrap_or(launch_cwd.as_path()).to_path_buf()),
+                    ..Default::default()
+                })
+                .build()
+                .await?;
+            let filename_timestamp = "2025-01-05T12-00-00";
+            let thread_id = write_session_rollout(
+                &codex_home,
+                filename_timestamp,
+                "2025-01-05T12:00:00Z",
+                "Saved user message",
+                &config.model_provider_id,
+                &session_cwd,
+            )?;
+            let rollout_path = codex_home
+                .join("sessions/2025/01/05")
+                .join(format!("rollout-{filename_timestamp}-{thread_id}.jsonl"));
+            let state_db =
+                init_state_db_for_app_server_target(&config, &AppServerTarget::Embedded).await?;
+            let target_session = resume_picker::SessionTarget {
+                path: Some(rollout_path),
+                thread_id,
+            };
+            let session_selection = match action {
+                CwdPromptAction::Resume => resume_picker::SessionSelection::Resume(target_session),
+                CwdPromptAction::Fork => resume_picker::SessionSelection::Fork(target_session),
+            };
+            let mut tui = tui::test_support::make_test_tui()?;
+
+            let fallback_cwd = match resolve_startup_resume_or_fork_cwd(
+                &mut tui,
+                &config,
+                state_db.as_deref(),
+                &session_selection,
+                cwd_override,
+                /*uses_remote_workspace*/ false,
+                /*uses_remote_workspace_or_environment*/ false,
+            )
+            .await?
+            {
+                ResolveCwdOutcome::Continue(cwd) => cwd,
+                ResolveCwdOutcome::Exit => panic!("configured cwd should not exit startup"),
+            };
+            let final_config = ConfigBuilder::default()
+                .codex_home(codex_home)
+                .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+                .harness_overrides(ConfigOverrides {
+                    cwd: cwd_override.map(Path::to_path_buf),
+                    ..Default::default()
+                })
+                .fallback_cwd(fallback_cwd)
+                .build()
+                .await?;
+            let expected_cwd = temp_dir.path().join(expected_directory);
+            assert!(!session_resume::cwds_differ(
+                final_config.cwd.as_path(),
+                &expected_cwd,
+            ));
+            let mut app_server = start_app_server_for_picker(
+                &final_config,
+                &AppServerTarget::Embedded,
+                state_db,
+                Arc::new(EnvironmentManager::default_for_tests()),
+            )
+            .await?;
+            let started = match action {
+                CwdPromptAction::Resume => {
+                    app_server
+                        .resume_thread(
+                            final_config,
+                            thread_id,
+                            app_server_session::ResumeModelSettings::RestoreFromThread,
+                        )
+                        .await?
+                }
+                CwdPromptAction::Fork => app_server.fork_thread(final_config, thread_id).await?,
+            };
+
+            assert!(!session_resume::cwds_differ(
+                started.session.cwd.as_path(),
+                &expected_cwd,
+            ));
+            app_server.shutdown().await?;
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_remote_current_cwd_without_override_is_rejected() -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        std::fs::write(
+            temp_dir.path().join("config.toml"),
+            "[tui]\nresume_cwd = \"current\"\n",
+        )?;
+        let config = ConfigBuilder::default()
+            .codex_home(temp_dir.path().to_path_buf())
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+            .build()
+            .await?;
+        let mut tui = tui::test_support::make_test_tui()?;
+
+        let error = resolve_startup_resume_or_fork_cwd(
+            &mut tui,
+            &config,
+            /*state_db*/ None,
+            &resume_picker::SessionSelection::Resume(resume_picker::SessionTarget {
+                path: None,
+                thread_id: ThreadId::new(),
+            }),
+            /*cwd_override*/ None,
+            /*uses_remote_workspace*/ false,
+            /*uses_remote_workspace_or_environment*/ true,
+        )
+        .await
+        .expect_err("remote current cwd should require an explicit override");
+
+        assert_eq!(
+            error.to_string(),
+            "`tui.resume_cwd = \"current\"` requires `--cd` when using a remote workspace"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_session_cwd_without_metadata_is_rejected() -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        std::fs::write(
+            temp_dir.path().join("config.toml"),
+            "[tui]\nresume_cwd = \"session\"\n",
+        )?;
+        let config = ConfigBuilder::default()
+            .codex_home(temp_dir.path().to_path_buf())
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+            .build()
+            .await?;
+        let mut tui = tui::test_support::make_test_tui()?;
+
+        let error = resolve_startup_resume_or_fork_cwd(
+            &mut tui,
+            &config,
+            /*state_db*/ None,
+            &resume_picker::SessionSelection::Resume(resume_picker::SessionTarget {
+                path: None,
+                thread_id: ThreadId::new(),
+            }),
+            /*cwd_override*/ None,
+            /*uses_remote_workspace*/ false,
+            /*uses_remote_workspace_or_environment*/ false,
+        )
+        .await
+        .expect_err("session cwd should require saved metadata");
+
+        assert_eq!(
+            error.to_string(),
+            "failed to determine the working directory recorded for the selected session"
+        );
+        Ok(())
     }
 
     #[test]

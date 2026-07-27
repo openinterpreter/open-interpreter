@@ -1,3 +1,4 @@
+use crate::audio_preparation::estimate_audio_token_count;
 use crate::context::ContextualUserFragment;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
@@ -31,13 +32,15 @@ use codex_utils_output_truncation::truncate_function_output_items_with_policy;
 use codex_utils_output_truncation::truncate_text;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
+use std::sync::Arc;
 use std::sync::LazyLock;
 
 /// Transcript of thread history
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ContextManager {
-    /// The oldest items are at the beginning of the vector.
-    items: Vec<ResponseItem>,
+    /// The oldest items are at the beginning of the vector. Snapshots share the vector until a
+    /// caller needs to mutate it, avoiding deep copies for read-only history consumers.
+    items: Arc<Vec<ResponseItem>>,
     /// Bumped whenever history is rewritten, such as compaction or rollback.
     history_version: u64,
     token_info: Option<TokenUsageInfo>,
@@ -59,7 +62,7 @@ pub(crate) struct ContextManager {
 impl ContextManager {
     pub(crate) fn new() -> Self {
         Self {
-            items: Vec::new(),
+            items: Arc::new(Vec::new()),
             history_version: 0,
             token_info: TokenUsageInfo::new_or_append(
                 &None, &None, /*model_context_window*/ None,
@@ -129,18 +132,17 @@ impl ContextManager {
                 continue;
             }
 
-            let processed = self.process_item(item_ref, policy);
-            self.items.push(processed);
+            let processed = Self::process_item(item_ref, policy);
+            Arc::make_mut(&mut self.items).push(processed);
         }
     }
 
     /// Returns the history prepared for sending to the model. This applies a proper
-    /// normalization and drops un-suited items. When `input_modalities` does not
-    /// include `InputModality::Image`, images are stripped from messages and tool
-    /// outputs.
+    /// normalization and drops un-suited items. Unsupported image and audio content
+    /// is stripped from messages and tool outputs according to `input_modalities`.
     pub(crate) fn for_prompt(mut self, input_modalities: &[InputModality]) -> Vec<ResponseItem> {
         self.normalize_history(input_modalities);
-        self.items
+        Arc::unwrap_or_clone(self.items)
     }
 
     /// Returns raw items in the history.
@@ -150,7 +152,7 @@ impl ContextManager {
 
     /// Returns raw items in the history and consumes the snapshot.
     pub(crate) fn into_raw_items(self) -> Vec<ResponseItem> {
-        self.items
+        Arc::unwrap_or_clone(self.items)
     }
 
     pub(crate) fn history_version(&self) -> u64 {
@@ -188,57 +190,20 @@ impl ContextManager {
         if !self.items.is_empty() {
             // Remove the oldest item (front of the list). Items are ordered from
             // oldest → newest, so index 0 is the first entry recorded.
-            let removed = self.items.remove(0);
+            let items = Arc::make_mut(&mut self.items);
+            let removed = items.remove(0);
             // If the removed item participates in a call/output pair, also remove
             // its corresponding counterpart to keep the invariants intact without
             // running a full normalization pass.
-            normalize::remove_corresponding_for(&mut self.items, &removed);
+            normalize::remove_corresponding_for(items, &removed);
             self.world_state_baseline = None;
         }
     }
 
     pub(crate) fn replace(&mut self, items: Vec<ResponseItem>) {
-        self.items = items;
+        self.items = Arc::new(items);
         self.history_version = self.history_version.saturating_add(1);
         self.world_state_baseline = None;
-    }
-
-    /// Replace image content in the last turn if it originated from a tool output.
-    /// Returns true when a tool image was replaced, false otherwise.
-    pub(crate) fn replace_last_turn_images(&mut self, placeholder: &str) -> bool {
-        let Some(index) = self.items.iter().rposition(|item| {
-            matches!(item, ResponseItem::FunctionCallOutput { .. }) || is_user_turn_boundary(item)
-        }) else {
-            return false;
-        };
-
-        match &mut self.items[index] {
-            ResponseItem::FunctionCallOutput { output, .. } => {
-                let Some(content_items) = output.content_items_mut() else {
-                    return false;
-                };
-                let mut replaced = false;
-                let placeholder = placeholder.to_string();
-                for item in content_items.iter_mut() {
-                    if matches!(
-                        item,
-                        FunctionCallOutputContentItem::InputImage { .. }
-                            | FunctionCallOutputContentItem::InputVideo { .. }
-                    ) {
-                        *item = FunctionCallOutputContentItem::InputText {
-                            text: placeholder.clone(),
-                        };
-                        replaced = true;
-                    }
-                }
-                if replaced {
-                    self.history_version = self.history_version.saturating_add(1);
-                }
-                replaced
-            }
-            ResponseItem::Message { .. } => false,
-            _ => false,
-        }
     }
 
     /// Drop the last `num_turns` instruction turns from this history.
@@ -265,7 +230,7 @@ impl ContextManager {
         let snapshot = self.items.clone();
         let user_positions = user_message_positions(&snapshot);
         let Some(&first_instruction_turn_idx) = user_positions.first() else {
-            self.replace(snapshot);
+            self.replace(Arc::unwrap_or_clone(snapshot));
             return;
         };
 
@@ -359,19 +324,24 @@ impl ContextManager {
     /// This function enforces a couple of invariants on the in-memory history:
     /// 1. every call (function/custom) has a corresponding output entry
     /// 2. every output has a corresponding call entry
-    /// 3. when images are unsupported, image content is stripped from messages and tool outputs
+    /// 3. unsupported image and audio content is stripped from messages and tool outputs
     fn normalize_history(&mut self, input_modalities: &[InputModality]) {
+        let items = Arc::make_mut(&mut self.items);
+
         // all function/tool calls must have a corresponding output
-        normalize::ensure_call_outputs_present(&mut self.items);
+        normalize::ensure_call_outputs_present(items);
 
         // all outputs must have a corresponding function/tool call
-        normalize::remove_orphan_outputs(&mut self.items);
+        normalize::remove_orphan_outputs(items);
 
         // strip images when model does not support them
-        normalize::strip_images_when_unsupported(input_modalities, &mut self.items);
+        normalize::strip_images_when_unsupported(input_modalities, items);
+
+        // strip audio when model does not support it
+        normalize::strip_audio_when_unsupported(input_modalities, items);
     }
 
-    fn process_item(&self, item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {
+    fn process_item(item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {
         let policy_with_serialization_budget = policy * 1.2;
         match item {
             ResponseItem::FunctionCallOutput {
@@ -469,16 +439,11 @@ pub(crate) fn truncate_function_output_payload(
     policy: TruncationPolicy,
 ) -> FunctionCallOutputPayload {
     let body = match &output.body {
-        FunctionCallOutputBody::Text(content)
-            if content.starts_with(crate::tools::handlers::HARNESS_NO_TRUNCATE_PREFIX) =>
-        {
-            FunctionCallOutputBody::Text(content.clone())
-        }
         FunctionCallOutputBody::Text(content) => {
             FunctionCallOutputBody::Text(truncate_text(content, policy))
         }
         FunctionCallOutputBody::ContentItems(items) => FunctionCallOutputBody::ContentItems(
-            truncate_function_output_items_with_policy(items, policy),
+            truncate_function_output_items_with_policy(items, policy, estimate_audio_token_count),
         ),
     };
 
@@ -525,7 +490,11 @@ fn estimate_encrypted_function_output_length(encoded_len: usize) -> usize {
     encoded_len.saturating_mul(9).div_ceil(16)
 }
 
-fn estimate_item_token_count(item: &ResponseItem) -> i64 {
+/// Returns the same coarse, model-visible token estimate used for full history estimates.
+///
+/// Ordinary items are JSON-serialized, so callers estimating many items should reuse these
+/// results instead of repeatedly estimating the full history.
+pub(crate) fn estimate_item_token_count(item: &ResponseItem) -> i64 {
     let model_visible_bytes = estimate_response_item_model_visible_bytes(item);
     approx_tokens_from_byte_count_i64(model_visible_bytes)
 }
@@ -572,14 +541,18 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
                 .unwrap_or_default();
             let (image_payload_bytes, image_replacement_bytes) =
                 image_data_url_estimate_adjustment(item);
+            let (audio_payload_bytes, audio_replacement_bytes) =
+                audio_data_url_estimate_adjustment(item);
             let (encrypted_payload_bytes, encrypted_replacement_bytes) =
                 encrypted_function_output_estimate_adjustment(item);
-            // Replace raw base64 payload bytes with a per-image estimate.
+            // Replace raw base64 payload bytes with per-modality estimates.
             // We intentionally preserve the data URL prefix and JSON
             // wrapper bytes already included in `raw`.
             let raw = raw
                 .saturating_sub(image_payload_bytes)
-                .saturating_add(image_replacement_bytes);
+                .saturating_add(image_replacement_bytes)
+                .saturating_sub(audio_payload_bytes)
+                .saturating_add(audio_replacement_bytes);
             raw.saturating_sub(encrypted_payload_bytes)
                 .saturating_add(encrypted_replacement_bytes)
         }
@@ -592,6 +565,16 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
 /// We only discount payloads for `data:image/...;base64,...` URLs (case
 /// insensitive markers) and leave everything else at raw serialized size.
 fn parse_base64_image_data_url(url: &str) -> Option<&str> {
+    parse_base64_data_url(url, "image/")
+}
+
+/// Returns the base64 payload for inline audio data URLs that are eligible for
+/// token-estimation discounting.
+fn parse_base64_audio_data_url(url: &str) -> Option<&str> {
+    parse_base64_data_url(url, "audio/")
+}
+
+fn parse_base64_data_url<'a>(url: &'a str, media_type_prefix: &str) -> Option<&'a str> {
     if !url
         .get(.."data:".len())
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
@@ -602,15 +585,15 @@ fn parse_base64_image_data_url(url: &str) -> Option<&str> {
     let metadata = &url[..comma_index];
     let payload = &url[comma_index + 1..];
     // Parse the media type and parameters without decoding. This keeps the
-    // estimator cheap while ensuring we only apply the fixed-cost image
-    // heuristic to image-typed base64 data URLs.
+    // estimator cheap while ensuring we only apply modality heuristics to
+    // appropriately typed base64 data URLs.
     let metadata_without_scheme = &metadata["data:".len()..];
     let mut metadata_parts = metadata_without_scheme.split(';');
     let mime_type = metadata_parts.next().unwrap_or_default();
     let has_base64_marker = metadata_parts.any(|part| part.eq_ignore_ascii_case("base64"));
     if !mime_type
-        .get(.."image/".len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+        .get(..media_type_prefix.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(media_type_prefix))
     {
         return None;
     }
@@ -693,6 +676,50 @@ fn image_data_url_estimate_adjustment(item: &ResponseItem) -> (i64, i64) {
                         content_item
                     {
                         accumulate(image_url, *detail);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    (payload_bytes, replacement_bytes)
+}
+
+/// Scans one response item for inline base64 audio data URLs and returns:
+/// - total base64 payload bytes to subtract from raw serialized size
+/// - total replacement byte estimate for those audio inputs
+fn audio_data_url_estimate_adjustment(item: &ResponseItem) -> (i64, i64) {
+    let mut payload_bytes = 0i64;
+    let mut replacement_bytes = 0i64;
+
+    let mut accumulate = |audio_url: &str| {
+        if let Some(payload_len) = parse_base64_audio_data_url(audio_url).map(str::len) {
+            payload_bytes =
+                payload_bytes.saturating_add(i64::try_from(payload_len).unwrap_or(i64::MAX));
+            replacement_bytes = replacement_bytes.saturating_add(
+                i64::try_from(approx_bytes_for_tokens(estimate_audio_token_count(
+                    audio_url,
+                )))
+                .unwrap_or(i64::MAX),
+            );
+        }
+    };
+
+    match item {
+        ResponseItem::Message { content, .. } => {
+            for content_item in content {
+                if let ContentItem::InputAudio { audio_url } = content_item {
+                    accumulate(audio_url);
+                }
+            }
+        }
+        ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } => {
+            if let FunctionCallOutputBody::ContentItems(items) = &output.body {
+                for content_item in items {
+                    if let FunctionCallOutputContentItem::InputAudio { audio_url } = content_item {
+                        accumulate(audio_url);
                     }
                 }
             }

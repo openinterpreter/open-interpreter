@@ -177,15 +177,12 @@ fn save_config_resolved_fields(
     )?);
 
     let agents = lock_config.agents.get_or_insert_with(Default::default);
-    // Multi-agent v2 owns thread fanout through its feature config. Preserve
-    // the legacy agents.max_threads setting only when v2 is disabled.
-    agents.max_threads = if config.features.enabled(Feature::MultiAgentV2) {
-        None
-    } else {
-        config.agent_max_threads
-    };
+    agents.enabled = Some(config.agents_enabled);
+    agents.max_concurrent_threads_per_session = config.agent_max_threads;
     agents.max_depth = Some(config.agent_max_depth);
-    agents.job_max_runtime_seconds = config.agent_job_max_runtime_seconds;
+    agents.default_subagent_model = config.agent_default_subagent_model.clone();
+    agents.default_subagent_reasoning_effort =
+        config.agent_default_subagent_reasoning_effort.clone();
     agents.interrupt_message = Some(config.agent_interrupt_message_enabled);
 
     lock_config
@@ -249,6 +246,8 @@ mod tests {
             reminder_threshold_tokens: Some(16_000),
             reminder_message_template: "Locked reminder: {n_remaining} tokens.".to_string(),
             guidance_message: Some("Locked context-window guidance.".to_string()),
+            auto_compact_fallback_prompt: Some("Write notes before rollover.".to_string()),
+            auto_compact_fallback_buffer_tokens: Some(8_000),
         });
         config
             .features
@@ -293,7 +292,6 @@ mod tests {
                 .is_none_or(|debug| debug.config_lockfile.is_none())
         );
         assert!(lock.memories.is_some());
-
         let features = lock
             .features
             .as_ref()
@@ -342,6 +340,8 @@ mod tests {
                     "Locked reminder: {n_remaining} tokens.".to_string()
                 ),
                 guidance_message: Some("Locked context-window guidance.".to_string()),
+                auto_compact_fallback_prompt: Some("Write notes before rollover.".to_string()),
+                auto_compact_fallback_buffer_tokens: Some(8_000),
             }))
         );
 

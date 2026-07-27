@@ -3,9 +3,9 @@ source: tui/src/chatwidget/tests/status_and_layout.rs
 expression: snapshot
 ---
 "                                                                                "
-"• Interpreting (0s • esc to interrupt)                                          "
+"• Working (0s • esc to interrupt)                                               "
 "                                                                                "
-"────────────────────────────────────────────────────────────────────────────────"
+"                                                                                "
 "› Ask Codex to do anything                                                      "
 "                                                                                "
-"  openai gpt-5.6-sol default · native · read-only,… Goal paused (/goal resume)  "
+"  gpt-5.6-sol default · /tmp/project              Goal paused (/goal resume)    "

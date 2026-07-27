@@ -102,7 +102,7 @@ use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
-use codex_app_server_protocol::SkillMetadata as ProtocolSkillMetadata;
+use codex_app_server_protocol::SkillMetadata;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::ThreadGoal as AppThreadGoal;
 use codex_app_server_protocol::ThreadGoalStatus as AppThreadGoalStatus;
@@ -123,7 +123,6 @@ use codex_config::types::ApprovalsReviewer;
 use codex_config::types::Notifications;
 use codex_config::types::WindowsSandboxModeToml;
 use codex_connectors::AppInfo;
-use codex_core_skills::model::SkillMetadata;
 use codex_features::FEATURES;
 use codex_features::Feature;
 #[cfg(test)]
@@ -163,8 +162,6 @@ use codex_terminal_detection::terminal_info;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::resume_hint;
 use codex_utils_path_uri::PathUri;
-use codex_utils_plugins::mention_syntax::PLUGIN_TEXT_MENTION_SIGIL;
-use codex_utils_plugins::mention_syntax::TOOL_MENTION_SIGIL;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -204,6 +201,8 @@ const CONNECTORS_SELECTION_VIEW_ID: &str = "connectors-selection";
 const PET_SELECTION_LOADING_VIEW_ID: &str = "pet-selection-loading";
 const AMBIENT_PET_WRAP_GAP_COLUMNS: u16 = 2;
 const TUI_STUB_MESSAGE: &str = "Not available in TUI yet.";
+const PARENT_OWNED_INPUT_MESSAGE: &str =
+    "This sub-agent is controlled by its parent. Direct input is disabled.";
 
 /// Choose the keybinding used to edit the most-recently queued message.
 ///
@@ -265,6 +264,7 @@ use crate::app_event::WindowsSandboxEnableMode;
 use crate::app_event_sender::AppEventSender;
 use crate::auto_review_denials;
 use crate::auto_review_denials::RecentAutoReviewDenials;
+use crate::bottom_pane::ApplyPatchApprovalRequest;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
@@ -272,15 +272,18 @@ use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::CollaborationModeIndicator;
 use crate::bottom_pane::ColumnWidthMode;
 use crate::bottom_pane::DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED;
+use crate::bottom_pane::ExecApprovalRequest;
 use crate::bottom_pane::ExperimentalFeatureItem;
 use crate::bottom_pane::ExperimentalFeaturesView;
 use crate::bottom_pane::GoalStatusIndicator;
 use crate::bottom_pane::HistoryEntry;
 use crate::bottom_pane::InputResult;
 use crate::bottom_pane::LocalImageAttachment;
+use crate::bottom_pane::McpElicitationApprovalRequest;
 use crate::bottom_pane::McpServerElicitationFormRequest;
 use crate::bottom_pane::MemoriesSettingsView;
 use crate::bottom_pane::MentionBinding;
+use crate::bottom_pane::PermissionsApprovalRequest;
 use crate::bottom_pane::QUIT_SHORTCUT_TIMEOUT;
 use crate::bottom_pane::QueuedInputAction;
 use crate::bottom_pane::SelectionAction;
@@ -320,7 +323,6 @@ use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
 use crate::status::remote_connection::RemoteConnectionStatus;
 use crate::status_indicator_widget::STATUS_DETAILS_DEFAULT_MAX_LINES;
-use crate::status_indicator_widget::STATUS_HEADER_INTERPRETING;
 use crate::status_indicator_widget::StatusDetailsCapitalization;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
@@ -430,6 +432,7 @@ use self::user_messages::QueuedUserMessage;
 use self::user_messages::ShellEscapePolicy;
 use self::user_messages::ThreadComposerState;
 pub(crate) use self::user_messages::ThreadInputState;
+pub(crate) use self::user_messages::ThreadInputStateRestoreMode;
 pub(crate) use self::user_messages::UserMessage;
 use self::user_messages::UserMessageDisplay;
 #[cfg(test)]
@@ -437,6 +440,7 @@ use self::user_messages::UserMessageHistoryOverride;
 use self::user_messages::UserMessageHistoryRecord;
 use self::user_messages::app_server_text_elements;
 pub(crate) use self::user_messages::create_initial_user_message;
+pub(crate) use self::user_messages::mention_bindings_from_user_inputs;
 use self::user_messages::merge_user_messages;
 use self::user_messages::merge_user_messages_with_history_record;
 #[cfg(test)]
@@ -475,13 +479,7 @@ const ASK_FOR_APPROVAL_LABEL: &str = "Ask for approval";
 const APPROVE_FOR_ME_LABEL: &str = "Approve for me";
 const AUTO_REVIEW_DESCRIPTION: &str = "Only ask for actions detected as potentially unsafe.";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
-const DEFAULT_STATUS_LINE_ITEMS: [&str; 4] = [
-    "model-with-reasoning",
-    "harness",
-    "permissions",
-    "current-dir",
-];
-const MAX_AGENT_COPY_HISTORY: usize = 32;
+const DEFAULT_STATUS_LINE_ITEMS: [&str; 2] = ["model-with-reasoning", "current-dir"];
 
 /// Common initialization parameters shared by all `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
@@ -564,6 +562,8 @@ pub(crate) struct ChatWidget {
     completed_token_activity_output: Option<history_cell::CompositeHistoryCell>,
     next_token_activity_request_id: u64,
     pending_rate_limit_reset_request_id: Option<u64>,
+    pending_rate_limit_reset_idempotency_key: Option<String>,
+    rate_limit_reset_picker_request_id: Option<u64>,
     pending_rate_limit_reset_hint_request_id: Option<u64>,
     pending_usage_menu_rate_limit_request_id: Option<u64>,
     pending_rate_limit_reset_hint: Option<PlainHistoryCell>,
@@ -571,6 +571,7 @@ pub(crate) struct ChatWidget {
     next_rate_limit_reset_request_id: u64,
     plan_type: Option<PlanType>,
     codex_rate_limit_reached_type: Option<RateLimitReachedType>,
+    codex_spend_control_reached: Option<bool>,
     rate_limit_warnings: RateLimitWarningState,
     warning_display_state: WarningDisplayState,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
@@ -588,7 +589,7 @@ pub(crate) struct ChatWidget {
     collab_agent_metadata: HashMap<ThreadId, AgentMetadata>,
     pending_collab_spawn_requests: HashMap<String, multi_agents::SpawnRequestSummary>,
     suppressed_exec_calls: HashSet<String>,
-    skills_all: Vec<ProtocolSkillMetadata>,
+    skills_all: Vec<SkillMetadata>,
     skills_initial_state: Option<HashMap<AbsolutePathBuf, bool>>,
     last_unified_wait: Option<UnifiedExecWaitState>,
     unified_exec_wait_streak: Option<UnifiedExecWaitStreak>,
@@ -628,8 +629,10 @@ pub(crate) struct ChatWidget {
     interrupts: InterruptManager,
     // Accumulates the current reasoning block text to extract a header
     reasoning_buffer: String,
-    // Accumulates full reasoning content for transcript-only recording
-    full_reasoning_buffer: String,
+    // Caches the first completed bold header so later deltas do not rescan the whole block.
+    reasoning_header: Option<String>,
+    // Preserves reasoning-summary part boundaries for transcript-only recording.
+    reasoning_summary_parts: Vec<String>,
     status_state: StatusState,
     review: ReviewState,
     // Active hook runs render in a dedicated live cell so they can run alongside tools.
@@ -652,6 +655,7 @@ pub(crate) struct ChatWidget {
     thread_name: Option<String>,
     thread_rename_block_message: Option<String>,
     active_side_conversation: bool,
+    blocks_direct_input: bool,
     normal_placeholder_text: String,
     side_placeholder_text: String,
     forked_from: Option<ThreadId>,
@@ -669,7 +673,7 @@ pub(crate) struct ChatWidget {
     // order.
     suppress_initial_user_message_submit: bool,
     input_queue: InputQueueState,
-    cancel_edit: CancelEditState,
+    safety_buffering_prompt: Option<UserMessage>,
     /// Main chat-surface bindings resolved from `tui.keymap.chat`.
     chat_keymap: ChatKeymap,
     /// Keybinding to show for popping the most-recently queued message back
@@ -792,13 +796,6 @@ pub(crate) enum InterruptedTurnNoticeMode {
     Suppress,
 }
 
-#[derive(Debug, Default)]
-struct CancelEditState {
-    prompt: Option<UserMessage>,
-    eligible: bool,
-    armed: bool,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReplayKind {
     ResumeInitialMessages,
@@ -808,6 +805,7 @@ pub(crate) enum ReplayKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionConfiguredDisplay {
     Normal,
+    PromptEdit,
     /// Apply session state without emitting the session info cell.
     Quiet,
     SideConversation,
@@ -974,10 +972,6 @@ impl ChatWidget {
         if !message.is_empty() {
             self.transcript.record_agent_markdown(message.to_string());
         }
-    }
-
-    fn record_visible_user_turn_for_copy(&mut self) {
-        self.transcript.record_visible_user_turn();
     }
 
     pub(crate) fn open_feedback_note(
@@ -1182,13 +1176,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_history_entry_response(&mut self, event: HistoryLookupResponse) {
-        let HistoryLookupResponse {
-            offset,
-            log_id,
-            entry,
-        } = event;
-        self.bottom_pane
-            .on_history_entry_response(log_id, offset, entry);
+        self.bottom_pane.on_history_lookup_response(event);
     }
 
     pub(crate) fn pre_draw_tick(&mut self) {
@@ -1224,9 +1212,6 @@ impl ChatWidget {
     }
 
     fn add_boxed_history(&mut self, cell: Box<dyn HistoryCell>) {
-        if self.turn_lifecycle.agent_turn_running && !cell.display_lines(u16::MAX).is_empty() {
-            self.record_visible_turn_activity();
-        }
         // Keep the placeholder session header as the active cell until real session info arrives,
         // so we can merge headers instead of committing a duplicate box to history.
         let keep_placeholder_header_active = !self.is_session_configured()
@@ -1277,69 +1262,13 @@ impl ChatWidget {
             if self.review.is_review_mode {
                 return;
             }
-            let message = display.message.as_str();
-            let mention_start = |sigil: char, mention: &str| {
-                let token = format!("{sigil}{mention}");
-                message.match_indices(&token).find_map(|(start, _)| {
-                    let end = start + token.len();
-                    message
-                        .as_bytes()
-                        .get(end)
-                        .is_none_or(|byte| {
-                            !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'-')
-                        })
-                        .then_some(start)
-                })
-            };
-            let mut mention_bindings: Vec<MentionBinding> = items
-                .iter()
-                .filter_map(|item| match item {
-                    UserInput::Skill { name, path } => Some(MentionBinding {
-                        sigil: TOOL_MENTION_SIGIL,
-                        mention: name.clone(),
-                        path: path.to_string_lossy().into_owned(),
-                    }),
-                    UserInput::Mention { name, path } => {
-                        let plugin_id = path.strip_prefix("plugin://");
-                        let mention = if let Some(plugin_id) = plugin_id {
-                            plugin_id
-                                .split_once('@')
-                                .map(|(plugin_name, _)| plugin_name)
-                                .unwrap_or(plugin_id)
-                                .to_string()
-                        } else if path.starts_with("app://") {
-                            codex_connectors::metadata::connector_mention_slug_from_name(name)
-                        } else {
-                            name.clone()
-                        };
-                        let sigil = if plugin_id.is_some()
-                            && mention_start(PLUGIN_TEXT_MENTION_SIGIL, &mention).is_some()
-                        {
-                            PLUGIN_TEXT_MENTION_SIGIL
-                        } else {
-                            TOOL_MENTION_SIGIL
-                        };
-                        Some(MentionBinding {
-                            sigil,
-                            mention,
-                            path: path.clone(),
-                        })
-                    }
-                    UserInput::Text { .. }
-                    | UserInput::Image { .. }
-                    | UserInput::LocalImage { .. } => None,
-                })
-                .collect();
-            mention_bindings.sort_by_key(|binding| {
-                mention_start(binding.sigil, &binding.mention).unwrap_or(usize::MAX)
-            });
             self.bottom_pane
                 .record_replayed_user_message_history(HistoryEntry {
                     text: display.message.clone(),
                     text_elements: display.text_elements.clone(),
                     local_image_paths: display.local_images.clone(),
                     remote_image_urls: display.remote_image_urls.clone(),
-                    mention_bindings,
+                    mention_bindings: mention_bindings_from_user_inputs(items, &display.message),
                     pending_pastes: Vec::new(),
                 });
             self.on_user_message_display(display);
@@ -1378,7 +1307,6 @@ impl ChatWidget {
             || !display.local_images.is_empty()
             || !display.remote_image_urls.is_empty()
         {
-            self.record_visible_user_turn_for_copy();
             self.add_to_history(history_cell::new_user_prompt(
                 display.message,
                 display.text_elements,
@@ -1506,7 +1434,6 @@ impl ChatWidget {
                 /*show_fast_status*/ false,
                 config.cwd.to_path_buf(),
                 CODEX_CLI_VERSION,
-                codex_product_info::Product::current(),
             )
             .with_yolo_mode(history_cell::is_yolo_mode(config)),
         )
@@ -1761,18 +1688,6 @@ impl ChatWidget {
         self.bottom_pane.insert_str(text);
     }
 
-    /// Replace the composer content with the provided text and reset cursor.
-    pub(crate) fn set_composer_text(
-        &mut self,
-        text: String,
-        text_elements: Vec<TextElement>,
-        local_image_paths: Vec<PathBuf>,
-    ) {
-        self.bottom_pane
-            .set_composer_text(text, text_elements, local_image_paths);
-        self.refresh_plan_mode_nudge();
-    }
-
     pub(crate) fn set_remote_image_urls(&mut self, remote_image_urls: Vec<String>) {
         self.bottom_pane.set_remote_image_urls(remote_image_urls);
     }
@@ -1817,6 +1732,15 @@ impl ChatWidget {
         T: Into<AppCommand>,
     {
         let op: AppCommand = op.into();
+        if self.blocks_direct_input
+            && matches!(
+                &op,
+                AppCommand::UserTurn { .. } | AppCommand::Review { .. } | AppCommand::Compact
+            )
+        {
+            self.add_error_message(PARENT_OWNED_INPUT_MESSAGE.to_string());
+            return false;
+        }
         self.prepare_local_op_submission(&op);
         if op.is_review() && !self.bottom_pane.is_task_running() {
             self.bottom_pane.set_task_running(/*running*/ true);
@@ -1846,12 +1770,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn prepare_local_op_submission(&mut self, op: &AppCommand) {
-        if let AppCommand::Interrupt { behavior } = op
-            && self.turn_lifecycle.agent_turn_running
-        {
-            if *behavior == crate::app_command::InterruptBehavior::RestorePromptIfNoOutput {
-                self.arm_cancel_edit();
-            }
+        if matches!(op, AppCommand::Interrupt) && self.turn_lifecycle.agent_turn_running {
             if let Some(controller) = self.stream_controller.as_mut() {
                 controller.clear_queue();
             }
@@ -2020,8 +1939,8 @@ fn has_websocket_timing_metrics(summary: RuntimeMetricsSummary) -> bool {
         || summary.responses_api_inference_time_ms > 0
         || summary.responses_api_engine_iapi_ttft_ms > 0
         || summary.responses_api_engine_service_ttft_ms > 0
-        || summary.responses_api_engine_iapi_tbt_ms > 0
-        || summary.responses_api_engine_service_tbt_ms > 0
+        || summary.responses_api_engine_iapi_tbt_ms > 0.0
+        || summary.responses_api_engine_service_tbt_ms > 0.0
 }
 
 impl Drop for ChatWidget {

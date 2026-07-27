@@ -14,6 +14,20 @@
     "includeHome": {
       "description": "If true, include detection under the user's home directory.",
       "type": "boolean"
+    },
+    "migrationSource": {
+      "description": "Optional migration-source selector. Missing or unrecognized values use the default source.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source": {
+      "description": "Deprecated field retained for compatibility. This field is ignored; use `migrationSource` to select the migration source.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "title": "ExternalAgentConfigDetectParams",

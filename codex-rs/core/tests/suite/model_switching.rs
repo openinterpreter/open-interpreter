@@ -80,7 +80,8 @@ fn test_model_info(
             effort: ReasoningEffort::Medium,
             description: ReasoningEffort::Medium.to_string(),
         }],
-        reasoning_control: codex_protocol::openai_models::ReasoningControl::None,
+        reasoning_control: Default::default(),
+        supports_reasoning_summaries: false,
         shell_type: ConfigShellToolType::ShellCommand,
         visibility: ModelVisibility::List,
         supported_in_api: true,
@@ -99,7 +100,7 @@ fn test_model_info(
         base_instructions: "base instructions".to_string(),
         model_messages: None,
         include_skills_usage_instructions: false,
-        supports_reasoning_summaries: false,
+        supports_reasoning_summary_parameter: true,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,
@@ -478,17 +479,21 @@ async fn null_service_tier_override_is_omitted_from_http_turn_with_catalog_defau
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn model_change_from_image_to_text_strips_prior_image_content() -> Result<()> {
+async fn model_change_from_multimodal_to_text_strips_prior_media_content() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = MockServer::start().await;
-    let image_model_slug = "test-image-model";
+    let multimodal_model_slug = "test-multimodal-model";
     let text_model_slug = "test-text-only-model";
-    let image_model = test_model_info(
-        image_model_slug,
-        "Test Image Model",
-        "supports image input",
-        default_input_modalities(),
+    let multimodal_model = test_model_info(
+        multimodal_model_slug,
+        "Test Multimodal Model",
+        "supports image and audio input",
+        vec![
+            InputModality::Text,
+            InputModality::Image,
+            InputModality::Audio,
+        ],
     );
     let text_model = test_model_info(
         text_model_slug,
@@ -499,7 +504,7 @@ async fn model_change_from_image_to_text_strips_prior_image_content() -> Result<
     mount_models_once(
         &server,
         ModelsResponse {
-            models: vec![image_model, text_model],
+            models: vec![multimodal_model, text_model],
         },
     )
     .await;
@@ -513,7 +518,7 @@ async fn model_change_from_image_to_text_strips_prior_image_content() -> Result<
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(move |config| {
-            config.model = Some(image_model_slug.to_string());
+            config.model = Some(multimodal_model_slug.to_string());
         });
     let test = builder.build(&server).await?;
     let models_manager = test.thread_manager.get_models_manager();
@@ -534,12 +539,15 @@ async fn model_change_from_image_to_text_strips_prior_image_content() -> Result<
                     image_url: image_url.clone(),
                     detail: None,
                 },
+                UserInput::Audio {
+                    audio_url: "data:audio/wav;base64,YXVkaW8=".to_string(),
+                },
                 UserInput::Text {
                     text: "first turn".to_string(),
                     text_elements: Vec::new(),
                 },
             ],
-            image_model_slug.to_string(),
+            multimodal_model_slug.to_string(),
         ))
         .await?;
     wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
@@ -564,11 +572,19 @@ async fn model_change_from_image_to_text_strips_prior_image_content() -> Result<
         !first_request.message_input_image_urls("user").is_empty(),
         "first request should include the uploaded image"
     );
+    assert_eq!(
+        first_request.message_input_audio_urls("user"),
+        vec!["data:audio/wav;base64,YXVkaW8=".to_string()]
+    );
 
     let second_request = requests.last().expect("expected second request");
     assert!(
         second_request.message_input_image_urls("user").is_empty(),
         "second request should strip unsupported image content"
+    );
+    assert!(
+        second_request.message_input_audio_urls("user").is_empty(),
+        "second request should strip unsupported audio content"
     );
     let second_user_texts = second_request.message_input_texts("user");
     assert!(
@@ -576,6 +592,12 @@ async fn model_change_from_image_to_text_strips_prior_image_content() -> Result<
             .iter()
             .any(|text| text == "image content omitted because you do not support image input"),
         "second request should include the image-omitted placeholder text"
+    );
+    assert!(
+        second_user_texts
+            .iter()
+            .any(|text| text == "audio content omitted because you do not support audio input"),
+        "second request should include the audio-omitted placeholder text"
     );
     Ok(())
 }
@@ -909,7 +931,8 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
             effort: ReasoningEffort::Medium,
             description: ReasoningEffort::Medium.to_string(),
         }],
-        reasoning_control: codex_protocol::openai_models::ReasoningControl::None,
+        reasoning_control: Default::default(),
+        supports_reasoning_summaries: false,
         shell_type: ConfigShellToolType::ShellCommand,
         visibility: ModelVisibility::List,
         supported_in_api: true,
@@ -928,7 +951,7 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
         base_instructions: "base instructions".to_string(),
         model_messages: None,
         include_skills_usage_instructions: false,
-        supports_reasoning_summaries: false,
+        supports_reasoning_summary_parameter: true,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,

@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_file_system::FileSystemSandboxContext;
 pub use codex_file_system::WalkOptions;
 pub use codex_file_system::WalkOutcome;
 use codex_network_proxy::ManagedNetworkSandboxContext;
+use codex_network_proxy::RemoteNetworkProxyLaunchConfig;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::ShellEnvironmentPolicyInherit;
 use codex_shell_command::shell_detect::DetectedShell;
 use codex_utils_path_uri::PathUri;
@@ -24,6 +27,7 @@ pub const EXEC_OUTPUT_DELTA_METHOD: &str = "process/output";
 pub const EXEC_EXITED_METHOD: &str = "process/exited";
 pub const EXEC_CLOSED_METHOD: &str = "process/closed";
 pub const ENVIRONMENT_INFO_METHOD: &str = "environment/info";
+pub const ENVIRONMENT_STATUS_METHOD: &str = "environment/status";
 pub const FS_READ_FILE_METHOD: &str = "fs/readFile";
 pub const FS_OPEN_METHOD: &str = "fs/open";
 pub const FS_READ_BLOCK_METHOD: &str = "fs/readBlock";
@@ -36,10 +40,20 @@ pub const FS_READ_DIRECTORY_METHOD: &str = "fs/readDirectory";
 pub const FS_WALK_METHOD: &str = "fs/walk";
 pub const FS_REMOVE_METHOD: &str = "fs/remove";
 pub const FS_COPY_METHOD: &str = "fs/copy";
+/// Discovers capability manifests below selected roots using executor-local filesystem access.
+pub const CAPABILITY_ROOTS_DISCOVER_METHOD: &str = "capabilityRoots/discoverV1";
+/// Ordered plugin manifest paths recognized beneath a plugin root.
+pub const DISCOVERABLE_PLUGIN_MANIFEST_PATHS: &[&str] = &[
+    ".codex-plugin/plugin.json",
+    ".claude-plugin/plugin.json",
+    ".cursor-plugin/plugin.json",
+];
 /// JSON-RPC request method for executor-side HTTP requests.
 pub const HTTP_REQUEST_METHOD: &str = "http/request";
 /// JSON-RPC notification method for streamed executor HTTP response bodies.
 pub const HTTP_REQUEST_BODY_DELTA_METHOD: &str = "http/request/bodyDelta";
+/// Maximum decoded response-body bytes carried by one streamed HTTP notification.
+pub const MAX_HTTP_BODY_DELTA_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -79,6 +93,37 @@ pub struct EnvironmentInfo {
     /// Working directory inherited by the exec-server process.
     #[serde(default)]
     pub cwd: Option<PathUri>,
+    /// Optional executor features that clients must gate before sending newer request fields.
+    #[serde(default)]
+    pub capabilities: EnvironmentCapabilities,
+}
+
+/// Features supported by the selected exec-server environment.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentCapabilities {
+    /// Whether `exec` accepts instructions for launching an executor-local network proxy.
+    #[serde(default)]
+    pub network_proxy_launch: bool,
+}
+
+/// Status returned by an initialized exec-server connection.
+///
+/// The response is intentionally small today. New status details can be added
+/// without changing the method used by clients to verify that an initialized
+/// exec-server connection is still responsive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentStatus {
+    pub status: EnvironmentStatusKind,
+}
+
+/// High-level status reported by exec-server itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EnvironmentStatusKind {
+    /// The connection is initialized and exec-server can handle requests.
+    Ready,
 }
 
 impl EnvironmentInfo {
@@ -89,6 +134,9 @@ impl EnvironmentInfo {
             cwd: std::env::current_dir()
                 .ok()
                 .and_then(|cwd| PathUri::from_host_native_path(cwd).ok()),
+            capabilities: EnvironmentCapabilities {
+                network_proxy_launch: true,
+            },
         }
     }
 }
@@ -144,6 +192,9 @@ pub struct ExecParams {
     /// continue to fail closed. This preserves compatibility with older clients.
     #[serde(default)]
     pub managed_network: Option<ManagedNetworkSandboxContext>,
+    /// Optional instructions for starting an executor-local managed-network proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_proxy: Option<RemoteNetworkProxyLaunchConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -409,6 +460,119 @@ pub struct FsCopyParams {
 #[serde(rename_all = "camelCase")]
 pub struct FsCopyResponse {}
 
+/// Roots to inspect for plugin and skill capability manifests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityRootsDiscoverParams {
+    pub roots: Vec<CapabilityRootDiscoverRequest>,
+}
+
+/// One caller-selected capability root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityRootDiscoverRequest {
+    /// Opaque caller identity returned unchanged in the response.
+    pub id: String,
+    /// Absolute root URI interpreted using the exec-server host's path rules.
+    pub path: PathUri,
+}
+
+/// Executor-local discovery results in request order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityRootsDiscoverResponse {
+    pub roots: Vec<CapabilityRootDiscovery>,
+}
+
+/// Recognized UTF-8 capability file materialized by the exec-server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityTextFile {
+    pub path: PathUri,
+    pub contents: String,
+}
+
+/// Plugin files declared directly by a selected root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredPluginFiles {
+    pub manifest: CapabilityTextFile,
+    /// File-backed MCP declarations, including the conventional `.mcp.json` fallback.
+    #[serde(default)]
+    pub mcp_config: Option<CapabilityTextFile>,
+    /// File-backed connector declarations.
+    #[serde(default)]
+    pub apps_config: Option<CapabilityTextFile>,
+}
+
+/// A skill instructions file and its optional sibling metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredSkillFiles {
+    pub instructions: CapabilityTextFile,
+    #[serde(default)]
+    pub metadata: Option<CapabilityTextFile>,
+}
+
+/// Manifest bundle for one selected root.
+///
+/// Discovery failures are root-local so one broken package does not discard valid siblings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityRootDiscovery {
+    pub id: String,
+    pub path: PathUri,
+    #[serde(default)]
+    pub plugin: Option<DiscoveredPluginFiles>,
+    #[serde(default)]
+    pub skills: Vec<DiscoveredSkillFiles>,
+    /// Plugin manifests found while scanning the root, used to namespace nested skills.
+    #[serde(default)]
+    pub namespace_manifests: Vec<CapabilityTextFile>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Immutable results for the selected capability roots visible in one model step.
+#[derive(Clone, Debug)]
+pub struct ExecutorCapabilityDiscoverySnapshot {
+    roots: Arc<[ExecutorCapabilityDiscoverySnapshotEntry]>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutorCapabilityDiscoverySnapshotEntry {
+    pub selected_root: SelectedCapabilityRoot,
+    pub result: Result<Arc<CapabilityRootDiscovery>, String>,
+}
+
+impl ExecutorCapabilityDiscoverySnapshot {
+    pub fn new(
+        selected_roots: &[SelectedCapabilityRoot],
+        discoveries: Vec<Result<Arc<CapabilityRootDiscovery>, String>>,
+    ) -> Self {
+        debug_assert_eq!(selected_roots.len(), discoveries.len());
+        Self {
+            roots: selected_roots
+                .iter()
+                .cloned()
+                .zip(discoveries)
+                .map(
+                    |(selected_root, result)| ExecutorCapabilityDiscoverySnapshotEntry {
+                        selected_root,
+                        result,
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    pub fn roots(&self) -> &[ExecutorCapabilityDiscoverySnapshotEntry] {
+        &self.roots
+    }
+}
+
 /// HTTP header represented in the executor protocol.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -565,6 +729,7 @@ mod base64_bytes {
 
 #[cfg(test)]
 mod tests {
+    use super::EnvironmentCapabilities;
     use super::EnvironmentInfo;
     use super::ExecExitedNotification;
     use super::ExecParams;
@@ -574,13 +739,22 @@ mod tests {
     use super::ShellInfo;
     use codex_file_system::FileSystemSandboxContext;
     use codex_network_proxy::ManagedNetworkSandboxContext;
+    use codex_network_proxy::NetworkProxyAuditMetadata;
+    use codex_network_proxy::NetworkProxyConfig;
+    use codex_network_proxy::RemoteNetworkProxyConfig;
+    use codex_network_proxy::RemoteNetworkProxyLaunchConfig;
     use codex_protocol::models::PermissionProfile;
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
     use codex_utils_path_uri::PathUri;
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
 
     #[test]
-    fn exec_params_managed_network_context_round_trips_and_defaults_for_legacy_peers() {
+    fn exec_params_keeps_proxy_launch_separate_from_sandbox_facts() {
         let cwd =
             PathUri::from_host_native_path(std::env::current_dir().expect("current directory"))
                 .expect("cwd URI");
@@ -599,6 +773,17 @@ mod tests {
                 loopback_ports: vec![43123, 48081],
                 allow_local_binding: false,
             }),
+            network_proxy: Some(
+                RemoteNetworkProxyLaunchConfig::new(
+                    RemoteNetworkProxyConfig::from_effective_config(&NetworkProxyConfig::default())
+                        .expect("supported remote config"),
+                )
+                .with_audit_metadata(NetworkProxyAuditMetadata {
+                    conversation_id: Some("conversation-1".to_string()),
+                    ..NetworkProxyAuditMetadata::default()
+                })
+                .for_execution("remote".to_string(), "execution-1".to_string()),
+            ),
         };
 
         let mut serialized = serde_json::to_value(&params).expect("serialize exec params");
@@ -609,6 +794,10 @@ mod tests {
                 "allowLocalBinding": false,
             })
         );
+        assert_eq!(
+            serialized["networkProxy"]["auditMetadata"]["conversationId"],
+            "conversation-1"
+        );
         let round_trip: ExecParams =
             serde_json::from_value(serialized.clone()).expect("deserialize exec params");
         assert_eq!(round_trip, params);
@@ -617,10 +806,18 @@ mod tests {
             .as_object_mut()
             .expect("exec params object")
             .remove("managedNetwork");
+        serialized
+            .as_object_mut()
+            .expect("exec params object")
+            .remove("networkProxy");
         let legacy: ExecParams =
             serde_json::from_value(serialized).expect("deserialize legacy exec params");
         assert!(legacy.enforce_managed_network);
         assert_eq!(legacy.managed_network, None);
+        assert_eq!(legacy.network_proxy, None);
+        let legacy_serialized =
+            serde_json::to_value(&legacy).expect("serialize exec params without proxy launch");
+        assert!(legacy_serialized.get("networkProxy").is_none());
     }
 
     #[test]
@@ -638,6 +835,7 @@ mod tests {
                     path: "/bin/zsh".to_string(),
                 },
                 cwd: None,
+                capabilities: EnvironmentCapabilities::default(),
             }
         );
     }
@@ -670,6 +868,38 @@ mod tests {
             "sandbox": native_path_sandbox,
         }))
         .expect_err("native absolute sandbox cwd should not deserialize as a URI");
+    }
+
+    #[test]
+    fn filesystem_protocol_round_trips_permission_paths_as_uris() {
+        let native_cwd = std::env::current_dir().expect("current directory");
+        let cwd = PathUri::from_host_native_path(&native_cwd).expect("cwd URI");
+        let mut file_system_policy =
+            FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: native_cwd.try_into().expect("absolute cwd"),
+                },
+                access: FileSystemAccessMode::Read,
+            }]);
+        file_system_policy.glob_scan_max_depth = Some(2);
+        let permissions = PermissionProfile::from_runtime_permissions(
+            &file_system_policy,
+            NetworkSandboxPolicy::Restricted,
+        );
+        let sandbox =
+            FileSystemSandboxContext::from_permission_profile_with_cwd(permissions, cwd.clone());
+
+        let serialized = serde_json::to_value(&sandbox).expect("serialize sandbox");
+
+        assert_eq!(
+            serialized["permissions"]["file_system"]["entries"][0]["path"]["path"],
+            serde_json::json!(cwd.to_string())
+        );
+        assert_eq!(
+            serde_json::from_value::<FileSystemSandboxContext>(serialized)
+                .expect("deserialize sandbox"),
+            sandbox
+        );
     }
 
     #[test]

@@ -63,10 +63,6 @@ use tempfile::TempDir;
 use tokio::time::Duration;
 use wiremock::BodyPrintLimit;
 use wiremock::MockServer;
-#[cfg(not(debug_assertions))]
-use wiremock::ResponseTemplate;
-#[cfg(not(debug_assertions))]
-use wiremock::matchers::body_string_contains;
 
 const VIEW_IMAGE_TURN_COMPLETE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -589,7 +585,8 @@ async fn view_image_routes_to_selected_remote_environment() -> anyhow::Result<()
     let absolute_image_path = image_path_uri.inferred_native_path_string();
     let remote_selection = TurnEnvironmentSelection {
         environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
-        cwd: remote_cwd_uri,
+        cwd: remote_cwd_uri.clone(),
+        workspace_roots: vec![remote_cwd_uri],
     };
     let relative_call_id = "call-view-image-relative-multi-env";
     let absolute_call_id = "call-view-image-absolute-multi-env";
@@ -1357,7 +1354,8 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
             effort: ReasoningEffort::Medium,
             description: ReasoningEffort::Medium.to_string(),
         }],
-        reasoning_control: codex_protocol::openai_models::ReasoningControl::None,
+        reasoning_control: Default::default(),
+        supports_reasoning_summaries: false,
         shell_type: ConfigShellToolType::ShellCommand,
         visibility: ModelVisibility::List,
         supported_in_api: true,
@@ -1376,7 +1374,7 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
         base_instructions: "base instructions".to_string(),
         model_messages: None,
         include_skills_usage_instructions: false,
-        supports_reasoning_summaries: false,
+        supports_reasoning_summary_parameter: true,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,
@@ -1461,82 +1459,6 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
         output_text,
         "view_image is not allowed because you do not support image inputs"
     );
-
-    Ok(())
-}
-
-#[cfg(not(debug_assertions))]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replaces_invalid_local_image_after_bad_request() -> anyhow::Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = start_mock_server().await;
-
-    const INVALID_IMAGE_ERROR: &str =
-        "The image data you provided does not represent a valid image";
-
-    let invalid_image_mock = responses::mount_response_once_match(
-        &server,
-        body_string_contains("\"input_image\""),
-        ResponseTemplate::new(400)
-            .insert_header("content-type", "text/plain")
-            .set_body_string(INVALID_IMAGE_ERROR),
-    )
-    .await;
-
-    let success_response = sse(vec![
-        ev_response_created("resp-2"),
-        ev_assistant_message("msg-1", "done"),
-        ev_completed("resp-2"),
-    ]);
-
-    let completion_mock = responses::mount_sse_once(&server, success_response).await;
-
-    let mut builder = test_codex();
-    let test = builder.build_with_auto_env(&server).await?;
-    let TestCodex {
-        codex,
-        session_configured,
-        ..
-    } = &test;
-
-    let rel_path = "assets/poisoned.png";
-    let abs_path = write_workspace_png(&test, rel_path, 1024, 512, [10u8, 20, 30, 255]).await?;
-
-    let session_model = session_configured.model.clone();
-
-    codex
-        .submit(disabled_user_turn(
-            &test,
-            vec![UserInput::LocalImage {
-                path: abs_path.clone(),
-                detail: None,
-            }],
-            session_model,
-        ))
-        .await?;
-
-    wait_for_event_with_timeout(
-        &codex,
-        |event| matches!(event, EventMsg::TurnComplete(_)),
-        VIEW_IMAGE_TURN_COMPLETE_TIMEOUT,
-    )
-    .await;
-
-    let first_body = invalid_image_mock.single_request().body_json();
-    assert!(
-        find_image_message(&first_body).is_some(),
-        "initial request should include the uploaded image"
-    );
-
-    let second_request = completion_mock.single_request();
-    let second_body = second_request.body_json();
-    assert!(
-        find_image_message(&second_body).is_none(),
-        "second request should replace the invalid image"
-    );
-    let user_texts = second_request.message_input_texts("user");
-    assert!(user_texts.iter().any(|text| text == "Invalid image"));
 
     Ok(())
 }

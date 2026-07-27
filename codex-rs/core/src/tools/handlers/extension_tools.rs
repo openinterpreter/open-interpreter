@@ -13,6 +13,7 @@ use codex_tools::ToolSearchInfo;
 use codex_tools::ToolSpec;
 use codex_tools::TurnItemEmissionFuture;
 use codex_tools::TurnItemEmitter;
+use codex_utils_string::to_ascii_json_string;
 
 use crate::sandboxing::SandboxPermissions;
 use crate::session::session::Session;
@@ -22,6 +23,7 @@ use crate::tools::context::ToolPayload;
 use crate::tools::handlers::apply_granted_turn_permissions;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
+use crate::turn_metadata::McpTurnMetadataContext;
 
 pub(crate) struct ExtensionToolAdapter(Arc<dyn codex_tools::ToolExecutor<ExtensionToolCall>>);
 
@@ -114,9 +116,16 @@ impl TurnItemEmitter for CoreTurnItemEmitter {
 async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall {
     let conversation_history =
         ConversationHistory::new(invocation.session.clone_history().await.into_raw_items());
-    let mut environments =
-        Vec::with_capacity(invocation.step_context.environments.turn_environments.len());
-    for environment in &invocation.step_context.environments.turn_environments {
+    let codex_turn_metadata = invocation
+        .turn
+        .turn_metadata_state
+        .current_meta_value_for_mcp_request(McpTurnMetadataContext {
+            model: invocation.turn.model_info.slug.as_str(),
+            reasoning_effort: invocation.turn.effective_reasoning_effort(),
+        })
+        .and_then(|metadata| to_ascii_json_string(&metadata).ok());
+    let mut environments = Vec::new();
+    for environment in invocation.step_context.environments.turn_environments() {
         // TODO(anp): Migrate extension ToolEnvironment and granted-permission lookup to PathUri
         // so extensions can receive foreign environment cwd values.
         let Ok(native_cwd) = environment.cwd().to_abs_path() else {
@@ -133,7 +142,7 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall {
         .additional_permissions;
         let file_system_sandbox_context = invocation
             .turn
-            .file_system_sandbox_context(additional_permissions, environment.cwd());
+            .file_system_sandbox_context(additional_permissions, environment);
         environments.push(ToolEnvironment {
             environment_id: environment.environment_id.clone(),
             cwd: native_cwd,
@@ -146,6 +155,7 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall {
         call_id: invocation.call_id.clone(),
         tool_name: invocation.tool_name.clone(),
         model: invocation.turn.model_info.slug.clone(),
+        codex_turn_metadata,
         truncation_policy: invocation.turn.model_info.truncation_policy.into(),
         conversation_history,
         turn_item_emitter: Arc::new(CoreTurnItemEmitter {
@@ -261,6 +271,7 @@ mod tests {
                         id: call.call_id.clone(),
                         query: String::new(),
                         action: None,
+                        results: None,
                     }),
                     legacy_events: Vec::new(),
                 })
@@ -325,8 +336,7 @@ mod tests {
         let truncation_policy = turn.model_info.truncation_policy.into();
         let expected_sandbox_cwds = turn
             .environments
-            .turn_environments
-            .iter()
+            .turn_environments()
             .map(|environment| Some(environment.cwd().clone()))
             .collect::<Vec<_>>();
         let history_item = ResponseItem::Message {
@@ -410,6 +420,7 @@ mod tests {
                 id: "call-extension".to_string(),
                 query: String::new(),
                 action: None,
+                results: None,
             }
         );
     }
@@ -418,11 +429,6 @@ mod tests {
     async fn image_generation_publication_preserves_extension_saved_path() {
         let (session, turn, rx) = crate::session::tests::make_session_and_context_with_rx().await;
         let expected_path = test_path_buf("/tmp/extension-claimed.png").abs();
-        let default_path = crate::stream_events_utils::image_generation_artifact_path(
-            &turn.config.codex_home,
-            &session.thread_id.to_string(),
-            "call-image",
-        );
         let emitter = CoreTurnItemEmitter {
             session: Arc::downgrade(&session),
             turn: Arc::downgrade(&turn),
@@ -487,6 +493,5 @@ mod tests {
 
         assert_eq!(started_item, expected_started_item);
         assert_eq!(completed_item, expected_completed_item);
-        assert!(!default_path.exists());
     }
 }

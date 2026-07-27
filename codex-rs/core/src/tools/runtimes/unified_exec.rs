@@ -78,7 +78,6 @@ pub struct UnifiedExecRequest {
     #[cfg(unix)]
     pub additional_permissions_preapproved: bool,
     pub justification: Option<String>,
-    pub capture_policy: ExecCapturePolicy,
     pub exec_approval_requirement: ExecApprovalRequirement,
 }
 
@@ -103,7 +102,6 @@ pub struct UnifiedExecRuntime<'a> {
 
 fn unified_exec_options(
     network_denial_cancellation_token: Option<CancellationToken>,
-    capture_policy: ExecCapturePolicy,
 ) -> ExecOptions {
     let mut expiration = ExecExpiration::DefaultTimeout;
     if let Some(cancellation) = network_denial_cancellation_token {
@@ -111,7 +109,7 @@ fn unified_exec_options(
     }
     ExecOptions {
         expiration,
-        capture_policy,
+        capture_policy: ExecCapturePolicy::ShellTool,
     }
 }
 
@@ -225,8 +223,9 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
     ) -> std::io::Result<ApprovalAction> {
         Ok(ApprovalAction::ExecCommand {
             id: ctx.call_id.to_string(),
+            environment_id: req.turn_environment.environment_id.clone(),
             command: req.command.clone(),
-            cwd: req.cwd.to_abs_path()?,
+            cwd: req.cwd.clone(),
             sandbox_permissions: req.sandbox_permissions,
             additional_permissions: req.additional_permissions.clone(),
             justification: req.justification.clone(),
@@ -257,6 +256,10 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
 }
 
 impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRuntime<'a> {
+    fn workspace_roots<'b>(&self, req: &'b UnifiedExecRequest) -> &'b [PathUri] {
+        req.turn_environment.workspace_roots()
+    }
+
     fn sandbox_cwd<'b>(&self, req: &'b UnifiedExecRequest) -> Option<&'b PathUri> {
         Some(&req.sandbox_cwd)
     }
@@ -325,7 +328,33 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
             launch_sandbox_permissions,
         ));
         let env = exec_env_for_sandbox_permissions(&req.env, launch_sandbox_permissions);
-        let (env, managed_network_context) = match managed_network {
+        let (env, managed_network_context, network_proxy_launch) = match managed_network {
+            Some(network) if environment_is_remote => {
+                let launch = network.remote_launch_config().await.map_err(|err| {
+                    ToolError::Codex(CodexErr::Io(io::Error::other(err.to_string())))
+                })?;
+                if !launch.proxy.enabled {
+                    (env, None, None)
+                } else {
+                    let environment_info =
+                        req.turn_environment
+                            .environment
+                            .info()
+                            .await
+                            .map_err(|err| {
+                                ToolError::Codex(CodexErr::Io(io::Error::other(format!(
+                                    "failed to query exec-server capabilities: {err}"
+                                ))))
+                            })?;
+                    if !environment_info.capabilities.network_proxy_launch {
+                        return Err(ToolError::Rejected(
+                            "selected exec-server does not support executor-local network proxy launches"
+                                .to_string(),
+                        ));
+                    }
+                    (env, None, Some(launch))
+                }
+            }
             Some(network) => {
                 let prepared = network
                     .prepare_for_optional_environment(
@@ -338,9 +367,9 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
                             req.turn_environment.environment_id
                         ))))
                     })?;
-                (prepared.env, Some(prepared.sandbox_context))
+                (prepared.env, Some(prepared.sandbox_context), None)
             }
-            None => (env, None),
+            None => (env, None, None),
         };
         let explicit_env_overrides = req.explicit_env_overrides.clone();
         #[cfg(unix)]
@@ -403,10 +432,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
                 }
                 error @ ToolError::Codex(_) => error,
             })?;
-            let options = unified_exec_options(
-                attempt.network_denial_cancellation_token.clone(),
-                req.capture_policy,
-            );
+            let options = unified_exec_options(attempt.network_denial_cancellation_token.clone());
             let mut exec_env = attempt
                 .env_for(
                     command,
@@ -472,19 +498,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
             }
             error @ ToolError::Codex(_) => error,
         })?;
-        let options = unified_exec_options(
-            attempt.network_denial_cancellation_token.clone(),
-            req.capture_policy,
-        );
-        let mut exec_env = attempt
-            .env_for(
-                command.clone(),
-                options.clone(),
-                managed_network,
-                Some(&req.turn_environment.environment_id),
-            )
-            .map_err(ToolError::Codex)?;
-        exec_env.exec_server_env_config = req.exec_server_env_config.clone();
+        let options = unified_exec_options(attempt.network_denial_cancellation_token.clone());
         self.manager
             .open_session_with_exec_env(
                 req.process_id,
@@ -492,6 +506,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
                 options,
                 attempt,
                 managed_network,
+                network_proxy_launch,
                 /*environment_id*/ Some(&req.turn_environment.environment_id),
                 req.exec_server_env_config.clone(),
                 req.tty,
@@ -521,6 +536,7 @@ mod tests {
             LOCAL_ENVIRONMENT_ID.to_string(),
             Arc::new(Environment::default_for_tests()),
             cwd,
+            Vec::new(),
             /*shell*/ None,
         )
     }
@@ -528,8 +544,7 @@ mod tests {
     #[test]
     fn unified_exec_options_combines_default_timeout_with_network_denial_cancellation() {
         let cancellation = CancellationToken::new();
-        let options =
-            unified_exec_options(Some(cancellation.clone()), ExecCapturePolicy::ShellTool);
+        let options = unified_exec_options(Some(cancellation.clone()));
 
         assert_eq!(options.capture_policy, ExecCapturePolicy::ShellTool);
         match options.expiration {
@@ -595,7 +610,6 @@ mod tests {
             #[cfg(unix)]
             additional_permissions_preapproved: false,
             justification: None,
-            capture_policy: ExecCapturePolicy::ShellTool,
             exec_approval_requirement: ExecApprovalRequirement::Skip {
                 bypass_sandbox: false,
                 proposed_execpolicy_amendment: None,
@@ -698,7 +712,6 @@ mod tests {
             #[cfg(unix)]
             additional_permissions_preapproved: false,
             justification: None,
-            capture_policy: ExecCapturePolicy::ShellTool,
             exec_approval_requirement,
         }
     }

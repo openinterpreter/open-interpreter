@@ -1,6 +1,7 @@
 //! Session headers, onboarding guidance, and transcript cards.
 
 use super::*;
+use codex_product_info::Product;
 
 pub(crate) const SESSION_HEADER_MAX_INNER_WIDTH: usize = 56; // Just an eyeballed value
 
@@ -71,13 +72,6 @@ fn with_border_internal(
     out
 }
 
-/// Return the emoji followed by a hair space (U+200A).
-/// Using only the hair space avoids excessive padding after the emoji while
-/// still providing a small visual gap across terminals.
-pub(crate) fn padded_emoji(emoji: &str) -> String {
-    format!("{emoji}\u{200A}")
-}
-
 #[derive(Debug)]
 struct TooltipHistoryCell {
     tip: String,
@@ -85,11 +79,11 @@ struct TooltipHistoryCell {
 }
 
 impl TooltipHistoryCell {
-    fn new(tip: String, cwd: &Path) -> Option<Self> {
-        Some(Self {
-            tip: productize_tip(tip, codex_product_info::Product::current())?,
+    fn new(tip: String, cwd: &Path) -> Self {
+        Self {
+            tip,
             cwd: cwd.to_path_buf(),
-        })
+        }
     }
 }
 
@@ -113,15 +107,6 @@ impl HistoryCell for TooltipHistoryCell {
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
         vec![Line::from(format!("Tip: {}", self.tip))]
-    }
-}
-
-pub(super) fn productize_tip(tip: String, product: codex_product_info::Product) -> Option<String> {
-    match product {
-        codex_product_info::Product::Codex => Some(tip),
-        codex_product_info::Product::OpenInterpreter => {
-            tooltips::productize_open_interpreter_tooltip(&tip)
-        }
     }
 }
 
@@ -155,15 +140,16 @@ pub(crate) fn new_session_info(
     auth_plan: Option<PlanType>,
     show_fast_status: bool,
 ) -> SessionInfoCell {
-    let product = codex_product_info::Product::current();
     // Header box rendered as history (so it appears at the very top)
     let header = SessionHeaderHistoryCell::new(
-        session.model.clone(),
+        crate::model_display::provider_model_label(
+            &session.model_provider_id,
+            session.model.as_str(),
+        ),
         session.reasoning_effort.clone(),
         show_fast_status,
         config.cwd.to_path_buf(),
         CODEX_CLI_VERSION,
-        product,
     )
     .with_yolo_mode(has_yolo_permissions(
         session.approval_policy,
@@ -172,6 +158,8 @@ pub(crate) fn new_session_info(
     let mut parts: Vec<Box<dyn HistoryCell>> = vec![Box::new(header)];
 
     if is_first_event {
+        let product = Product::current();
+        let product_name = product.display_name();
         // Help lines below the header (new copy and list)
         let help_lines: Vec<Line<'static>> = vec![
             "  To get started, describe a task or try one of these commands:"
@@ -181,11 +169,7 @@ pub(crate) fn new_session_info(
             Line::from(vec![
                 "  ".into(),
                 "/init".into(),
-                format!(
-                    " - create an AGENTS.md file with instructions for {}",
-                    product.display_name()
-                )
-                .dim(),
+                format!(" - create an AGENTS.md file with instructions for {product_name}").dim(),
             ]),
             Line::from(vec![
                 "  ".into(),
@@ -195,7 +179,7 @@ pub(crate) fn new_session_info(
             Line::from(vec![
                 "  ".into(),
                 "/permissions".into(),
-                format!(" - choose what {} is allowed to do", product.display_name()).dim(),
+                format!(" - choose what {product_name} is allowed to do").dim(),
             ]),
             Line::from(vec![
                 "  ".into(),
@@ -214,7 +198,7 @@ pub(crate) fn new_session_info(
         if config.show_tooltips
             && let Some(tooltips) = tooltip_override
                 .or_else(|| tooltips::get_tooltip(auth_plan, show_fast_status))
-                .and_then(|tip| TooltipHistoryCell::new(tip, &config.cwd))
+                .map(|tip| TooltipHistoryCell::new(tip, &config.cwd))
         {
             parts.push(Box::new(tooltips));
         }
@@ -255,7 +239,6 @@ pub(crate) fn has_yolo_permissions(
 #[derive(Debug)]
 pub(crate) struct SessionHeaderHistoryCell {
     version: &'static str,
-    product: codex_product_info::Product,
     model: String,
     model_style: Style,
     reasoning_effort: Option<ReasoningEffortConfig>,
@@ -271,7 +254,6 @@ impl SessionHeaderHistoryCell {
         show_fast_status: bool,
         directory: PathBuf,
         version: &'static str,
-        product: codex_product_info::Product,
     ) -> Self {
         Self::new_with_style(
             model,
@@ -280,7 +262,6 @@ impl SessionHeaderHistoryCell {
             show_fast_status,
             directory,
             version,
-            product,
         )
     }
 
@@ -291,11 +272,9 @@ impl SessionHeaderHistoryCell {
         show_fast_status: bool,
         directory: PathBuf,
         version: &'static str,
-        product: codex_product_info::Product,
     ) -> Self {
         Self {
             version,
-            product,
             model,
             model_style,
             reasoning_effort,
@@ -346,25 +325,19 @@ impl SessionHeaderHistoryCell {
 
 impl HistoryCell for SessionHeaderHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        if self.product == codex_product_info::Product::OpenInterpreter {
-            return self.open_interpreter_display_lines();
-        }
-
         let Some(inner_width) = card_inner_width(width, SESSION_HEADER_MAX_INNER_WIDTH) else {
             return Vec::new();
         };
 
         let make_row = |spans: Vec<Span<'static>>| Line::from(spans);
 
-        // Title line rendered as ">_ Product Name (vX)" for real releases.
-        let mut title_spans: Vec<Span<'static>> = vec![
+        let product_name = Product::current().display_name();
+        let title_spans: Vec<Span<'static>> = vec![
             Span::from(">_ ").dim(),
-            Span::from(self.product.display_name()).bold(),
+            Span::from(product_name).bold(),
+            Span::from(" ").dim(),
+            Span::from(format!("(v{})", self.version)).dim(),
         ];
-        if should_show_version(self.product, self.version) {
-            title_spans.push(Span::from(" ").dim());
-            title_spans.push(Span::from(format!("(v{})", self.version)).dim());
-        }
 
         const CHANGE_MODEL_HINT_COMMAND: &str = "/model";
         const CHANGE_MODEL_HINT_EXPLANATION: &str = " to change";
@@ -427,17 +400,12 @@ impl HistoryCell for SessionHeaderHistoryCell {
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
-        if self.product == codex_product_info::Product::OpenInterpreter {
-            return self.open_interpreter_display_lines();
-        }
-
-        let title = if should_show_version(self.product, self.version) {
-            format!("{} (v{})", self.product.display_name(), self.version)
-        } else {
-            self.product.display_name().to_string()
-        };
         let mut lines = vec![
-            Line::from(title),
+            Line::from(format!(
+                "{} (v{})",
+                Product::current().display_name(),
+                self.version
+            )),
             Line::from(format!(
                 "model: {}{}",
                 self.model,
@@ -454,38 +422,5 @@ impl HistoryCell for SessionHeaderHistoryCell {
             lines.push(Line::from("permissions: YOLO mode"));
         }
         lines
-    }
-}
-
-impl SessionHeaderHistoryCell {
-    fn open_interpreter_display_lines(&self) -> Vec<Line<'static>> {
-        const HEADER_INDENT: &str = "  ";
-        let mut title_spans: Vec<Span<'static>> = vec![
-            Span::from(HEADER_INDENT).dim(),
-            Span::from(self.product.display_name()).bold(),
-        ];
-        if should_show_version(self.product, self.version) {
-            title_spans.push(Span::from(" ").dim());
-            title_spans.push(Span::from(format!("(v{})", self.version)).dim());
-        }
-
-        let mut lines = vec![Line::from(""), Line::from(title_spans)];
-        if self.yolo_mode {
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::from(HEADER_INDENT).dim(),
-                Span::from("permissions: ").dim(),
-                "YOLO mode".magenta().bold(),
-            ]));
-        }
-        lines
-    }
-}
-
-fn should_show_version(product: codex_product_info::Product, version: &str) -> bool {
-    match product {
-        codex_product_info::Product::Codex | codex_product_info::Product::OpenInterpreter => {
-            !version.trim().is_empty()
-        }
     }
 }

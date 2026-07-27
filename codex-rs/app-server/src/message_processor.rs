@@ -13,6 +13,8 @@ use crate::extensions::ThreadExtensionDependencies;
 use crate::extensions::app_server_extension_event_sink;
 use crate::extensions::guardian_agent_spawner;
 use crate::extensions::thread_extensions;
+use crate::external_agent_migration::ExternalAgentConfigRequestProcessor;
+use crate::external_agent_migration::ExternalAgentConfigRequestProcessorArgs;
 use crate::fs_watch::FsWatchManager;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
@@ -24,8 +26,6 @@ use crate::request_processors::CatalogRequestProcessor;
 use crate::request_processors::CommandExecRequestProcessor;
 use crate::request_processors::ConfigRequestProcessor;
 use crate::request_processors::EnvironmentRequestProcessor;
-use crate::request_processors::ExternalAgentConfigRequestProcessor;
-use crate::request_processors::ExternalAgentConfigRequestProcessorArgs;
 use crate::request_processors::FeedbackRequestProcessor;
 use crate::request_processors::FsRequestProcessor;
 use crate::request_processors::GitRequestProcessor;
@@ -262,6 +262,8 @@ impl MessageProcessor {
             ThreadManager::new(
                 config.as_ref(),
                 auth_manager.clone(),
+                codex_core::build_models_manager(config.as_ref(), auth_manager.clone()),
+                codex_core::CodexAppsToolsCache::default(),
                 session_source,
                 environment_manager,
                 thread_extensions(
@@ -313,6 +315,21 @@ impl MessageProcessor {
         let workspace_settings_cache =
             Arc::new(workspace_settings::WorkspaceSettingsCache::default());
         let app_list_shutdown_token = CancellationToken::new();
+        let request_serialization_queues = RequestSerializationQueues::default();
+        let config_processor = ConfigRequestProcessor::new(
+            outgoing.clone(),
+            config_manager.clone(),
+            thread_manager.clone(),
+            analytics_events_client.clone(),
+        );
+        let on_effective_plugins_changed =
+            crate::effective_plugin_change::effective_plugins_changed_callback(
+                auth_manager.clone(),
+                Arc::clone(&thread_manager),
+                config_manager.clone(),
+                config_processor.clone(),
+                request_serialization_queues.clone(),
+            );
         let account_processor = AccountRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
@@ -382,6 +399,7 @@ impl MessageProcessor {
             analytics_events_client.clone(),
             config_manager.clone(),
             workspace_settings_cache,
+            on_effective_plugins_changed,
         );
         let remote_control_processor = RemoteControlRequestProcessor::new(remote_control_handle);
         let search_processor = SearchRequestProcessor::new(outgoing.clone());
@@ -437,12 +455,6 @@ impl MessageProcessor {
                     Some(on_effective_plugins_changed),
                 );
         }
-        let config_processor = ConfigRequestProcessor::new(
-            outgoing.clone(),
-            config_manager.clone(),
-            thread_manager.clone(),
-            analytics_events_client.clone(),
-        );
         let external_agent_config_processor =
             ExternalAgentConfigRequestProcessor::new(ExternalAgentConfigRequestProcessorArgs {
                 outgoing: outgoing.clone(),
@@ -492,7 +504,7 @@ impl MessageProcessor {
             thread_processor,
             turn_processor,
             windows_sandbox_processor,
-            request_serialization_queues: RequestSerializationQueues::default(),
+            request_serialization_queues,
         }
     }
 
@@ -955,6 +967,9 @@ impl MessageProcessor {
             ClientRequest::EnvironmentInfo { params, .. } => {
                 self.environment_processor.environment_info(params).await
             }
+            ClientRequest::EnvironmentStatus { params, .. } => {
+                self.environment_processor.environment_status(params).await
+            }
             ClientRequest::FsReadFile { params, .. } => self
                 .fs_processor
                 .read_file(params)
@@ -1132,6 +1147,11 @@ impl MessageProcessor {
             ClientRequest::ThreadSearch { params, .. } => {
                 self.thread_processor.thread_search(params).await
             }
+            ClientRequest::ThreadSearchOccurrences { params, .. } => {
+                self.thread_processor
+                    .thread_search_occurrences(params)
+                    .await
+            }
             ClientRequest::ThreadLoadedList { params, .. } => {
                 self.thread_processor.thread_loaded_list(params).await
             }
@@ -1204,9 +1224,15 @@ impl MessageProcessor {
             ClientRequest::PluginShareDelete { params, .. } => {
                 self.plugin_processor.plugin_share_delete(params).await
             }
+            ClientRequest::AppsRead { params, .. } => self.apps_processor.apps_read(params).await,
             ClientRequest::AppsList { params, .. } => {
                 self.apps_processor.apps_list(&request_id, params).await
             }
+            ClientRequest::AppsInstalled { params, .. } => self
+                .apps_processor
+                .apps_installed(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::SkillsConfigWrite { params, .. } => {
                 self.catalog_processor.skills_config_write(params).await
             }

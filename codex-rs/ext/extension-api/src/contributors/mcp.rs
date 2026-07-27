@@ -1,4 +1,6 @@
 use codex_config::McpServerConfig;
+use codex_exec_server_protocol::ExecutorCapabilityDiscoverySnapshot;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
 
 use crate::ExtensionData;
 use crate::ExtensionDataInit;
@@ -15,8 +17,12 @@ pub struct McpServerContributionContext<'a, C> {
     thread_store: Option<&'a ExtensionData>,
     /// Stable host inputs for the active thread, when resolution is thread-scoped.
     thread_init: Option<&'a ExtensionDataInit>,
-    /// Environment IDs whose selected roots may contribute to this exact step.
-    available_environment_ids: Option<&'a [String]>,
+    /// Effective request originator for the active thread, when resolution is thread-scoped.
+    originator: Option<&'a str>,
+    /// Selected roots resolved against ready environments for this exact step.
+    ready_selected_capability_roots: Option<&'a [SelectedCapabilityRoot]>,
+    /// Executor-materialized capability files shared by all consumers in this exact step.
+    executor_capability_discovery: Option<&'a ExecutorCapabilityDiscoverySnapshot>,
 }
 
 impl<C> Clone for McpServerContributionContext<'_, C> {
@@ -34,7 +40,9 @@ impl<'a, C> McpServerContributionContext<'a, C> {
             config,
             thread_store: None,
             thread_init: None,
-            available_environment_ids: None,
+            originator: None,
+            ready_selected_capability_roots: None,
+            executor_capability_discovery: None,
         }
     }
 
@@ -43,13 +51,17 @@ impl<'a, C> McpServerContributionContext<'a, C> {
         config: &'a C,
         thread_init: &'a ExtensionDataInit,
         thread_store: &'a ExtensionData,
-        available_environment_ids: &'a [String],
+        originator: &'a str,
+        ready_selected_capability_roots: &'a [SelectedCapabilityRoot],
+        executor_capability_discovery: Option<&'a ExecutorCapabilityDiscoverySnapshot>,
     ) -> Self {
         Self {
             config,
             thread_store: Some(thread_store),
             thread_init: Some(thread_init),
-            available_environment_ids: Some(available_environment_ids),
+            originator: Some(originator),
+            ready_selected_capability_roots: Some(ready_selected_capability_roots),
+            executor_capability_discovery,
         }
     }
 
@@ -68,12 +80,19 @@ impl<'a, C> McpServerContributionContext<'a, C> {
         self.thread_init
     }
 
-    /// Returns the exact environment availability projection for a model step.
-    ///
-    /// `Some` means contributors must omit selected roots whose environment ID is absent from the
-    /// slice. Global resolution returns `None` because it has no thread environments.
-    pub fn available_environment_ids(&self) -> Option<&'a [String]> {
-        self.available_environment_ids
+    /// Returns the effective request originator when resolving for a running thread.
+    pub fn originator(&self) -> Option<&'a str> {
+        self.originator
+    }
+
+    /// Returns selected roots resolved against the ready environments for this model step.
+    pub fn ready_selected_capability_roots(&self) -> Option<&'a [SelectedCapabilityRoot]> {
+        self.ready_selected_capability_roots
+    }
+
+    /// Returns the executor-materialized capability files for this model step, when enabled.
+    pub fn executor_capability_discovery(&self) -> Option<&'a ExecutorCapabilityDiscoverySnapshot> {
+        self.executor_capability_discovery
     }
 }
 

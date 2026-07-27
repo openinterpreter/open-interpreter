@@ -94,7 +94,7 @@ pub fn with_managed_mitm_ca_readable_root(
     )
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct SandboxCommand {
     pub program: OsString,
     pub args: Vec<String>,

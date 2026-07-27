@@ -120,7 +120,7 @@ pub(crate) async fn execute_user_shell_command(
             trace_id: turn_context.trace_id.clone(),
             started_at: turn_context.turn_timing_state.started_at_unix_secs().await,
             model_context_window: turn_context.model_context_window(),
-            collaboration_mode_kind: turn_context.collaboration_mode.mode,
+            collaboration_mode_kind: turn_context.mode,
         });
         session.send_event(turn_context.as_ref(), event).await;
     }
@@ -231,6 +231,7 @@ pub(crate) async fn execute_user_shell_command(
         exec_server_sandbox: None,
         exec_server_enforce_managed_network: false,
         exec_server_managed_network: None,
+        exec_server_network_proxy: None,
     };
 
     let stdout_stream = Some(StdoutStream {

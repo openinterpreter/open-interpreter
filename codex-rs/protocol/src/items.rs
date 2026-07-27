@@ -1,4 +1,5 @@
 use crate::AgentPath;
+use crate::ResponseItemId;
 use crate::ThreadId;
 use crate::dynamic_tools::DynamicToolCallOutputContentItem;
 use crate::mcp::CallToolResult;
@@ -30,6 +31,7 @@ use quick_xml::se::to_string as to_xml_string;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -55,11 +57,10 @@ pub enum TurnItem {
     /// schema is owned by the web-search extension.
     WebSearch(WebSearchItem),
     ImageView(ImageViewItem),
-    Sleep(SleepItem),
     /// Item whose schema and lifecycle details are owned by an extension.
     ///
-    /// Standalone image generation and web search use this path. App-server
-    /// wraps the same typed items in their public variants.
+    /// Standalone image generation, sleep, and web search use this path.
+    /// App-server wraps the same typed items in their public variants.
     Extension(ExtensionItem),
     /// Hosted Responses API image-generation item handled directly by core.
     ///
@@ -298,6 +299,14 @@ pub struct WebSearchItem {
     pub id: String,
     pub query: String,
     pub action: WebSearchAction,
+    /// Structured search results returned out-of-band by standalone web search.
+    ///
+    /// These stay as opaque JSON at the Codex transport boundary so new result
+    /// fields and result types can pass through without changing model-visible
+    /// context or requiring a Codex release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub results: Option<Vec<JsonValue>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
@@ -308,12 +317,6 @@ pub struct ImageViewItem {
     /// This core protocol type is not exposed directly in the app-server API.
     /// App-server converts the path to `LegacyAppPathString` at its boundary.
     pub path: PathUri,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
-pub struct SleepItem {
-    pub id: String,
-    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
@@ -367,9 +370,6 @@ pub struct McpToolCallItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub app_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub template_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub action_name: Option<String>,
@@ -516,6 +516,26 @@ impl UserMessageItem {
                 .collect(),
         )
     }
+
+    pub fn audio_urls(&self) -> Vec<String> {
+        self.content
+            .iter()
+            .filter_map(|c| match c {
+                UserInput::Audio { audio_url } => Some(audio_url.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn local_audio_paths(&self) -> Vec<std::path::PathBuf> {
+        self.content
+            .iter()
+            .filter_map(|c| match c {
+                UserInput::LocalAudio { path } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 fn trim_trailing_default_image_details(
@@ -528,9 +548,9 @@ fn trim_trailing_default_image_details(
 }
 
 impl HookPromptItem {
-    pub fn from_fragments(id: Option<&String>, fragments: Vec<HookPromptFragment>) -> Self {
+    pub fn from_fragments(id: Option<&str>, fragments: Vec<HookPromptFragment>) -> Self {
         Self {
-            id: id.cloned().unwrap_or_else(new_item_id),
+            id: id.map(str::to_string).unwrap_or_else(new_item_id),
             fragments,
         }
     }
@@ -560,7 +580,7 @@ pub fn build_hook_prompt_message(fragments: &[HookPromptFragment]) -> Option<Res
     }
 
     Some(ResponseItem::Message {
-        id: Some(new_item_id()),
+        id: Some(ResponseItemId::new("msg")),
         role: "user".to_string(),
         content,
         phase: None,
@@ -569,7 +589,7 @@ pub fn build_hook_prompt_message(fragments: &[HookPromptFragment]) -> Option<Res
 }
 
 pub fn parse_hook_prompt_message(
-    id: Option<&String>,
+    id: Option<&str>,
     content: &[ContentItem],
 ) -> Option<HookPromptItem> {
     let fragments = content
@@ -610,17 +630,6 @@ fn serialize_hook_prompt_fragment(text: &str, hook_run_id: &str) -> Option<Strin
     .ok()
 }
 
-impl AgentMessageItem {
-    pub fn new(content: &[AgentMessageContent]) -> Self {
-        Self {
-            id: new_item_id(),
-            content: content.to_vec(),
-            phase: None,
-            memory_citation: None,
-        }
-    }
-}
-
 impl TurnItem {
     pub fn id(&self) -> String {
         match self {
@@ -635,7 +644,6 @@ impl TurnItem {
             TurnItem::SubAgentActivity(item) => item.id.clone(),
             TurnItem::WebSearch(item) => item.id.clone(),
             TurnItem::ImageView(item) => item.id.clone(),
-            TurnItem::Sleep(item) => item.id.clone(),
             TurnItem::Extension(item) => item.id().to_string(),
             TurnItem::ImageGeneration(item) => item.id.clone(),
             TurnItem::EnteredReviewMode(item) => item.id.clone(),
@@ -650,7 +658,51 @@ impl TurnItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_extension_items::sleep::SleepItem;
     use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    #[test]
+    fn sleep_extension_item_preserves_type_and_kind() {
+        let item = TurnItem::Extension(ExtensionItem::Sleep(SleepItem {
+            id: "sleep-1".to_string(),
+            duration_ms: 1_000,
+        }));
+
+        assert_eq!(
+            serde_json::to_value(item).expect("serialize sleep extension item"),
+            json!({
+                "type": "Extension",
+                "kind": "clock.sleep",
+                "id": "sleep-1",
+                "durationMs": 1_000,
+            })
+        );
+    }
+
+    #[test]
+    fn user_message_item_extracts_audio_attachments() {
+        let item = UserMessageItem::new(&[
+            UserInput::Text {
+                text: "transcribe these".to_string(),
+                text_elements: Vec::new(),
+            },
+            UserInput::Audio {
+                audio_url: "https://example.com/remote.mp3".to_string(),
+            },
+            UserInput::LocalAudio {
+                path: std::path::PathBuf::from("local.wav"),
+            },
+        ]);
+
+        assert_eq!(
+            (item.audio_urls(), item.local_audio_paths()),
+            (
+                vec!["https://example.com/remote.mp3".to_string()],
+                vec![std::path::PathBuf::from("local.wav")],
+            )
+        );
+    }
 
     #[test]
     fn hook_prompt_roundtrips_multiple_fragments() {
@@ -660,9 +712,10 @@ mod tests {
         ];
         let message = build_hook_prompt_message(&original).expect("hook prompt");
 
-        let ResponseItem::Message { content, .. } = message else {
+        let ResponseItem::Message { id, content, .. } = message else {
             panic!("expected hook prompt message");
         };
+        assert!(id.is_some_and(|id| id.starts_with("msg_")));
 
         let parsed = parse_hook_prompt_message(/*id*/ None, &content).expect("parsed hook prompt");
         assert_eq!(parsed.fragments, original);

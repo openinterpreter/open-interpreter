@@ -24,6 +24,8 @@ use std::borrow::Cow;
 use std::ops::Range;
 use std::path::Path;
 
+use crate::inline_visualization::InlineVisualizationContext;
+use crate::inline_visualization::rewrite_inline_visualizations;
 use crate::table_detect;
 use crate::terminal_hyperlinks::HyperlinkLine;
 
@@ -71,8 +73,65 @@ pub(crate) fn render_markdown_agent_with_links_and_cwd(
     width: Option<usize>,
     cwd: Option<&Path>,
 ) -> Vec<HyperlinkLine> {
+    render_markdown_agent_with_links_cwd_and_visualizations(
+        markdown_source,
+        width,
+        cwd,
+        /*inline_visualization_context*/ None,
+    )
+}
+
+pub(crate) fn render_markdown_agent_with_links_cwd_and_visualizations(
+    markdown_source: &str,
+    width: Option<usize>,
+    cwd: Option<&Path>,
+    inline_visualization_context: Option<&InlineVisualizationContext>,
+) -> Vec<HyperlinkLine> {
+    let rewritten = rewrite_inline_visualizations(markdown_source, inline_visualization_context);
+    let normalized = unwrap_markdown_fences(&rewritten.markdown);
+    let is_hidden_link_destination =
+        |destination: &str| rewritten.trusted_file_links.contains_key(destination);
+    let mut lines =
+        crate::markdown_render::render_markdown_lines_with_width_cwd_and_hidden_link_destinations(
+            &normalized,
+            width,
+            cwd,
+            &is_hidden_link_destination,
+        );
+    for hyperlink in lines.iter_mut().flat_map(|line| &mut line.hyperlinks) {
+        if let Some(link) = rewritten.trusted_file_links.get(&hyperlink.destination) {
+            hyperlink.retarget_to_trusted_file(&link.destination);
+        }
+    }
+    lines
+}
+
+/// Render an agent message and collect the block metadata needed for incremental rendering.
+///
+/// Block offsets are mapped back to `markdown_source` after Markdown table fences are unwrapped.
+/// If a normalized boundary cannot be expressed as a raw-source suffix, it is discarded so the
+/// transformed block remains mutable.
+pub(crate) fn render_streaming_markdown_agent_with_links_and_cwd(
+    markdown_source: &str,
+    width: Option<usize>,
+    cwd: Option<&Path>,
+) -> crate::markdown_render::StreamingMarkdownRender {
     let normalized = unwrap_markdown_fences(markdown_source);
-    crate::markdown_render::render_markdown_lines_with_width_and_cwd(&normalized, width, cwd)
+    let mut rendered = crate::markdown_render::render_streaming_markdown_lines_with_width_and_cwd(
+        &normalized,
+        width,
+        cwd,
+    );
+    if normalized != markdown_source {
+        // Fence unwrapping removes opening/closing lines. A normalized tail that is still a raw
+        // suffix necessarily begins after those removed lines, so its boundary can safely be
+        // mapped back to the raw source; otherwise leave the transformed block mutable.
+        rendered.last_top_level_block_start = rendered
+            .last_top_level_block_start
+            .and_then(|boundary| markdown_source.strip_suffix(&normalized[boundary..]))
+            .map(str::len);
+    }
+    rendered
 }
 
 /// Strip `` ```md ``/`` ```markdown `` fences that contain tables, emitting their content as bare

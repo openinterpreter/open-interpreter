@@ -156,7 +156,7 @@ enum Subcommand {
     /// [experimental] Manage the app-server daemon with remote control enabled.
     RemoteControl(RemoteControlCommand),
 
-    /// Launch the Codex desktop app (opens the app installer if missing).
+    /// Launch the Desktop app (opens the app installer if missing).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     App(app_cmd::AppCommand),
 
@@ -1701,9 +1701,12 @@ fn profile_v2_for_subcommand<'a>(
         | Subcommand::Debug(DebugCommand {
             subcommand: DebugSubcommand::PromptInput(_),
         }) => Ok(Some(profile_v2)),
-        _ => anyhow::bail!(
-            "--profile only applies to runtime commands and `interpreter mcp`: `interpreter`, `interpreter exec`, `interpreter review`, `interpreter resume`, `interpreter archive`, `interpreter delete`, `interpreter unarchive`, `interpreter fork`, `interpreter mcp`, `interpreter sandbox`, and `interpreter debug prompt-input`."
-        ),
+        _ => {
+            let command = product_command_name();
+            anyhow::bail!(
+                "--profile only applies to runtime commands and `{command} mcp`: `{command}`, `{command} exec`, `{command} review`, `{command} resume`, `{command} archive`, `{command} delete`, `{command} unarchive`, `{command} fork`, `{command} mcp`, `{command} sandbox`, and `{command} debug prompt-input`."
+            )
+        }
     }
 }
 
@@ -2419,7 +2422,7 @@ fn confirm(prompt: &str) -> std::io::Result<bool> {
     Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
 }
 
-/// Build the final `TuiCli` for a `interpreter resume` invocation.
+/// Build the final `TuiCli` for a `codex resume` invocation.
 fn finalize_resume_interactive(
     mut interactive: TuiCli,
     root_config_overrides: CliConfigOverrides,
@@ -3225,7 +3228,7 @@ mod tests {
             lines,
             vec![
                 "Token usage: total=2 input=0 output=2".to_string(),
-                "To continue this session, run interpreter resume 123e4567-e89b-12d3-a456-426614174000"
+                "To continue this session, run codex resume 123e4567-e89b-12d3-a456-426614174000"
                     .to_string(),
             ]
         );
@@ -3242,7 +3245,7 @@ mod tests {
             lines,
             vec![
                 "Token usage: total=2 input=0 output=2".to_string(),
-                "To continue this session, run interpreter resume 123e4567-e89b-12d3-a456-426614174000"
+                "To continue this session, run codex resume 123e4567-e89b-12d3-a456-426614174000"
                     .to_string(),
             ]
         );
@@ -3270,7 +3273,7 @@ mod tests {
             lines,
             vec![
                 "Token usage: total=2 input=0 output=2".to_string(),
-                "To continue this session, run interpreter resume, then select my-thread (123e4567-e89b-12d3-a456-426614174000)".to_string(),
+                "To continue this session, run codex resume, then select my-thread (123e4567-e89b-12d3-a456-426614174000)".to_string(),
             ]
         );
     }
@@ -4095,6 +4098,16 @@ mod tests {
             overrides,
             vec!["features.image_detail_original=true".to_string(),]
         );
+    }
+
+    #[test]
+    fn feature_toggles_accept_removed_enable_fanout_flag() {
+        let toggles = FeatureToggles {
+            enable: vec!["enable_fanout".to_string()],
+            disable: Vec::new(),
+        };
+        let overrides = toggles.to_overrides().expect("valid features");
+        assert_eq!(overrides, vec!["features.enable_fanout=true".to_string(),]);
     }
 
     #[test]

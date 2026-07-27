@@ -100,8 +100,8 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 /// - user      `${CODEX_HOME}/config.toml`
 /// - profile   `${CODEX_HOME}/<name>.config.toml`, when selected
 /// - cwd       `${PWD}/config.toml` (loaded but disabled when the directory is untrusted)
-/// - tree      parent directories up to root looking for the project config
-///   folder (`./.openinterpreter/config.toml` for Open Interpreter,
+/// - tree      parent directories up to root looking for the product's project
+///   config folder (`./.openinterpreter/config.toml` for Open Interpreter,
 ///   `./.codex/config.toml` for Codex; loaded but disabled when untrusted)
 /// - repo      `$(git rev-parse --show-toplevel)/.codex/config.toml` (loaded but disabled when untrusted)
 /// - runtime   e.g., --config flags, model selector in UI
@@ -918,9 +918,10 @@ impl ProjectTrustContext {
     }
 }
 
-/// Project-local config folder name, branded per product so Open
-/// Interpreter never loads a repository's Codex configuration (or, when run
-/// in a home directory, the user's ~/.codex) as project config.
+/// Returns the project-local config folder for the active product.
+///
+/// Keeping these folders distinct prevents Open Interpreter from consuming
+/// Codex-specific project configuration and credentials.
 fn project_config_dir_name() -> &'static str {
     match codex_product_info::Product::current() {
         codex_product_info::Product::Codex => ".codex",

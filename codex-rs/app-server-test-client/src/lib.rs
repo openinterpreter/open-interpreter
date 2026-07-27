@@ -46,6 +46,7 @@ use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCRequest;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::LoginAccountResponse;
+use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::RequestId;
@@ -230,12 +231,23 @@ enum CliCommand {
         #[arg(long)]
         abort_on: Option<usize>,
     },
-    /// Trigger the ChatGPT login flow and wait for completion.
+    /// Trigger a ChatGPT or Amazon Bedrock login flow.
     TestLogin {
         /// Use the device-code login flow instead of the browser callback flow.
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, conflicts_with = "amazon_bedrock")]
         device_code: bool,
+        /// Use a Codex-managed Amazon Bedrock API key.
+        #[arg(long, default_value_t = false, conflicts_with = "device_code")]
+        amazon_bedrock: bool,
+        /// Amazon Bedrock API key.
+        #[arg(long, value_name = "API_KEY")]
+        api_key: Option<String>,
+        /// AWS Region for the Amazon Bedrock Mantle endpoint.
+        #[arg(long, value_name = "REGION")]
+        region: Option<String>,
     },
+    /// Log out of the current account and wait for the account update.
+    TestLogout,
     /// Fetch the current account rate limits from the Codex app-server.
     GetAccountRateLimits,
     /// List the available models from the Codex app-server.
@@ -311,6 +323,12 @@ enum CliCommand {
         #[arg(long)]
         confirm_account_mutation: bool,
     },
+}
+
+enum TestLoginMode {
+    ChatgptBrowser,
+    ChatgptDeviceCode,
+    AmazonBedrock { api_key: String, region: String },
 }
 
 pub async fn run() -> Result<()> {
@@ -415,10 +433,29 @@ pub async fn run() -> Result<()> {
             )
             .await
         }
-        CliCommand::TestLogin { device_code } => {
+        CliCommand::TestLogin {
+            device_code,
+            amazon_bedrock,
+            api_key,
+            region,
+        } => {
             ensure_dynamic_tools_unused(&dynamic_tools, "test-login")?;
             let endpoint = resolve_endpoint(codex_bin, url)?;
-            test_login(&endpoint, &config_overrides, device_code).await
+            let mode = if amazon_bedrock {
+                let api_key = api_key.context("--api-key is required with --amazon-bedrock")?;
+                let region = region.context("--region is required with --amazon-bedrock")?;
+                TestLoginMode::AmazonBedrock { api_key, region }
+            } else if device_code {
+                TestLoginMode::ChatgptDeviceCode
+            } else {
+                TestLoginMode::ChatgptBrowser
+            };
+            test_login(&endpoint, &config_overrides, mode).await
+        }
+        CliCommand::TestLogout => {
+            ensure_dynamic_tools_unused(&dynamic_tools, "test-logout")?;
+            let endpoint = resolve_endpoint(codex_bin, url)?;
+            test_logout(&endpoint, &config_overrides).await
         }
         CliCommand::GetAccountRateLimits => {
             ensure_dynamic_tools_unused(&dynamic_tools, "get-account-rate-limits")?;
@@ -1128,16 +1165,45 @@ async fn send_follow_up_v2(
 async fn test_login(
     endpoint: &Endpoint,
     config_overrides: &[String],
-    device_code: bool,
+    mode: TestLoginMode,
 ) -> Result<()> {
     with_client("test-login", endpoint, config_overrides, |client| {
         let initialize = client.initialize()?;
         println!("< initialize response: {initialize:?}");
 
-        let login_response = if device_code {
-            client.login_account_chatgpt_device_code()?
-        } else {
-            client.login_account_chatgpt()?
+        let login_response = match mode {
+            TestLoginMode::ChatgptBrowser => client.login_account_chatgpt()?,
+            TestLoginMode::ChatgptDeviceCode => client.login_account_chatgpt_device_code()?,
+            TestLoginMode::AmazonBedrock { api_key, region } => {
+                let request_id = client.request_id();
+                let login_response: LoginAccountResponse = client.send_request(
+                    ClientRequest::LoginAccount {
+                        request_id: request_id.clone(),
+                        params: codex_app_server_protocol::LoginAccountParams::AmazonBedrock {
+                            api_key,
+                            region,
+                        },
+                    },
+                    request_id,
+                    "account/login/start",
+                )?;
+                println!("< account/login/start response: {login_response:?}");
+
+                let completion =
+                    client.wait_for_account_login_completion(/*expected_login_id*/ None)?;
+                println!("< account/login/completed notification: {completion:?}");
+
+                loop {
+                    let notification = client.next_notification()?;
+                    if let Ok(ServerNotification::AccountUpdated(account_updated)) =
+                        ServerNotification::try_from(notification)
+                    {
+                        println!("< account/updated notification: {account_updated:?}");
+                        break;
+                    }
+                }
+                return Ok(());
+            }
         };
         println!("< account/login/start response: {login_response:?}");
         let login_id = match login_response {
@@ -1158,7 +1224,7 @@ async fn test_login(
             _ => bail!("expected chatgpt login response"),
         };
 
-        let completion = client.wait_for_account_login_completion(&login_id)?;
+        let completion = client.wait_for_account_login_completion(Some(&login_id))?;
         println!("< account/login/completed notification: {completion:?}");
 
         if completion.success {
@@ -1192,6 +1258,27 @@ async fn get_account_rate_limits(endpoint: &Endpoint, config_overrides: &[String
             Ok(())
         },
     )
+    .await
+}
+
+async fn test_logout(endpoint: &Endpoint, config_overrides: &[String]) -> Result<()> {
+    with_client("test-logout", endpoint, config_overrides, |client| {
+        let initialize = client.initialize()?;
+        println!("< initialize response: {initialize:?}");
+
+        let response = client.logout_account()?;
+        println!("< account/logout response: {response:?}");
+
+        loop {
+            let notification = client.next_notification()?;
+            if let Ok(ServerNotification::AccountUpdated(account_updated)) =
+                ServerNotification::try_from(notification)
+            {
+                println!("< account/updated notification: {account_updated:?}");
+                return Ok(());
+            }
+        }
+    })
     .await
 }
 
@@ -1751,6 +1838,16 @@ impl CodexClient {
         self.send_request(request, request_id, "account/rateLimits/read")
     }
 
+    fn logout_account(&mut self) -> Result<LogoutAccountResponse> {
+        let request_id = self.request_id();
+        let request = ClientRequest::LogoutAccount {
+            request_id: request_id.clone(),
+            params: None,
+        };
+
+        self.send_request(request, request_id, "account/logout")
+    }
+
     fn model_list(&mut self, params: ModelListParams) -> Result<ModelListResponse> {
         let request_id = self.request_id();
         let request = ClientRequest::ModelList {
@@ -1799,7 +1896,7 @@ impl CodexClient {
 
     fn wait_for_account_login_completion(
         &mut self,
-        expected_login_id: &str,
+        expected_login_id: Option<&str>,
     ) -> Result<AccountLoginCompletedNotification> {
         loop {
             let notification = self.next_notification()?;
@@ -1807,7 +1904,7 @@ impl CodexClient {
             if let Ok(server_notification) = ServerNotification::try_from(notification) {
                 match server_notification {
                     ServerNotification::AccountLoginCompleted(completion) => {
-                        if completion.login_id.as_deref() == Some(expected_login_id) {
+                        if completion.login_id.as_deref() == expected_login_id {
                             return Ok(completion);
                         }
 
@@ -1956,7 +2053,13 @@ impl CodexClient {
             .context("client request was not a valid JSON-RPC request")?;
         request.trace = current_span_w3c_trace_context();
         let request_json = serde_json::to_string(&request)?;
-        let request_pretty = serde_json::to_string_pretty(&request)?;
+        let mut request_for_logging = serde_json::to_value(&request)?;
+        if request.method == "account/login/start"
+            && let Some(api_key) = request_for_logging.pointer_mut("/params/apiKey")
+        {
+            *api_key = Value::String("<redacted>".to_string());
+        }
+        let request_pretty = serde_json::to_string_pretty(&request_for_logging)?;
         print_multiline_with_prefix("> ", &request_pretty);
         self.write_payload(&request_json)
     }

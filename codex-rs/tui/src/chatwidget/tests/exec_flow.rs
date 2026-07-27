@@ -731,12 +731,12 @@ async fn unified_exec_empty_poll_for_finished_process_does_not_show_waiting_stat
 
     terminal_interaction(&mut chat, "call-finished", "proc-finished", "");
 
-    assert_eq!(chat.status_state.current_status.header, "Interpreting");
+    assert_eq!(chat.status_state.current_status.header, "Working");
     let status = chat
         .bottom_pane
         .status_widget()
         .expect("task status indicator should remain visible");
-    assert_eq!(status.header(), "Interpreting");
+    assert_eq!(status.header(), "Working");
     assert!(chat.unified_exec_wait_streak.is_none());
 }
 
@@ -875,6 +875,30 @@ async fn view_image_tool_call_preserves_foreign_path() {
     assert_eq!(cells.len(), 1, "expected a single history cell");
     let combined = lines_to_single_string(&cells[0]);
     assert_chatwidget_snapshot!("foreign_image_attachment_history_snapshot", combined);
+}
+
+#[tokio::test]
+async fn image_generation_begin_restores_working_status_after_single_line_preamble() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.on_task_started();
+    chat.on_agent_message_delta("Generating an image.".to_string());
+    chat.on_image_generation_begin();
+
+    assert!(chat.bottom_pane.is_task_running());
+    assert!(chat.bottom_pane.status_indicator_visible());
+
+    let width: u16 = 80;
+    let height = chat.desired_height(width);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+        .expect("create terminal");
+    terminal
+        .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
+        .expect("draw image generation status");
+    assert_chatwidget_snapshot!(
+        "image_generation_begin_restores_working_status",
+        normalized_backend_snapshot(terminal.backend())
+    );
 }
 
 #[tokio::test]

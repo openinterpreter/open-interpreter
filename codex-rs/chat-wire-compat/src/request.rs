@@ -190,11 +190,12 @@ pub(crate) fn convert_request(
                 action,
                 ..
             } => {
-                let call_id = call_id.clone().or_else(|| id.clone()).ok_or_else(|| {
-                    ApiError::InvalidRequest {
+                let call_id = call_id
+                    .clone()
+                    .or_else(|| id.as_ref().map(ToString::to_string))
+                    .ok_or_else(|| ApiError::InvalidRequest {
                         message: "local_shell history item missing call id".to_string(),
-                    }
-                })?;
+                    })?;
                 let arguments = match action {
                     LocalShellAction::Exec(exec) => json!({
                         "command": exec.command,
@@ -440,6 +441,14 @@ fn convert_message_content(content: &[ContentItem]) -> Option<Value> {
                     }
                 ]));
             }
+            ContentItem::InputAudio { audio_url } => {
+                return Some(json!([
+                    {
+                        "type": "input_audio",
+                        "audio_url": audio_url
+                    }
+                ]));
+            }
         }
     }
 
@@ -454,6 +463,10 @@ fn convert_message_content(content: &[ContentItem]) -> Option<Value> {
                 ContentItem::InputImage { image_url, .. } => json!({
                     "type": "image_url",
                     "image_url": { "url": image_url },
+                }),
+                ContentItem::InputAudio { audio_url } => json!({
+                    "type": "input_audio",
+                    "audio_url": audio_url,
                 }),
             })
             .collect(),
@@ -817,6 +830,7 @@ fn verbosity_to_string(verbosity: OpenAiVerbosity) -> String {
 mod tests {
     use super::*;
     use codex_api::TextFormatType;
+    use codex_protocol::ResponseItemId;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -916,7 +930,7 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Reasoning {
-                    id: Some(std::convert::identity("reasoning-1".to_string())),
+                    id: Some(ResponseItemId::with_suffix("rs", "1")),
                     summary: Vec::new(),
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: "I need to inspect the directory.".to_string(),
@@ -1114,7 +1128,7 @@ mod tests {
             instructions: String::new(),
             input: vec![
                 ResponseItem::Reasoning {
-                    id: Some(std::convert::identity("reasoning-1".to_string())),
+                    id: Some(ResponseItemId::with_suffix("rs", "1")),
                     summary: Vec::new(),
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: "Need to inspect files.".to_string(),
@@ -1202,7 +1216,7 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Reasoning {
-                    id: Some(std::convert::identity("reasoning-1".to_string())),
+                    id: Some(ResponseItemId::with_suffix("rs", "1")),
                     summary: Vec::new(),
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: "Need to inspect both files.".to_string(),
@@ -1277,7 +1291,7 @@ mod tests {
             instructions: String::new(),
             input: vec![
                 ResponseItem::Reasoning {
-                    id: Some(std::convert::identity("reasoning-1".to_string())),
+                    id: Some(ResponseItemId::with_suffix("rs", "1")),
                     summary: Vec::new(),
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: "Need one more directory listing.".to_string(),

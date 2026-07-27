@@ -16,6 +16,16 @@ fn is_safety_access_block_message(message: &str) -> bool {
 }
 
 impl ChatWidget {
+    fn clear_guardian_review_status(&mut self) {
+        self.status_state.pending_guardian_review_status.clear();
+        if self.status_state.current_status.is_guardian_review() {
+            let header = self
+                .mcp_startup_status_header()
+                .unwrap_or_else(|| String::from("Working"));
+            self.set_status_header(header);
+        }
+    }
+
     /// Synchronize the bottom-pane "task running" indicator with the current lifecycles.
     ///
     /// The bottom pane only has one running flag, but this module treats it as a derived state of
@@ -78,10 +88,11 @@ impl ChatWidget {
             .set_interrupt_hint_visible(/*visible*/ true);
         self.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Working;
         if self.mcp_startup_status.is_none() || !self.status_header_is_mcp_startup_owned() {
-            self.set_status_header(String::from(STATUS_HEADER_INTERPRETING));
+            self.set_status_header(String::from("Working"));
         }
-        self.full_reasoning_buffer.clear();
+        self.reasoning_summary_parts.clear();
         self.reasoning_buffer.clear();
+        self.reasoning_header = None;
         self.set_ambient_pet_notification(
             crate::pets::PetNotificationKind::Running,
             /*body*/ None,
@@ -176,6 +187,7 @@ impl ChatWidget {
         self.status_state.pending_status_indicator_restore = false;
         self.input_queue.user_turn_pending_start = false;
         self.clear_active_hook_cell();
+        self.clear_guardian_review_status();
         self.turn_lifecycle.finish();
         self.clear_safety_buffering();
         self.update_task_running_state();
@@ -321,6 +333,7 @@ impl ChatWidget {
         self.clear_active_hook_cell();
         // Reset running state and clear streaming buffers.
         self.input_queue.user_turn_pending_start = false;
+        self.clear_guardian_review_status();
         self.turn_lifecycle.finish();
         self.update_task_running_state();
         self.running_commands.clear();
@@ -332,7 +345,7 @@ impl ChatWidget {
         self.plan_stream_controller = None;
         self.request_pending_usage_output_insertion_after_stream_shutdown();
         self.status_state.pending_status_indicator_restore = false;
-        self.clear_cancel_edit();
+        self.safety_buffering_prompt = None;
         self.request_status_line_branch_refresh();
         self.request_status_line_git_summary_refresh();
         self.maybe_show_pending_rate_limit_prompt();

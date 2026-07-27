@@ -1,2 +1,4 @@
 codex-rs/app-server-protocol/schema/** linguist-generated
 codex-rs/hooks/schema/generated/** linguist-generated
+codex-rs/core/src/harness/kimi_code_system_prompt.md text eol=lf
+codex-rs/core/src/tools/handlers/kimi_code_skills/*.md text eol=lf

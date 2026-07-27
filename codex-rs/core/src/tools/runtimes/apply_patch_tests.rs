@@ -20,6 +20,7 @@ fn test_turn_environment(environment_id: &str) -> crate::session::turn_context::
         environment_id.to_string(),
         std::sync::Arc::new(codex_exec_server::Environment::default_for_tests()),
         PathUri::from_abs_path(&std::env::temp_dir().abs()),
+        Vec::new(),
         /*shell*/ None,
     )
 }
@@ -49,24 +50,17 @@ fn wants_no_sandbox_approval_granular_respects_sandbox_flag() {
 }
 
 #[tokio::test]
-async fn guardian_review_request_includes_patch_context() {
-    let path = std::env::temp_dir()
-        .join("guardian-apply-patch-test.txt")
-        .abs();
-    let action =
-        ApplyPatchAction::new_add_for_test(&PathUri::from_abs_path(&path), "hello".to_string());
-    let expected_cwd = action.cwd.to_abs_path().expect("native patch cwd");
+async fn approval_action_preserves_patch_path_uris() {
+    let path = PathUri::parse("file:///C:/workspace/guardian-apply-patch-test.txt")
+        .expect("valid foreign path URI");
+    let action = ApplyPatchAction::new_add_for_test(&path, "hello".to_string());
+    let expected_cwd = action.cwd.clone();
     let expected_patch = action.patch.clone();
     let request = ApplyPatchRequest {
         turn_environment: test_turn_environment(codex_exec_server::LOCAL_ENVIRONMENT_ID),
         action,
-        file_paths: vec![PathUri::from_abs_path(&path)],
-        changes: HashMap::from([(
-            path.to_path_buf(),
-            FileChange::Add {
-                content: "hello".to_string(),
-            },
-        )]),
+        file_paths: vec![path.clone()],
+        changes: HashMap::new(),
         exec_approval_requirement: ExecApprovalRequirement::NeedsApproval {
             reason: None,
             proposed_execpolicy_amendment: None,
@@ -75,13 +69,13 @@ async fn guardian_review_request_includes_patch_context() {
         permissions_preapproved: false,
     };
 
-    let guardian_request = ApplyPatchRuntime::build_guardian_review_request(&request, "call-1")
-        .expect("native guardian request cwd");
+    let approval_action = ApplyPatchRuntime::build_approval_action(&request, "call-1");
 
     assert_eq!(
-        guardian_request,
+        approval_action,
         ApprovalAction::ApplyPatch {
             id: "call-1".to_string(),
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             cwd: expected_cwd,
             files: vec![path],
             patch: expected_patch,
@@ -226,7 +220,7 @@ async fn file_system_sandbox_context_uses_active_attempt() {
         enforce_managed_network: false,
         manager: &manager,
         sandbox_cwd: &sandbox_policy_cwd,
-        workspace_roots: std::slice::from_ref(&path),
+        workspace_roots: std::slice::from_ref(&sandbox_policy_cwd),
         codex_linux_sandbox_exe: None,
         use_legacy_landlock: true,
         windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
@@ -295,7 +289,7 @@ async fn no_sandbox_attempt_has_no_file_system_context() {
         enforce_managed_network: false,
         manager: &manager,
         sandbox_cwd: &sandbox_policy_cwd,
-        workspace_roots: std::slice::from_ref(&path),
+        workspace_roots: std::slice::from_ref(&sandbox_policy_cwd),
         codex_linux_sandbox_exe: None,
         use_legacy_landlock: false,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,

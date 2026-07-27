@@ -1,12 +1,19 @@
-//! Shared formatting for user-facing `interpreter resume` command hints.
+//! Shared formatting for user-facing resume command hints.
 
+use codex_product_info::Product;
 use codex_protocol::ThreadId;
 use codex_shell_command::parse_command::shlex_join;
 
-/// Installed CLI entrypoint name (see packaging metadata / install scripts).
-const CLI_NAME: &str = "interpreter";
-
 pub fn resume_command(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {
+    resume_command_for_product(Product::current(), thread_name, thread_id)
+}
+
+fn resume_command_for_product(
+    product: Product,
+    thread_name: Option<&str>,
+    thread_id: Option<ThreadId>,
+) -> Option<String> {
+    let command_name = product.command_name();
     let resume_target = thread_name
         .filter(|name| !name.is_empty())
         .map(str::to_string)
@@ -15,20 +22,29 @@ pub fn resume_command(thread_name: Option<&str>, thread_id: Option<ThreadId>) ->
         let needs_double_dash = target.starts_with('-');
         let escaped = shlex_join(&[target]);
         if needs_double_dash {
-            format!("{CLI_NAME} resume -- {escaped}")
+            format!("{command_name} resume -- {escaped}")
         } else {
-            format!("{CLI_NAME} resume {escaped}")
+            format!("{command_name} resume {escaped}")
         }
     })
 }
 
 pub fn resume_hint(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {
+    resume_hint_for_product(Product::current(), thread_name, thread_id)
+}
+
+fn resume_hint_for_product(
+    product: Product,
+    thread_name: Option<&str>,
+    thread_id: Option<ThreadId>,
+) -> Option<String> {
+    let command_name = product.command_name();
     let thread_id = thread_id?;
     match thread_name.filter(|name| !name.is_empty()) {
         Some(thread_name) => Some(format!(
-            "{CLI_NAME} resume, then select {thread_name} ({thread_id})"
+            "{command_name} resume, then select {thread_name} ({thread_id})"
         )),
-        None => resume_command(/*thread_name*/ None, Some(thread_id)),
+        None => resume_command_for_product(product, /*thread_name*/ None, Some(thread_id)),
     }
 }
 
@@ -40,49 +56,61 @@ mod tests {
     #[test]
     fn prefers_name_over_id() {
         let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
-        let command = resume_command(Some("my-thread"), Some(thread_id));
-        assert_eq!(command, Some("interpreter resume my-thread".to_string()));
+        let command =
+            resume_command_for_product(Product::Codex, Some("my-thread"), Some(thread_id));
+        assert_eq!(command, Some("codex resume my-thread".to_string()));
     }
 
     #[test]
     fn formats_thread_id_when_name_is_missing() {
         let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
-        let command = resume_command(/*thread_name*/ None, Some(thread_id));
+        let command =
+            resume_command_for_product(Product::Codex, /*thread_name*/ None, Some(thread_id));
         assert_eq!(
             command,
-            Some("interpreter resume 123e4567-e89b-12d3-a456-426614174000".to_string())
+            Some("codex resume 123e4567-e89b-12d3-a456-426614174000".to_string())
         );
     }
 
     #[test]
     fn returns_none_without_a_resume_target() {
-        let command = resume_command(/*thread_name*/ None, /*thread_id*/ None);
+        let command = resume_command_for_product(
+            Product::Codex,
+            /*thread_name*/ None,
+            /*thread_id*/ None,
+        );
         assert_eq!(command, None);
     }
 
     #[test]
     fn quotes_thread_names_when_needed() {
-        let command = resume_command(Some("-starts-with-dash"), /*thread_id*/ None);
+        let command = resume_command_for_product(
+            Product::Codex,
+            Some("-starts-with-dash"),
+            /*thread_id*/ None,
+        );
         assert_eq!(
             command,
-            Some("interpreter resume -- -starts-with-dash".to_string())
+            Some("codex resume -- -starts-with-dash".to_string())
         );
 
-        let command = resume_command(Some("two words"), /*thread_id*/ None);
-        assert_eq!(command, Some("interpreter resume 'two words'".to_string()));
+        let command =
+            resume_command_for_product(Product::Codex, Some("two words"), /*thread_id*/ None);
+        assert_eq!(command, Some("codex resume 'two words'".to_string()));
 
-        let command = resume_command(Some("quote'case"), /*thread_id*/ None);
-        assert_eq!(command, Some("interpreter resume \"quote'case\"".to_string()));
+        let command =
+            resume_command_for_product(Product::Codex, Some("quote'case"), /*thread_id*/ None);
+        assert_eq!(command, Some("codex resume \"quote'case\"".to_string()));
     }
 
     #[test]
     fn resume_hint_names_picker_item_with_id() {
         let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
-        let hint = resume_hint(Some("my-thread"), Some(thread_id));
+        let hint = resume_hint_for_product(Product::Codex, Some("my-thread"), Some(thread_id));
         assert_eq!(
             hint,
             Some(
-                "interpreter resume, then select my-thread (123e4567-e89b-12d3-a456-426614174000)"
+                "codex resume, then select my-thread (123e4567-e89b-12d3-a456-426614174000)"
                     .to_string()
             )
         );
@@ -91,16 +119,39 @@ mod tests {
     #[test]
     fn resume_hint_uses_direct_id_command_without_name() {
         let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
-        let hint = resume_hint(/*thread_name*/ None, Some(thread_id));
+        let hint =
+            resume_hint_for_product(Product::Codex, /*thread_name*/ None, Some(thread_id));
         assert_eq!(
             hint,
-            Some("interpreter resume 123e4567-e89b-12d3-a456-426614174000".to_string())
+            Some("codex resume 123e4567-e89b-12d3-a456-426614174000".to_string())
         );
     }
 
     #[test]
     fn resume_hint_requires_thread_id() {
-        let hint = resume_hint(Some("my-thread"), /*thread_id*/ None);
+        let hint =
+            resume_hint_for_product(Product::Codex, Some("my-thread"), /*thread_id*/ None);
         assert_eq!(hint, None);
+    }
+
+    #[test]
+    fn open_interpreter_uses_its_product_command() {
+        let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
+
+        assert_eq!(
+            resume_command_for_product(
+                Product::OpenInterpreter,
+                Some("my-thread"),
+                Some(thread_id),
+            ),
+            Some("interpreter resume my-thread".to_string())
+        );
+        assert_eq!(
+            resume_hint_for_product(Product::OpenInterpreter, Some("my-thread"), Some(thread_id),),
+            Some(
+                "interpreter resume, then select my-thread (123e4567-e89b-12d3-a456-426614174000)"
+                    .to_string()
+            )
+        );
     }
 }

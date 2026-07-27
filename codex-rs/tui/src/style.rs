@@ -7,12 +7,10 @@ use crate::terminal_palette::default_fg;
 use crate::terminal_palette::rgb_color;
 use crate::terminal_palette::stdout_color_level;
 use ratatui::style::Color;
-use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
 
-pub const APP_ACCENT_DARK_RGB: (u8, u8, u8) = (236, 236, 236);
-pub const APP_ACCENT_LIGHT_RGB: (u8, u8, u8) = (28, 28, 28);
+const LIGHT_BG_ACCENT_RGB: (u8, u8, u8) = (0, 95, 135);
 // Decorative table rules should remain visible without competing with cell content.
 const TABLE_SEPARATOR_FG_ALPHA: f32 = 0.20;
 
@@ -24,33 +22,6 @@ pub fn proposed_plan_style() -> Style {
     proposed_plan_style_for(default_bg())
 }
 
-pub fn app_accent_color() -> Color {
-    let accent_rgb = match default_bg() {
-        Some(bg) if is_light(bg) => APP_ACCENT_LIGHT_RGB,
-        Some(_) | None => APP_ACCENT_DARK_RGB,
-    };
-    match stdout_color_level() {
-        StdoutColorLevel::Unknown => rgb_color(accent_rgb),
-        _ => best_color(accent_rgb),
-    }
-}
-
-pub fn app_accent_style() -> Style {
-    Style::default().fg(app_accent_color())
-}
-
-pub fn app_accent_underlined_style() -> Style {
-    app_accent_style().add_modifier(Modifier::UNDERLINED)
-}
-
-pub fn selected_option_style() -> Style {
-    app_accent_style().bold()
-}
-
-pub fn unselected_option_style() -> Style {
-    Style::default().dim()
-}
-
 /// Returns a low-contrast rule style for separators within markdown tables.
 pub(crate) fn table_separator_style() -> Style {
     table_separator_style_for(default_fg(), default_bg(), stdout_color_level())
@@ -58,12 +29,15 @@ pub(crate) fn table_separator_style() -> Style {
 
 /// Returns the shared accent style for active or selected TUI controls.
 pub(crate) fn accent_style() -> Style {
-    selected_option_style()
+    accent_style_for(default_bg())
 }
 
 /// Returns the style for a user-authored message using the provided terminal background.
-pub fn user_message_style_for(_terminal_bg: Option<(u8, u8, u8)>) -> Style {
-    Style::default()
+pub fn user_message_style_for(terminal_bg: Option<(u8, u8, u8)>) -> Style {
+    match terminal_bg {
+        Some(bg) => Style::default().bg(user_message_bg(bg)),
+        None => Style::default(),
+    }
 }
 
 pub fn proposed_plan_style_for(terminal_bg: Option<(u8, u8, u8)>) -> Style {
@@ -74,18 +48,12 @@ pub fn proposed_plan_style_for(terminal_bg: Option<(u8, u8, u8)>) -> Style {
 }
 
 /// Returns the shared accent style for the provided terminal background.
-#[cfg(test)]
 pub(crate) fn accent_style_for(terminal_bg: Option<(u8, u8, u8)>) -> Style {
-    app_accent_style_for(terminal_bg)
-}
-
-#[cfg(test)]
-fn app_accent_style_for(terminal_bg: Option<(u8, u8, u8)>) -> Style {
-    let accent_rgb = match terminal_bg {
-        Some(bg) if is_light(bg) => APP_ACCENT_LIGHT_RGB,
-        Some(_) | None => APP_ACCENT_DARK_RGB,
-    };
-    Style::default().fg(best_color(accent_rgb))
+    if terminal_bg.is_some_and(is_light) {
+        Style::default().fg(best_color(LIGHT_BG_ACCENT_RGB)).bold()
+    } else {
+        Style::default().fg(Color::Cyan).bold()
+    }
 }
 
 fn table_separator_style_for(
@@ -106,12 +74,16 @@ fn table_separator_style_for(
 
 #[allow(clippy::disallowed_methods)]
 pub fn user_message_bg(terminal_bg: (u8, u8, u8)) -> Color {
+    best_color(user_message_bg_rgb(terminal_bg))
+}
+
+pub(crate) fn user_message_bg_rgb(terminal_bg: (u8, u8, u8)) -> (u8, u8, u8) {
     let (top, alpha) = if is_light(terminal_bg) {
         ((0, 0, 0), 0.04)
     } else {
         ((255, 255, 255), 0.12)
     };
-    best_color(blend(top, terminal_bg, alpha))
+    blend(top, terminal_bg, alpha)
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -126,26 +98,19 @@ mod tests {
     use ratatui::style::Modifier;
 
     #[test]
-    fn accent_style_uses_open_interpreter_accent_on_light_backgrounds() {
+    fn accent_style_uses_darker_cyan_on_light_backgrounds() {
         let style = accent_style_for(Some((255, 255, 255)));
 
-        assert_eq!(style.fg, Some(best_color(APP_ACCENT_LIGHT_RGB)));
-        assert!(!style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(style.fg, Some(best_color(LIGHT_BG_ACCENT_RGB)));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
-    fn accent_style_uses_open_interpreter_accent_on_dark_or_unknown_backgrounds() {
-        let expected = Style::default().fg(best_color(APP_ACCENT_DARK_RGB));
+    fn accent_style_uses_cyan_on_dark_or_unknown_backgrounds() {
+        let expected = Style::default().fg(Color::Cyan).bold();
 
         assert_eq!(accent_style_for(Some((0, 0, 0))), expected);
         assert_eq!(accent_style_for(/*terminal_bg*/ None), expected);
-    }
-
-    #[test]
-    fn user_message_style_never_sets_background() {
-        assert_eq!(user_message_style_for(Some((0, 0, 0))).bg, None);
-        assert_eq!(user_message_style_for(Some((255, 255, 255))).bg, None);
-        assert_eq!(user_message_style_for(/*terminal_bg*/ None).bg, None);
     }
 
     #[test]

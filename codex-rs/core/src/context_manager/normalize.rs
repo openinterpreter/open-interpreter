@@ -1,3 +1,4 @@
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -11,6 +12,8 @@ use tracing::info;
 
 const IMAGE_CONTENT_OMITTED_PLACEHOLDER: &str =
     "image content omitted because you do not support image input";
+const AUDIO_CONTENT_OMITTED_PLACEHOLDER: &str =
+    "audio content omitted because you do not support audio input";
 // Changing this value would change model-visible IDs and invalidate prompt caches.
 const SYNTHETIC_OUTPUT_ID_NAMESPACE: Uuid = Uuid::from_u128(0x90d38d3e_6a5b_4d52_bfe2_2f1e634bfac4);
 
@@ -132,12 +135,12 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
 /// outputs, so the namespace and name format must remain stable across retries
 /// and resumes to preserve prompt-cache reuse. Returning `None` when the source
 /// call has no ID preserves the legacy behavior for older history items.
-fn synthetic_output_id(prefix: &str, item_id: Option<&str>) -> Option<String> {
+fn synthetic_output_id(prefix: &str, item_id: Option<&str>) -> Option<ResponseItemId> {
     let source_id = item_id.filter(|id| !id.is_empty())?;
     let name = format!("{prefix}:{source_id}");
-    Some(format!(
-        "{prefix}_{}",
-        Uuid::new_v5(&SYNTHETIC_OUTPUT_ID_NAMESPACE, name.as_bytes())
+    Some(ResponseItemId::with_suffix(
+        prefix,
+        Uuid::new_v5(&SYNTHETIC_OUTPUT_ID_NAMESPACE, name.as_bytes()),
     ))
 }
 
@@ -345,8 +348,7 @@ pub(crate) fn strip_images_when_unsupported(
                     let mut normalized_content_items = Vec::with_capacity(content_items.len());
                     for content_item in content_items.iter() {
                         match content_item {
-                            FunctionCallOutputContentItem::InputImage { .. }
-                            | FunctionCallOutputContentItem::InputVideo { .. } => {
+                            FunctionCallOutputContentItem::InputImage { .. } => {
                                 normalized_content_items.push(
                                     FunctionCallOutputContentItem::InputText {
                                         text: IMAGE_CONTENT_OMITTED_PLACEHOLDER.to_string(),
@@ -361,6 +363,47 @@ pub(crate) fn strip_images_when_unsupported(
             }
             ResponseItem::ImageGenerationCall { result, .. } => {
                 result.clear();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Strip audio content from messages and tool outputs when the model does not support audio.
+/// When `input_modalities` contains `InputModality::Audio`, no stripping is performed.
+pub(crate) fn strip_audio_when_unsupported(
+    input_modalities: &[InputModality],
+    items: &mut [ResponseItem],
+) {
+    if input_modalities.contains(&InputModality::Audio) {
+        return;
+    }
+
+    for item in items.iter_mut() {
+        match item {
+            ResponseItem::Message { content, .. } => {
+                for content_item in content.iter_mut() {
+                    if matches!(content_item, ContentItem::InputAudio { .. }) {
+                        *content_item = ContentItem::InputText {
+                            text: AUDIO_CONTENT_OMITTED_PLACEHOLDER.to_string(),
+                        };
+                    }
+                }
+            }
+            ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } => {
+                if let Some(content_items) = output.content_items_mut() {
+                    for content_item in content_items.iter_mut() {
+                        if matches!(
+                            content_item,
+                            FunctionCallOutputContentItem::InputAudio { .. }
+                        ) {
+                            *content_item = FunctionCallOutputContentItem::InputText {
+                                text: AUDIO_CONTENT_OMITTED_PLACEHOLDER.to_string(),
+                            };
+                        }
+                    }
+                }
             }
             _ => {}
         }

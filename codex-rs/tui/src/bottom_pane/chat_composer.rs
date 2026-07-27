@@ -18,18 +18,24 @@
 //!
 //! # Completion and Popup Dismissal
 //!
-//! Popup selection passes the detected token range directly to the insertion path. After replacing
-//! that range, completion leaves the cursor after one horizontal separator. It advances across an
-//! existing separator when no suffix would be joined; otherwise it inserts a space, preserving the
-//! existing separator before a non-whitespace suffix. It also inserts a space rather than crossing
-//! a line break.
+//! Popup targeting resolves an editable token range around the cursor and treats atomic text
+//! elements as hard boundaries. When that range begins immediately after an atomic element, the
+//! insertion path first adds a horizontal separator and shifts the range so the completion cannot
+//! merge with the atomic element. After replacing the range, completion leaves the cursor after one
+//! horizontal separator. It advances across an existing separator when no suffix would be joined;
+//! otherwise it inserts a space, preserving the existing separator before a non-whitespace suffix.
+//! It also inserts a space rather than crossing a line break.
 //!
 //! `Esc` records the active token as dismissed. A completed value that begins with `@` or `$` is
 //! also re-dismissed before popup synchronization, because separator affinity can still identify
 //! the completed token to the left of the cursor. Synchronization keeps the popup hidden only while
-//! the query, complete token text, and ordinal among matching whitespace-delimited tokens remain
-//! the same. This preserves dismissal across offset-only edits without suppressing a later
-//! identical token.
+//! the query, complete token text, and ordinal among matching occurrences remain the same.
+//! Whitespace and atomic-element edges delimit occurrences, while nested sigils do not. This
+//! preserves dismissal across offset-only edits without suppressing a later identical token.
+//!
+//! Slash-command dismissal is tracked separately. Pressing `Esc` while the command popup is active
+//! records the first-line `/name` token and keeps the popup closed while that token is unchanged.
+//! Editing the command token clears the dismissal and allows the popup to reopen.
 //!
 //! # History Navigation (↑/↓)
 //!
@@ -73,6 +79,23 @@
 //! and attachment pruning, and clears pending paste state on success.
 //! Slash commands with arguments (like `/plan` and `/review`) reuse the same preparation path so
 //! pasted content and text elements are preserved when extracting args.
+//!
+//! # Parent-Owned Thread Mode
+//!
+//! Parent-owned subagent threads keep the draft editable while blocking agent-directed submission.
+//! On the `Enter` and `Tab` submission paths, normal prompts, disallowed slash commands, and `!`
+//! shell commands return `ParentOwnedInputBlocked` without clearing the draft. Bare local and
+//! navigation slash commands remain available so users can leave or manage the view.
+//!
+//! # Reasoning Effort Animations
+//!
+//! The composer observes the effective reasoning tier whenever model-dependent surfaces refresh.
+//! The first observation, session configuration, and restored threads establish a baseline;
+//! genuine changes to Max/Ultra can then queue composer and status-line transitions when motion
+//! and color support allow them.
+//! Repeated selections do not restart either effect, dropping below Max clears them, and
+//! restoration clears any transition queued while replaying the saved session. Rendering advances
+//! active transitions through the frame requester until they finish.
 //!
 //! # Large Paste Placeholders
 //!
@@ -151,6 +174,7 @@ use crate::key_hint::KeyBinding;
 use crate::key_hint::has_ctrl_or_alt;
 use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 use crate::ui_consts::FOOTER_INDENT_COLS;
+use codex_message_history::HistoryBatchCursor;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -165,14 +189,24 @@ use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
+use ratatui::widgets::Block;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::WidgetRef;
 
+use codex_protocol::openai_models::ReasoningEffort;
+
 use super::chat_composer_history::ChatComposerHistory;
 use super::chat_composer_history::HistoryEntry;
 use super::chat_composer_history::HistoryEntryResponse;
+use super::chat_composer_history::HistorySearchResult;
 use super::command_popup::CommandItem;
+use super::effort_ignition::EffortIgnition;
+use super::effort_ignition::EffortTier;
+use super::effort_ignition::IGNITION_FRAME_TICK;
+use super::effort_ignition::IgnitionStyle;
+use super::effort_status_line::EFFORT_STATUS_LINE_FRAME_TICK;
+use super::effort_status_line::EffortStatusLineTransition;
 use super::file_search_popup::FileSearchPopup;
 use super::footer::CollaborationModeIndicator;
 use super::footer::FooterKeyHints;
@@ -228,6 +262,7 @@ use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
 use codex_protocol::user_input::TextElement;
 
 mod attachment_state;
+mod completion_target;
 mod draft_state;
 mod footer_state;
 mod history_search;
@@ -257,14 +292,15 @@ use crate::history_cell;
 use crate::skills_helpers::skill_display_name;
 use crate::tui::FrameRequester;
 use crate::ui_consts::LIVE_PREFIX_COLS;
-use codex_connectors::AppInfo;
 #[cfg(test)]
-use codex_core_skills::model::SkillInterface;
-use codex_core_skills::model::SkillMetadata;
+use codex_app_server_protocol::SkillInterface;
+use codex_app_server_protocol::SkillMetadata;
+use codex_connectors::AppInfo;
 use codex_file_search::FileMatch;
 #[cfg(test)]
 use codex_plugin::AppConnectorId;
 use codex_plugin::PluginCapabilitySummary;
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -311,7 +347,57 @@ pub enum InputResult {
     /// command-history entry still represents the original command invocation that should be
     /// committed only if dispatch accepts it.
     CommandWithArgs(SlashCommand, String, Vec<TextElement>),
+    /// Agent-directed input was attempted while viewing a parent-owned spawned child thread.
+    ParentOwnedInputBlocked,
     None,
+}
+
+fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
+    args.is_empty()
+        && matches!(
+            command,
+            SlashCommand::Feedback
+                | SlashCommand::New
+                | SlashCommand::Clear
+                | SlashCommand::Resume
+                | SlashCommand::App
+                | SlashCommand::Side
+                | SlashCommand::Btw
+                | SlashCommand::Agent
+                | SlashCommand::MultiAgents
+                | SlashCommand::Vim
+                | SlashCommand::Keymap
+                | SlashCommand::ElevateSandbox
+                | SlashCommand::SandboxReadRoot
+                | SlashCommand::Experimental
+                | SlashCommand::Memories
+                | SlashCommand::Quit
+                | SlashCommand::Exit
+                | SlashCommand::Logout
+                | SlashCommand::Copy
+                | SlashCommand::Raw
+                | SlashCommand::Diff
+                | SlashCommand::Mention
+                | SlashCommand::Skills
+                | SlashCommand::Import
+                | SlashCommand::Hooks
+                | SlashCommand::Status
+                | SlashCommand::Usage
+                | SlashCommand::Ide
+                | SlashCommand::DebugConfig
+                | SlashCommand::Title
+                | SlashCommand::Statusline
+                | SlashCommand::Theme
+                | SlashCommand::Pets
+                | SlashCommand::Ps
+                | SlashCommand::Stop
+                | SlashCommand::MemoryDrop
+                | SlashCommand::MemoryUpdate
+                | SlashCommand::Mcp
+                | SlashCommand::Apps
+                | SlashCommand::Plugins
+                | SlashCommand::Rollout
+        )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -373,8 +459,14 @@ pub(crate) struct ChatComposer {
     footer: FooterState,
     has_focus: bool,
     frame_requester: Option<FrameRequester>,
+    effort_tier: Option<EffortTier>,
+    effort_animation_style: Option<IgnitionStyle>,
+    effort_ignition: Option<EffortIgnition>,
+    effort_status_line_transition: Option<EffortStatusLineTransition>,
+    effort_observed: bool,
     attachments: AttachmentState,
     placeholder_text: String,
+    blocks_direct_input: bool,
     is_task_running: bool,
     queue_submissions: bool,
     /// Slash-command draft staged for local recall after application-level dispatch.
@@ -407,6 +499,13 @@ pub(crate) struct ChatComposer {
     vim_normal_keymap: VimNormalKeymap,
 }
 
+/// A resolved legacy `$` target plus any catalog built while disambiguating shell syntax.
+struct MentionCompletionTarget {
+    range: Range<usize>,
+    query: String,
+    prebuilt_mentions: Option<Vec<MentionItem>>,
+}
+
 #[derive(Clone, Debug)]
 struct ComposerDraft {
     text: String,
@@ -418,7 +517,7 @@ struct ComposerDraft {
     cursor: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ComposerDraftSnapshot {
     pub(crate) text: String,
     pub(crate) text_elements: Vec<TextElement>,
@@ -541,8 +640,14 @@ impl ChatComposer {
             },
             has_focus: has_input_focus,
             frame_requester: None,
+            effort_tier: None,
+            effort_animation_style: None,
+            effort_ignition: None,
+            effort_status_line_transition: None,
+            effort_observed: false,
             attachments: AttachmentState::default(),
             placeholder_text,
+            blocks_direct_input: false,
             is_task_running: false,
             queue_submissions: false,
             pending_slash_command_history: None,
@@ -580,6 +685,55 @@ impl ChatComposer {
 
     pub(crate) fn set_frame_requester(&mut self, frame_requester: FrameRequester) {
         self.frame_requester = Some(frame_requester);
+    }
+
+    /// Records the effective reasoning tier, captures the outgoing status
+    /// line, and queues the one-shot effects for a genuine Max/Ultra change
+    /// after the initial baseline.
+    pub(crate) fn set_active_reasoning_effort(
+        &mut self,
+        effort: Option<&ReasoningEffort>,
+        animations_enabled: bool,
+    ) -> bool {
+        let tier = EffortTier::from_effort(effort);
+        let is_baseline = !self.effort_observed;
+        self.effort_observed = true;
+        if self.effort_tier == tier {
+            return false;
+        }
+        self.effort_tier = tier;
+        self.effort_ignition = None;
+        self.effort_status_line_transition = None;
+        if let Some(tier) = tier
+            && !is_baseline
+            && animations_enabled
+        {
+            let style = IgnitionStyle::random(self.effort_animation_style);
+            self.effort_ignition = Some(EffortIgnition::new(tier, style));
+            self.effort_animation_style = Some(style);
+            if self.footer.status_line_enabled
+                && !self.footer.plan_mode_nudge_visible
+                && let Some(previous) = passive_footer_status_line(&self.footer_props())
+            {
+                self.effort_status_line_transition =
+                    Some(EffortStatusLineTransition::new(tier, previous));
+            }
+            if let Some(frame_requester) = &self.frame_requester {
+                frame_requester.schedule_frame();
+            }
+        }
+        true
+    }
+
+    /// Establishes the current tier without retaining or starting a one-shot effect.
+    pub(crate) fn set_active_reasoning_effort_baseline(
+        &mut self,
+        effort: Option<&ReasoningEffort>,
+    ) {
+        self.effort_tier = EffortTier::from_effort(effort);
+        self.effort_observed = true;
+        self.effort_ignition = None;
+        self.effort_status_line_transition = None;
     }
 
     pub fn set_skill_mentions(&mut self, skills: Option<Vec<SkillMetadata>>) {
@@ -861,6 +1015,46 @@ impl ChatComposer {
             }
             HistoryEntryResponse::Ignored => false,
         }
+    }
+
+    pub(crate) fn on_history_batch_response(
+        &mut self,
+        log_id: u64,
+        cursor: HistoryBatchCursor,
+        entries: Vec<crate::app_event::HistoryBatchEntryResponse>,
+        next_older_cursor: Option<HistoryBatchCursor>,
+    ) -> bool {
+        let result = self.history.on_batch_response(
+            log_id,
+            cursor,
+            entries,
+            next_older_cursor,
+            &self.app_event_tx,
+        );
+        self.apply_history_batch_result(result)
+    }
+
+    /// Applies a failed batch lookup without conflating it with history exhaustion.
+    ///
+    /// The history state machine either schedules a bounded retry, preserves an existing match, or
+    /// returns the search UI to its idle draft when no match has been selected yet.
+    pub(crate) fn on_history_batch_error(
+        &mut self,
+        log_id: u64,
+        cursor: HistoryBatchCursor,
+    ) -> bool {
+        let result = self
+            .history
+            .on_batch_error(log_id, cursor, &self.app_event_tx);
+        self.apply_history_batch_result(result)
+    }
+
+    fn apply_history_batch_result(&mut self, result: Option<HistorySearchResult>) -> bool {
+        let Some(result) = result else {
+            return false;
+        };
+        self.apply_history_search_result(result);
+        true
     }
 
     pub(crate) fn record_replayed_user_message_history(&mut self, entry: HistoryEntry) {
@@ -1352,6 +1546,11 @@ impl ChatComposer {
         self.placeholder_text = placeholder;
     }
 
+    pub(crate) fn set_parent_owned_thread(&mut self) {
+        self.blocks_direct_input = true;
+        self.placeholder_text = "Viewing sub-agent — direct input is disabled".to_string();
+    }
+
     /// Move the cursor to the end of the current text buffer.
     pub(crate) fn move_cursor_to_end(&mut self) {
         self.draft
@@ -1819,16 +2018,13 @@ impl ChatComposer {
             KeyEvent {
                 code: KeyCode::Esc, ..
             } => {
-                if let Some((range, query)) = Self::current_prefixed_token_range(
+                if let Some((range, query)) = completion_target::current_prefixed_token_range(
                     &self.draft.textarea,
                     '@',
                     /*allow_empty*/ false,
                 ) {
-                    self.popups.dismissed_file_token = Some(DismissedToken::new(
-                        self.draft.textarea.text(),
-                        range,
-                        query,
-                    ));
+                    self.popups.dismissed_file_token =
+                        Some(DismissedToken::new(&self.draft.textarea, range, query));
                 }
                 self.popups.active = ActivePopup::None;
                 (InputResult::None, true)
@@ -1904,11 +2100,11 @@ impl ChatComposer {
             KeyEvent {
                 code: KeyCode::Esc, ..
             } => {
-                if let Some((range, query)) = self.current_mention_token_range() {
+                if let Some(target) = self.current_mention_target() {
                     self.popups.dismissed_mention_token = Some(DismissedToken::new(
-                        self.draft.textarea.text(),
-                        range,
-                        query,
+                        &self.draft.textarea,
+                        target.range,
+                        target.query,
                     ));
                 }
                 self.popups.active = ActivePopup::None;
@@ -1933,9 +2129,9 @@ impl ChatComposer {
 
         if close_popup {
             if let Some((insert_text, path)) = selected_mention
-                && let Some((token_range, _)) = self.current_mention_token_range()
+                && let Some(target) = self.current_mention_target()
             {
-                self.insert_selected_mention(token_range, &insert_text, path.as_deref());
+                self.insert_selected_mention(target.range, &insert_text, path.as_deref());
             }
             self.popups.active = ActivePopup::None;
         }
@@ -2013,11 +2209,8 @@ impl ChatComposer {
                 code: KeyCode::Esc, ..
             } => {
                 if let Some((range, query)) = self.current_mentions_v2_token_range() {
-                    self.popups.dismissed_mention_token = Some(DismissedToken::new(
-                        self.draft.textarea.text(),
-                        range,
-                        query,
-                    ));
+                    self.popups.dismissed_mention_token =
+                        Some(DismissedToken::new(&self.draft.textarea, range, query));
                 }
                 self.popups.active = ActivePopup::None;
                 (InputResult::None, true)
@@ -2131,7 +2324,7 @@ impl ChatComposer {
         };
         // Completion leaves the cursor on separator whitespace, where normal token affinity would
         // otherwise immediately reopen the popup for sigil-prefixed inserted text.
-        let Some((current_range, current_token)) = Self::current_prefixed_token_range(
+        let Some((current_range, current_token)) = completion_target::current_prefixed_token_range(
             &self.draft.textarea,
             prefix,
             /*allow_empty*/ true,
@@ -2144,13 +2337,13 @@ impl ChatComposer {
 
         if prefix == '@' && !self.mentions_v2_enabled {
             self.popups.dismissed_file_token = Some(DismissedToken::new(
-                self.draft.textarea.text(),
+                &self.draft.textarea,
                 current_range,
                 current_token,
             ));
         } else {
             self.popups.dismissed_mention_token = Some(DismissedToken::new(
-                self.draft.textarea.text(),
+                &self.draft.textarea,
                 current_range,
                 current_token,
             ));
@@ -2158,6 +2351,7 @@ impl ChatComposer {
     }
 
     fn insert_selected_file_path(&mut self, token_range: Range<usize>, selected_path: &str) {
+        let token_range = self.separate_completion_from_adjacent_element(token_range);
         if Self::is_image_path(selected_path) {
             let path_buf = PathBuf::from(selected_path);
             match image::image_dimensions(&path_buf) {
@@ -2309,132 +2503,13 @@ impl ChatComposer {
         skills_ready || plugins_ready || connectors_ready
     }
 
-    /// Extract a token prefixed with `prefix` under the cursor, if any.
-    ///
-    /// The returned string **does not** include the prefix.
-    ///
-    /// Behavior:
-    /// - The cursor may be anywhere *inside* the token (including on the
-    ///   leading prefix). It does **not** need to be at the end of the line.
-    /// - A token is delimited by ASCII whitespace (space, tab, newline).
-    /// - If the cursor is on `prefix` inside an existing token (for example the
-    ///   second `@` in `@scope/pkg@latest`), keep treating the surrounding
-    ///   whitespace-delimited token as the active token rather than starting a
-    ///   new token at that nested prefix.
-    /// - If the token under the cursor starts with `prefix`, its byte range and
-    ///   text without the leading prefix are returned. When `allow_empty` is
-    ///   true, a lone prefix character yields `Some(String::new())` to surface hints.
-    fn current_prefixed_token_range(
-        textarea: &TextArea,
-        prefix: char,
-        allow_empty: bool,
-    ) -> Option<(Range<usize>, String)> {
-        let cursor_offset = textarea.cursor();
-        let text = textarea.text();
-
-        // Adjust the provided byte offset to the nearest valid char boundary at or before it.
-        let mut safe_cursor = cursor_offset.min(text.len());
-        // If we're not on a char boundary, move back to the start of the current char.
-        if safe_cursor < text.len() && !text.is_char_boundary(safe_cursor) {
-            // Find the last valid boundary <= cursor_offset.
-            safe_cursor = text
-                .char_indices()
-                .map(|(i, _)| i)
-                .take_while(|&i| i <= cursor_offset)
-                .last()
-                .unwrap_or(0);
-        }
-
-        // Split the line around the (now safe) cursor position.
-        let before_cursor = &text[..safe_cursor];
-        let after_cursor = &text[safe_cursor..];
-
-        // Detect whether we're on whitespace at the cursor boundary.
-        let at_whitespace = if safe_cursor < text.len() {
-            text[safe_cursor..]
-                .chars()
-                .next()
-                .map(char::is_whitespace)
-                .unwrap_or(false)
-        } else {
-            false
-        };
-
-        // Left candidate: token containing the cursor position.
-        let start_left = before_cursor
-            .char_indices()
-            .rfind(|(_, c)| c.is_whitespace())
-            .map(|(idx, c)| idx + c.len_utf8())
-            .unwrap_or(0);
-        let end_left_rel = after_cursor
-            .char_indices()
-            .find(|(_, c)| c.is_whitespace())
-            .map(|(idx, _)| idx)
-            .unwrap_or(after_cursor.len());
-        let end_left = safe_cursor + end_left_rel;
-        let token_left = if start_left < end_left {
-            Some(&text[start_left..end_left])
-        } else {
-            None
-        };
-
-        // Right candidate: token immediately after any whitespace from the cursor.
-        let ws_len_right: usize = after_cursor
-            .chars()
-            .take_while(|c| c.is_whitespace())
-            .map(char::len_utf8)
-            .sum();
-        let start_right = safe_cursor + ws_len_right;
-        let end_right_rel = text[start_right..]
-            .char_indices()
-            .find(|(_, c)| c.is_whitespace())
-            .map(|(idx, _)| idx)
-            .unwrap_or(text.len() - start_right);
-        let end_right = start_right + end_right_rel;
-        let token_right = if start_right < end_right {
-            Some(&text[start_right..end_right])
-        } else {
-            None
-        };
-
-        let prefix_str = prefix.to_string();
-        let left_match = token_left.filter(|t| t.starts_with(prefix));
-        let right_match = token_right.filter(|t| t.starts_with(prefix));
-
-        let left_prefixed =
-            left_match.map(|t| (start_left..end_left, t[prefix.len_utf8()..].to_string()));
-        let right_prefixed =
-            right_match.map(|t| (start_right..end_right, t[prefix.len_utf8()..].to_string()));
-
-        if at_whitespace {
-            if right_prefixed.is_some() {
-                return right_prefixed;
-            }
-            if token_left.is_some_and(|t| t == prefix_str) {
-                return allow_empty.then(|| (start_left..end_left, String::new()));
-            }
-            return left_prefixed;
-        }
-        if after_cursor.starts_with(prefix) {
-            let prefix_starts_token = before_cursor
-                .chars()
-                .next_back()
-                .is_none_or(char::is_whitespace);
-            return if prefix_starts_token {
-                right_prefixed.or(left_prefixed)
-            } else {
-                left_prefixed
-            };
-        }
-        left_prefixed.or(right_prefixed)
-    }
-
     fn current_prefixed_token(
         textarea: &TextArea,
         prefix: char,
         allow_empty: bool,
     ) -> Option<String> {
-        Self::current_prefixed_token_range(textarea, prefix, allow_empty).map(|(_, token)| token)
+        completion_target::current_prefixed_token_range(textarea, prefix, allow_empty)
+            .map(|(_, token)| token)
     }
 
     /// Extract the `@token` that the cursor is currently positioned on, if any.
@@ -2444,40 +2519,34 @@ impl ChatComposer {
         Self::current_prefixed_token(textarea, '@', /*allow_empty*/ false)
     }
 
+    /// Returns the active prefixed token only when its sigil and name remain editable plaintext.
+    ///
+    /// Atomic elements and tokens whose mention prefix is already atomic are excluded so bound
+    /// mentions are not offered for completion again.
+    fn current_editable_prefixed_token_range(
+        &self,
+        prefix: char,
+        allow_empty: bool,
+    ) -> Option<(Range<usize>, String)> {
+        let (range, token) = completion_target::current_prefixed_token_range(
+            &self.draft.textarea,
+            prefix,
+            allow_empty,
+        )?;
+        completion_target::prefixed_token_range_is_editable(
+            &self.draft.textarea,
+            prefix,
+            &range,
+            &token,
+        )
+        .then_some((range, token))
+    }
+
     fn current_editable_at_token_range_with_options(
         &self,
         allow_empty: bool,
     ) -> Option<(Range<usize>, String)> {
-        let (range, token) =
-            Self::current_prefixed_token_range(&self.draft.textarea, '@', allow_empty)?;
-        if self
-            .draft
-            .textarea
-            .element_id_for_exact_range(range.clone())
-            .is_some()
-        {
-            return None;
-        }
-
-        let name_len = token
-            .as_bytes()
-            .iter()
-            .take_while(|byte| is_mention_name_char(**byte))
-            .count();
-        let mention_end = range.start + '@'.len_utf8() + name_len;
-        if name_len > 0
-            && mention_end < range.end
-            && ends_plaintext_at_mention(self.draft.textarea.text().as_bytes(), mention_end)
-            && self
-                .draft
-                .textarea
-                .element_id_for_exact_range(range.start..mention_end)
-                .is_some()
-        {
-            return None;
-        }
-
-        Some((range, token))
+        self.current_editable_prefixed_token_range('@', allow_empty)
     }
 
     fn current_editable_at_token_with_options(&self, allow_empty: bool) -> Option<String> {
@@ -2501,11 +2570,71 @@ impl ChatComposer {
             .map(|(_, token)| token)
     }
 
-    fn current_mention_token_range(&self) -> Option<(Range<usize>, String)> {
+    /// Resolves the active legacy `$` target without eagerly cloning the mention catalog.
+    ///
+    /// Definite shell syntax is rejected. Ambiguous shell-like queries are accepted only when a
+    /// bindable mention matches. The query-independent catalog built during that check is carried
+    /// forward only when the selected target is also ambiguous.
+    fn current_mention_target(&self) -> Option<MentionCompletionTarget> {
         if !self.mentions_enabled() {
             return None;
         }
-        Self::current_prefixed_token_range(&self.draft.textarea, '$', /*allow_empty*/ true)
+        let mentions: OnceCell<Vec<MentionItem>> = OnceCell::new();
+        let (range, query) = {
+            let dollar_query_is_completable =
+                |query: &str| match completion_target::dollar_query_kind(query) {
+                    completion_target::DollarQueryKind::Completable => true,
+                    completion_target::DollarQueryKind::AmbiguousShellParameter => mentions
+                        .get_or_init(|| {
+                            self.mention_items()
+                                .into_iter()
+                                .filter(|mention| {
+                                    mention.path.is_some()
+                                        && Self::mention_token_from_insert_text(
+                                            &mention.insert_text,
+                                        )
+                                        .is_some()
+                                })
+                                .collect()
+                        })
+                        .iter()
+                        .any(|mention| mention.fuzzy_match_query(query).is_some()),
+                    completion_target::DollarQueryKind::ShellVariable
+                    | completion_target::DollarQueryKind::DefiniteShellParameter
+                    | completion_target::DollarQueryKind::Invalid => false,
+                };
+            let (range, query) =
+                completion_target::current_prefixed_token_range_with_dollar_predicate(
+                    &self.draft.textarea,
+                    '$',
+                    /*allow_empty*/ true,
+                    dollar_query_is_completable,
+                )?;
+            if !completion_target::prefixed_token_range_is_editable(
+                &self.draft.textarea,
+                '$',
+                &range,
+                &query,
+            ) || !dollar_query_is_completable(&query)
+            {
+                return None;
+            }
+            (range, query)
+        };
+        let prebuilt_mentions = if matches!(
+            completion_target::dollar_query_kind(&query),
+            completion_target::DollarQueryKind::AmbiguousShellParameter
+        ) {
+            mentions.into_inner()
+        } else {
+            None
+        };
+
+        Some(MentionCompletionTarget {
+            range,
+            query,
+            prebuilt_mentions,
+        })
     }
 
     /// Replace the active `@token` (the one under the cursor) with `path`.
@@ -2536,6 +2665,7 @@ impl ChatComposer {
         insert_text: &str,
         path: Option<&str>,
     ) {
+        let token_range = self.separate_completion_from_adjacent_element(token_range);
         // Remove the active token and insert the selected mention as an atomic element.
         let start_idx = token_range.start;
         self.draft.textarea.replace_range(token_range, "");
@@ -2562,6 +2692,28 @@ impl ChatComposer {
         {
             self.dismiss_completed_prefixed_token(sigil, inserted_range, insert_text);
         }
+    }
+
+    /// Inserts a leading separator when a completion starts directly after an atomic element.
+    ///
+    /// The returned range is shifted to keep replacing the same editable token after insertion.
+    fn separate_completion_from_adjacent_element(
+        &mut self,
+        mut token_range: Range<usize>,
+    ) -> Range<usize> {
+        let starts_after_element = self
+            .draft
+            .textarea
+            .text_element_ranges()
+            .any(|range| range.end == token_range.start);
+        if starts_after_element {
+            self.draft
+                .textarea
+                .replace_range(token_range.start..token_range.start, " ");
+            token_range.start += 1;
+            token_range.end += 1;
+        }
+        token_range
     }
 
     fn mention_token_from_insert_text(insert_text: &str) -> Option<(char, String)> {
@@ -2807,6 +2959,43 @@ impl ChatComposer {
         should_queue: bool,
         now: Instant,
     ) -> (InputResult, bool) {
+        // Preserve newlines that are part of a paste before applying parent-owned submission
+        // policy. Queued startup input still flushes the burst into its queued message below.
+        let in_slash_context = self.slash_commands_enabled()
+            && !self.draft.is_bash_mode
+            && (matches!(self.popups.active, ActivePopup::Command(_))
+                || self
+                    .draft
+                    .textarea
+                    .text()
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .starts_with('/'));
+        if !should_queue
+            && !self.draft.disable_paste_burst
+            && self.draft.paste_burst.is_active()
+            && !in_slash_context
+            && self.draft.paste_burst.append_newline_if_active(now)
+        {
+            return (InputResult::None, true);
+        }
+        if !should_queue
+            && !in_slash_context
+            && !self.draft.disable_paste_burst
+            && self
+                .draft
+                .paste_burst
+                .newline_should_insert_instead_of_submit(now)
+        {
+            self.draft.textarea.insert_str("\n");
+            self.draft.paste_burst.extend_window(now);
+            return (InputResult::None, true);
+        }
+
+        if let Some(result) = self.handle_parent_owned_submission() {
+            return result;
+        }
         if should_queue {
             if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
                 self.handle_paste(pasted);
@@ -2860,41 +3049,6 @@ impl ChatComposer {
             return (result, true);
         }
 
-        // If we're in a paste-like burst capture, treat Enter/Ctrl+Shift+Q as part of the burst
-        // and accumulate it rather than submitting or inserting immediately.
-        // Do not treat as paste inside a slash-command context.
-        let in_slash_context = self.slash_commands_enabled()
-            && !self.draft.is_bash_mode
-            && (matches!(self.popups.active, ActivePopup::Command(_))
-                || self
-                    .draft
-                    .textarea
-                    .text()
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .starts_with('/'));
-        if !self.draft.disable_paste_burst
-            && self.draft.paste_burst.is_active()
-            && !in_slash_context
-            && self.draft.paste_burst.append_newline_if_active(now)
-        {
-            return (InputResult::None, true);
-        }
-
-        // During a paste-like burst, treat Enter/Ctrl+Shift+Q as a newline instead of submit.
-        if !in_slash_context
-            && !self.draft.disable_paste_burst
-            && self
-                .draft
-                .paste_burst
-                .newline_should_insert_instead_of_submit(now)
-        {
-            self.draft.textarea.insert_str("\n");
-            self.draft.paste_burst.extend_window(now);
-            return (InputResult::None, true);
-        }
-
         let original_input = self.current_text();
         let original_text_elements = self.current_text_elements();
         let original_mention_bindings = self.snapshot_mention_bindings();
@@ -2939,6 +3093,27 @@ impl ChatComposer {
             self.draft.pending_pastes = original_pending_pastes;
             (InputResult::None, true)
         }
+    }
+
+    fn handle_parent_owned_submission(&mut self) -> Option<(InputResult, bool)> {
+        if !self.blocks_direct_input {
+            return None;
+        }
+
+        let text = self.current_text();
+        let allowed_slash_command = parse_slash_name(&text).is_some_and(|(name, args, _)| {
+            matches!(
+                self.slash_input().command(name),
+                Some(SlashCommandItem::Builtin(command))
+                    if name == command.command()
+                        && parent_owned_command_is_allowed(command, args)
+            )
+        });
+        if text.starts_with('/') && allowed_slash_command {
+            return None;
+        }
+
+        Some((InputResult::ParentOwnedInputBlocked, true))
     }
 
     /// Check if the first line is a bare slash command (no args) and dispatch it.
@@ -3561,8 +3736,8 @@ impl ChatComposer {
             self.popups.active = ActivePopup::None;
             return;
         }
-        let mentions_v2_token = self.current_mentions_v2_token_range();
-        let file_token = if self.mentions_v2_enabled {
+        let mut mentions_v2_token = self.current_mentions_v2_token_range();
+        let mut file_token = if self.mentions_v2_enabled {
             None
         } else {
             self.current_editable_at_token_range_with_options(/*allow_empty*/ false)
@@ -3581,13 +3756,28 @@ impl ChatComposer {
             self.popups.active = ActivePopup::None;
             return;
         }
-        let mention_token = self.current_mention_token_range();
+        let mut mention_target = self.current_mention_target();
+        let at_token_start = mentions_v2_token
+            .as_ref()
+            .or(file_token.as_ref())
+            .map(|(range, _)| range.start);
+        let mention_token_start = mention_target.as_ref().map(|target| target.range.start);
+        if let (Some(at_token_start), Some(mention_token_start)) =
+            (at_token_start, mention_token_start)
+        {
+            if at_token_start > mention_token_start {
+                mention_target = None;
+            } else if mention_token_start > at_token_start {
+                mentions_v2_token = None;
+                file_token = None;
+            }
+        }
 
         let allow_command_popup = self.slash_commands_enabled()
             && !self.draft.is_bash_mode
             && file_token.is_none()
             && mentions_v2_token.is_none()
-            && mention_token.is_none();
+            && mention_target.is_none();
         self.sync_command_popup(allow_command_popup);
 
         if matches!(self.popups.active, ActivePopup::Command(_)) {
@@ -3606,13 +3796,13 @@ impl ChatComposer {
             return;
         }
 
-        if let Some((range, token)) = mention_token {
+        if let Some(target) = mention_target {
             if self.popups.current_file_query.is_some() {
                 self.app_event_tx
                     .send(AppEvent::StartFileSearch(String::new()));
                 self.popups.current_file_query = None;
             }
-            self.sync_mention_popup(range, token);
+            self.sync_mention_popup(target);
             return;
         }
         self.popups.dismissed_mention_token = None;
@@ -3640,6 +3830,18 @@ impl ChatComposer {
     /// textarea. This must be called after every modification that can change
     /// the text so the popup is shown/updated/hidden as appropriate.
     fn sync_command_popup(&mut self, allow: bool) {
+        let text = self.draft.textarea.text();
+        let first_line_end = text.find('\n').unwrap_or(text.len());
+        let first_line = &text[..first_line_end];
+        // Keep an explicitly dismissed popup closed until the command token changes.
+        let command_token = slash_input::command_popup_filter_text(first_line, /*cursor*/ 0);
+        if let Some(command_token) = command_token.as_deref()
+            && self.popups.dismissed_command_token.as_deref() == Some(command_token)
+        {
+            return;
+        }
+        self.popups.dismissed_command_token = None;
+
         if !allow {
             if matches!(self.popups.active, ActivePopup::Command(_)) {
                 self.popups.active = ActivePopup::None;
@@ -3647,9 +3849,6 @@ impl ChatComposer {
             return;
         }
         // Determine whether the caret is inside the initial '/name' token on the first line.
-        let text = self.draft.textarea.text();
-        let first_line_end = text.find('\n').unwrap_or(text.len());
-        let first_line = &text[..first_line_end];
         let cursor = self.draft.textarea.cursor();
         let caret_on_first_line = cursor <= first_line_end;
 
@@ -3693,12 +3892,11 @@ impl ChatComposer {
 
     /// Synchronize the legacy file-search popup with the current `@` token.
     fn sync_file_search_popup(&mut self, range: Range<usize>, query: String) {
-        let text = self.draft.textarea.text();
         if self
             .popups
             .dismissed_file_token
             .as_ref()
-            .is_some_and(|dismissed| dismissed.matches(text, &range, &query))
+            .is_some_and(|dismissed| dismissed.matches(&self.draft.textarea, &range, &query))
         {
             return;
         }
@@ -3738,18 +3936,22 @@ impl ChatComposer {
         self.popups.dismissed_file_token = None;
     }
 
-    fn sync_mention_popup(&mut self, range: Range<usize>, query: String) {
-        let text = self.draft.textarea.text();
+    fn sync_mention_popup(&mut self, target: MentionCompletionTarget) {
+        let MentionCompletionTarget {
+            range,
+            query,
+            prebuilt_mentions,
+        } = target;
         if self
             .popups
             .dismissed_mention_token
             .as_ref()
-            .is_some_and(|dismissed| dismissed.matches(text, &range, &query))
+            .is_some_and(|dismissed| dismissed.matches(&self.draft.textarea, &range, &query))
         {
             return;
         }
 
-        let mentions = self.mention_items();
+        let mentions = prebuilt_mentions.unwrap_or_else(|| self.mention_items());
         if mentions.is_empty() {
             self.popups.active = ActivePopup::None;
             return;
@@ -3769,12 +3971,11 @@ impl ChatComposer {
     }
 
     fn sync_mentions_v2_popup(&mut self, range: Range<usize>, query: String) {
-        let text = self.draft.textarea.text();
         if self
             .popups
             .dismissed_mention_token
             .as_ref()
-            .is_some_and(|dismissed| dismissed.matches(text, &range, &query))
+            .is_some_and(|dismissed| dismissed.matches(&self.draft.textarea, &range, &query))
         {
             return;
         }
@@ -3826,7 +4027,7 @@ impl ChatComposer {
                     description,
                     insert_text: format!("${skill_name}"),
                     search_terms,
-                    path: Some(skill.path_to_skills_md.to_string_lossy().into_owned()),
+                    path: Some(skill.path.to_string_lossy().into_owned()),
                     category_tag: Some("[Skill]".to_string()),
                     sort_rank: 1,
                 });
@@ -4069,6 +4270,12 @@ fn ends_plaintext_at_mention(bytes: &[u8], index: usize) -> bool {
     })
 }
 
+fn ends_plaintext_at_dollar_mention(bytes: &[u8], index: usize) -> bool {
+    bytes
+        .get(index)
+        .is_none_or(|byte| !is_mention_name_char(*byte))
+}
+
 fn starts_plaintext_at_mention(text: &str, index: usize) -> bool {
     if index == 0 {
         return true;
@@ -4119,9 +4326,7 @@ fn find_next_mention_token_range(text: &str, token: &str, from: usize) -> Option
         let ends_plaintext_mention = if sigil == b'@' {
             ends_plaintext_at_mention(bytes, end)
         } else {
-            bytes
-                .get(end)
-                .is_none_or(|byte| !is_mention_name_char(*byte))
+            ends_plaintext_at_dollar_mention(bytes, end)
         };
 
         if starts_plaintext_mention && ends_plaintext_mention {
@@ -4277,6 +4482,25 @@ impl ChatComposer {
                     } else {
                         None
                     };
+                    let transition_visible = status_line_active
+                        && !self.footer.flash_visible()
+                        && self.footer.hint_override.is_none();
+                    let transition_active = transition_visible
+                        && self
+                            .effort_status_line_transition
+                            .as_ref()
+                            .is_some_and(|transition| !transition.is_finished());
+                    let combined_status_line = if transition_visible
+                        && let Some(transition) = &self.effort_status_line_transition
+                        && !transition.is_finished()
+                    {
+                        transition.render_line(
+                            combined_status_line.as_ref(),
+                            hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16),
+                        )
+                    } else {
+                        combined_status_line
+                    };
                     let mut truncated_status_line = if status_line_active {
                         combined_status_line.as_ref().map(|line| {
                             truncate_line_with_ellipsis_if_overflow(line.clone(), available_width)
@@ -4317,6 +4541,8 @@ impl ChatComposer {
                             Some(side_conversation_context_line(label))
                         } else if let Some(line) = self.shell_mode_footer_line() {
                             Some(line)
+                        } else if transition_active {
+                            None
                         } else if status_line_active {
                             let full = self.mode_indicator_line(show_cycle_hint);
                             let compact = self.mode_indicator_line(/*show_cycle_hint*/ false);
@@ -4447,31 +4673,18 @@ impl ChatComposer {
                     {
                         mark_underlined_hyperlink(buf, hint_rect, url);
                     }
+                    if transition_visible
+                        && let Some(transition) = &self.effort_status_line_transition
+                        && !transition.is_finished()
+                        && let Some(frame_requester) = &self.frame_requester
+                    {
+                        frame_requester.schedule_frame_in(EFFORT_STATUS_LINE_FRAME_TICK);
+                    }
                 }
             }
         }
         let style = user_message_style();
-        let transparent_style = Style::default()
-            .fg(ratatui::style::Color::Reset)
-            .bg(ratatui::style::Color::Reset);
-        for y in composer_rect.y..composer_rect.y.saturating_add(composer_rect.height) {
-            for x in composer_rect.x..composer_rect.x.saturating_add(composer_rect.width) {
-                buf[(x, y)].set_symbol(" ").set_style(transparent_style);
-            }
-        }
-        if composer_rect.width > 0 && composer_rect.height > 0 {
-            Line::from("─".repeat(usize::from(composer_rect.width)))
-                .dim()
-                .render_ref(
-                    Rect {
-                        x: composer_rect.x,
-                        y: composer_rect.y,
-                        width: composer_rect.width,
-                        height: 1,
-                    },
-                    buf,
-                );
-        }
+        Block::default().style(style).render_ref(composer_rect, buf);
         if !remote_images_rect.is_empty() {
             Paragraph::new(self.attachments.remote_image_lines())
                 .style(style)
@@ -4481,6 +4694,13 @@ impl ChatComposer {
             let prompt = if self.draft.input_enabled {
                 if self.draft.is_bash_mode {
                     Span::from("!").light_red().bold()
+                } else if let Some(tier) = self.effort_tier {
+                    let charge = self
+                        .effort_ignition
+                        .as_ref()
+                        .map(EffortIgnition::charge_alpha)
+                        .unwrap_or(1.0);
+                    tier.prompt(charge)
                 } else {
                     "›".bold()
                 }
@@ -4545,8 +4765,33 @@ impl ChatComposer {
                     .render_ref(textarea_rect.inner(Margin::new(0, 0)), buf);
             }
         }
+        if matches!(self.popups.active, ActivePopup::None)
+            && let Some(ignition) = &self.effort_ignition
+            && !ignition.is_finished()
+        {
+            let protected_top = if remote_images_rect.is_empty() {
+                textarea_rect.y
+            } else {
+                remote_images_rect.y
+            };
+            let protected = Rect::new(
+                composer_rect.x,
+                protected_top,
+                composer_rect.width,
+                textarea_rect.bottom().saturating_sub(protected_top),
+            );
+            if ignition.render(composer_rect, protected, buf)
+                && let Some(frame_requester) = &self.frame_requester
+            {
+                frame_requester.schedule_frame_in(IGNITION_FRAME_TICK);
+            }
+        }
     }
 }
+
+#[cfg(test)]
+#[path = "chat_composer_effort_tests.rs"]
+mod effort_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4571,7 +4816,7 @@ mod tests {
     use tokio::sync::mpsc::UnboundedReceiver;
     use tokio::sync::mpsc::unbounded_channel;
 
-    fn new_test_composer() -> (ChatComposer, UnboundedReceiver<AppEvent>) {
+    pub(super) fn new_test_composer() -> (ChatComposer, UnboundedReceiver<AppEvent>) {
         let (tx, rx) = unbounded_channel::<AppEvent>();
         let sender = AppEventSender::new(tx);
         (
@@ -4584,6 +4829,47 @@ mod tests {
             ),
             rx,
         )
+    }
+
+    #[test]
+    fn parent_owned_thread_allows_bare_navigation_commands() {
+        for (command, expected) in [
+            ("/agent", SlashCommand::Agent),
+            ("/side", SlashCommand::Side),
+            ("/btw", SlashCommand::Btw),
+            ("/diff ", SlashCommand::Diff),
+        ] {
+            let (mut composer, _rx) = new_test_composer();
+            composer.set_parent_owned_thread();
+            composer.set_text_content(command.to_string(), Vec::new(), Vec::new());
+
+            assert_eq!(
+                composer.handle_submission(/*should_queue*/ false).0,
+                InputResult::Command(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn parent_owned_thread_allows_safe_command_selected_from_prefix() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_parent_owned_thread();
+        type_chars_humanlike(&mut composer, &['/', 'a', 'g']);
+
+        let result = composer
+            .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .0;
+
+        assert_eq!(result, InputResult::Command(SlashCommand::Agent));
+    }
+
+    #[test]
+    fn parent_owned_thread_placeholder_snapshot() {
+        snapshot_composer_state(
+            "parent_owned_thread_placeholder",
+            /*enhanced_keys_supported*/ false,
+            ChatComposer::set_parent_owned_thread,
+        );
     }
 
     #[test]
@@ -4638,50 +4924,6 @@ mod tests {
             "",
             "expected blank spacing row above hints but saw: {spacing_row:?}",
         );
-    }
-
-    #[test]
-    fn transparent_composer_clears_stale_cells_and_draws_separator() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
-        let sender = AppEventSender::new(tx);
-        let composer = ChatComposer::new(
-            /*has_input_focus*/ true,
-            sender,
-            /*enhanced_keys_supported*/ false,
-            "Ask Codex to do anything".to_string(),
-            /*disable_paste_burst*/ false,
-        );
-
-        let area = Rect::new(0, 0, 40, 6);
-        let mut buf = Buffer::empty(area);
-        let stale_style = Style::default()
-            .fg(ratatui::style::Color::Green)
-            .bg(ratatui::style::Color::Red);
-        for y in area.y..area.y.saturating_add(area.height) {
-            for x in area.x..area.x.saturating_add(area.width) {
-                buf[(x, y)].set_symbol("S").set_style(stale_style);
-            }
-        }
-
-        composer.render(area, &mut buf);
-
-        let composer_rows = 4;
-        let rendered = (0..composer_rows)
-            .map(|y| {
-                (0..area.width)
-                    .map(|x| buf[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(
-            !rendered.contains('S'),
-            "expected stale cells to be cleared before composer render:\n{rendered}",
-        );
-        assert_eq!(buf[(0, 0)].symbol(), "─");
-        assert_eq!(buf[(0, 1)].symbol(), "›");
-        assert_eq!(buf[(0, 1)].style().bg, Some(ratatui::style::Color::Reset));
     }
 
     #[test]
@@ -4762,7 +5004,7 @@ mod tests {
         );
     }
 
-    fn snapshot_composer_state_with_width<F>(
+    pub(super) fn snapshot_composer_state_with_width<F>(
         name: &str,
         width: u16,
         enhanced_keys_supported: bool,
@@ -4915,6 +5157,21 @@ mod tests {
                     .handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
                 let _ = composer
                     .handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+            },
+        );
+
+        snapshot_composer_state(
+            "footer_mode_history_search_unavailable",
+            /*enhanced_keys_supported*/ true,
+            |composer| {
+                composer.set_text_content("draft".to_string(), Vec::new(), Vec::new());
+                composer.begin_history_search();
+                for ch in ['g', 'i', 't'] {
+                    let _ = composer
+                        .handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+                }
+                composer.apply_history_search_result(HistorySearchResult::Pending);
+                composer.apply_history_search_result(HistorySearchResult::Unavailable);
             },
         );
 
@@ -6377,6 +6634,642 @@ mod tests {
         assert_eq!(mention.path, Some("plugin://sample@test".to_string()));
     }
 
+    fn test_skill_metadata(name: &str) -> SkillMetadata {
+        SkillMetadata {
+            name: name.to_string(),
+            description: "Example skill used in tests.".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            path: test_path_buf(&format!("/tmp/{name}/SKILL.md")).abs(),
+            scope: crate::test_support::skill_scope_user(),
+            enabled: true,
+        }
+    }
+
+    fn test_skill_binding(name: &str) -> MentionBinding {
+        MentionBinding {
+            sigil: '$',
+            mention: name.to_string(),
+            path: test_path_buf(&format!("/tmp/{name}/SKILL.md"))
+                .abs()
+                .display()
+                .to_string(),
+        }
+    }
+
+    fn test_plugin_binding(name: &str) -> MentionBinding {
+        MentionBinding {
+            sigil: '@',
+            mention: name.to_string(),
+            path: format!("plugin://{name}@test"),
+        }
+    }
+
+    fn test_plugin_summary(name: &str, description: &str) -> PluginCapabilitySummary {
+        PluginCapabilitySummary {
+            config_name: format!("{name}@test"),
+            display_name: name.to_string(),
+            description: Some(description.to_string()),
+            has_skills: false,
+            mcp_server_names: vec![name.to_string()],
+            app_connector_ids: Vec::new(),
+        }
+    }
+
+    fn configure_partially_bound_skill_mentions(composer: &mut ChatComposer) {
+        composer.set_skill_mentions(Some(vec![test_skill_metadata("unbound-skill")]));
+
+        composer.set_text_content_with_mention_bindings(
+            "$unbound-skill  $bound-skill continue".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![test_skill_binding("bound-skill")],
+        );
+        composer.draft.textarea.set_cursor("$unbound-skill  ".len());
+        composer.sync_popups();
+    }
+
+    fn configure_bound_skill_left_of_unbound_skill(composer: &mut ChatComposer) {
+        composer.set_skill_mentions(Some(vec![test_skill_metadata("unbound-skill")]));
+        composer.set_text_content_with_mention_bindings(
+            "$bound-skill$unbound-skill".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![test_skill_binding("bound-skill")],
+        );
+        composer.draft.textarea.set_cursor("$bound-skill".len());
+        composer.sync_popups();
+    }
+
+    fn configure_skill_target_between_bound_mentions(composer: &mut ChatComposer) {
+        composer.set_skill_mentions(Some(vec![test_skill_metadata("other")]));
+        composer.set_text_content_with_mention_bindings(
+            "$bound1 $oth $bound2".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![test_skill_binding("bound1"), test_skill_binding("bound2")],
+        );
+        composer
+            .draft
+            .textarea
+            .replace_range("$bound1".len().."$bound1 ".len(), "");
+        composer
+            .draft
+            .textarea
+            .replace_range("$bound1$oth".len().."$bound1$oth ".len(), "");
+        composer.draft.textarea.set_cursor("$bound1$o".len());
+        composer.sync_popups();
+    }
+
+    fn configure_skill_mention_with_trailing_space(composer: &mut ChatComposer) {
+        composer.set_skill_mentions(Some(vec![test_skill_metadata("figma")]));
+        let text = "$figma ";
+        composer.set_text_content(text.to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor(text.len());
+        composer.sync_popups();
+    }
+
+    fn configure_bound_plugin_left_of_unbound_plugin(composer: &mut ChatComposer) {
+        composer.set_mentions_v2_enabled(/*enabled*/ true);
+        composer.set_plugin_mentions(Some(vec![test_plugin_summary(
+            "other",
+            "Plugin used to test adjacent mention targeting.",
+        )]));
+        composer.set_text_content_with_mention_bindings(
+            "@sample@other".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![test_plugin_binding("sample")],
+        );
+        composer.draft.textarea.set_cursor("@sample".len());
+        composer.sync_popups();
+    }
+
+    fn configure_unbound_plugin_left_of_bound_plugin(composer: &mut ChatComposer) {
+        composer.set_mentions_v2_enabled(/*enabled*/ true);
+        composer.set_plugin_mentions(Some(vec![test_plugin_summary(
+            "left",
+            "Plugin used to test bound mention fallback.",
+        )]));
+        composer.set_text_content_with_mention_bindings(
+            "@left  @bound".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![test_plugin_binding("bound")],
+        );
+        composer.draft.textarea.set_cursor("@left ".len());
+        composer.sync_popups();
+    }
+
+    fn configure_plugin_target_between_bound_mentions(composer: &mut ChatComposer) {
+        composer.set_mentions_v2_enabled(/*enabled*/ true);
+        composer.set_plugin_mentions(Some(vec![test_plugin_summary(
+            "other",
+            "Plugin used to test middle mention targeting.",
+        )]));
+        composer.set_text_content_with_mention_bindings(
+            "@bound1 @oth @bound2".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![test_plugin_binding("bound1"), test_plugin_binding("bound2")],
+        );
+        composer
+            .draft
+            .textarea
+            .replace_range("@bound1".len().."@bound1 ".len(), "");
+        composer
+            .draft
+            .textarea
+            .replace_range("@bound1@oth".len().."@bound1@oth ".len(), "");
+        composer.draft.textarea.set_cursor("@bound1@o".len());
+        composer.sync_popups();
+    }
+
+    #[test]
+    fn skill_popup_targets_unbound_mention_left_of_bound_mention() {
+        let (mut composer, _rx) = new_test_composer();
+        configure_partially_bound_skill_mentions(&mut composer);
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            composer.current_text(),
+            "$unbound-skill  $bound-skill continue"
+        );
+        assert_eq!(
+            composer.mention_bindings(),
+            vec![
+                test_skill_binding("unbound-skill"),
+                test_skill_binding("bound-skill"),
+            ]
+        );
+
+        composer.insert_str("foo");
+        assert_eq!(
+            composer.current_text(),
+            "$unbound-skill foo $bound-skill continue"
+        );
+    }
+
+    #[test]
+    fn skill_popup_targets_unbound_mention_left_of_bound_mention_snapshot() {
+        snapshot_composer_state(
+            "skill_popup_targets_unbound_mention_left_of_bound_mention",
+            /*enhanced_keys_supported*/ false,
+            configure_partially_bound_skill_mentions,
+        );
+    }
+
+    #[test]
+    fn skill_popup_targets_unbound_mention_right_of_adjacent_bound_mention_snapshot() {
+        snapshot_composer_state(
+            "skill_popup_targets_unbound_mention_right_of_adjacent_bound_mention",
+            /*enhanced_keys_supported*/ false,
+            configure_bound_skill_left_of_unbound_skill,
+        );
+    }
+
+    #[test]
+    fn skill_popup_falls_back_from_bound_skill_with_path_suffix_snapshot() {
+        snapshot_composer_state(
+            "skill_popup_falls_back_from_bound_skill_with_path_suffix",
+            /*enhanced_keys_supported*/ false,
+            |composer| {
+                composer.set_skill_mentions(Some(vec![test_skill_metadata("left")]));
+                composer.set_text_content_with_mention_bindings(
+                    "$left  $bound/path".to_string(),
+                    Vec::new(),
+                    Vec::new(),
+                    vec![test_skill_binding("bound")],
+                );
+                composer.draft.textarea.set_cursor("$left  ".len());
+                composer.sync_popups();
+            },
+        );
+    }
+
+    #[test]
+    fn skill_popup_closes_after_trailing_space_snapshot() {
+        snapshot_composer_state(
+            "skill_popup_closes_after_trailing_space",
+            /*enhanced_keys_supported*/ false,
+            configure_skill_mention_with_trailing_space,
+        );
+    }
+
+    #[test]
+    fn unified_mention_popup_falls_back_from_bound_plugin_on_right_snapshot() {
+        snapshot_composer_state(
+            "unified_mention_popup_falls_back_from_bound_plugin_on_right",
+            /*enhanced_keys_supported*/ false,
+            configure_unbound_plugin_left_of_bound_plugin,
+        );
+    }
+
+    #[test]
+    fn adjacent_plugin_completion_inserts_separator_snapshot() {
+        snapshot_composer_state(
+            "adjacent_plugin_completion_inserts_separator",
+            /*enhanced_keys_supported*/ false,
+            |composer| {
+                configure_bound_plugin_left_of_unbound_plugin(composer);
+                let _ =
+                    composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            },
+        );
+    }
+
+    #[test]
+    fn skill_completion_replaces_only_middle_adjacent_target() {
+        let (mut composer, _rx) = new_test_composer();
+        configure_skill_target_between_bound_mentions(&mut composer);
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(composer.current_text(), "$bound1 $other $bound2");
+        assert_eq!(
+            composer.mention_bindings(),
+            vec![
+                test_skill_binding("bound1"),
+                test_skill_binding("other"),
+                test_skill_binding("bound2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn unified_completion_replaces_only_middle_adjacent_target() {
+        let (mut composer, _rx) = new_test_composer();
+        configure_plugin_target_between_bound_mentions(&mut composer);
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(composer.current_text(), "@bound1 @other @bound2");
+        assert_eq!(
+            composer.mention_bindings(),
+            vec![
+                test_plugin_binding("bound1"),
+                test_plugin_binding("other"),
+                test_plugin_binding("bound2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn skill_popup_falls_back_from_shell_variable_to_skill_on_right() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_skill_mentions(Some(vec![test_skill_metadata("rustdoc")]));
+        composer.set_text_content("$HOME  $rustdoc".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor("$HOME ".len());
+        composer.sync_popups();
+
+        let ActivePopup::Skill(popup) = &composer.popups.active else {
+            panic!("expected skill popup to fall back to the right token");
+        };
+        assert_eq!(
+            popup
+                .selected_mention()
+                .expect("expected rustdoc selection")
+                .insert_text,
+            "$rustdoc"
+        );
+    }
+
+    #[test]
+    fn file_popup_ignores_shell_positional_parameter_snapshot() {
+        snapshot_composer_state(
+            "file_popup_ignores_shell_positional_parameter",
+            /*enhanced_keys_supported*/ false,
+            |composer| {
+                composer.set_skill_mentions(Some(vec![test_skill_metadata("available")]));
+                composer.set_text_content("@src  $1_suffix".to_string(), Vec::new(), Vec::new());
+                composer.draft.textarea.set_cursor("@src ".len());
+                composer.sync_popups();
+
+                assert!(matches!(composer.popups.active, ActivePopup::File(_)));
+            },
+        );
+    }
+
+    #[test]
+    fn file_popup_ignores_bare_shell_parameter_with_matching_skill_snapshot() {
+        snapshot_composer_state(
+            "file_popup_ignores_bare_shell_parameter_with_matching_skill",
+            /*enhanced_keys_supported*/ false,
+            |composer| {
+                composer.set_skill_mentions(Some(vec![test_skill_metadata("_tool")]));
+                composer.set_text_content("@src  $_".to_string(), Vec::new(), Vec::new());
+                composer.draft.textarea.set_cursor("@src ".len());
+                composer.sync_popups();
+
+                assert!(matches!(composer.popups.active, ActivePopup::File(_)));
+            },
+        );
+    }
+
+    #[test]
+    fn file_popup_ignores_definite_shell_parameters_with_matching_skills() {
+        for (query, skill_name) in [("12", "12factor"), ("-", "-tool")] {
+            let (mut composer, _rx) = new_test_composer();
+            composer.set_skill_mentions(Some(vec![test_skill_metadata(skill_name)]));
+            composer.set_text_content(format!("@src  ${query}"), Vec::new(), Vec::new());
+            composer.draft.textarea.set_cursor("@src ".len());
+            composer.sync_popups();
+
+            assert!(matches!(composer.popups.active, ActivePopup::File(_)));
+        }
+    }
+
+    #[test]
+    fn skill_popup_accepts_loaded_hyphen_leading_skill_name() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_skill_mentions(Some(vec![test_skill_metadata("-tool")]));
+        composer.set_text_content("$-t".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor("$-t".len());
+        composer.sync_popups();
+
+        let ActivePopup::Skill(popup) = &composer.popups.active else {
+            panic!("expected skill popup for -tool");
+        };
+        assert_eq!(
+            popup
+                .selected_mention()
+                .expect("expected -tool selection")
+                .insert_text,
+            "$-tool"
+        );
+    }
+
+    #[test]
+    fn file_popup_ignores_unbindable_qualified_skill_snapshot() {
+        snapshot_composer_state(
+            "file_popup_ignores_unbindable_qualified_skill",
+            /*enhanced_keys_supported*/ false,
+            |composer| {
+                composer.set_skill_mentions(Some(vec![test_skill_metadata("1plugin:deploy")]));
+                composer.set_text_content("@src  $1plugin:d".to_string(), Vec::new(), Vec::new());
+                composer.draft.textarea.set_cursor("@src ".len());
+                composer.sync_popups();
+
+                assert!(matches!(composer.popups.active, ActivePopup::File(_)));
+            },
+        );
+    }
+
+    #[test]
+    fn skill_popup_preserves_normal_target_after_ambiguous_probe_snapshot() {
+        snapshot_composer_state(
+            "skill_popup_preserves_normal_target_after_ambiguous_probe",
+            /*enhanced_keys_supported*/ false,
+            |composer| {
+                composer.set_skill_mentions(Some(vec![test_skill_metadata("plugin:deploy")]));
+                composer.set_text_content("$1x  $plugin:d".to_string(), Vec::new(), Vec::new());
+                composer.draft.textarea.set_cursor("$1x ".len());
+                composer.sync_popups();
+
+                let ActivePopup::Skill(popup) = &composer.popups.active else {
+                    panic!("expected the right qualified skill popup");
+                };
+                assert_eq!(
+                    popup
+                        .selected_mention()
+                        .expect("expected qualified skill selection")
+                        .insert_text,
+                    "$plugin:deploy"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn mention_target_prebuilds_catalog_only_for_ambiguous_query() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_skill_mentions(Some(vec![test_skill_metadata("1password")]));
+
+        composer.set_text_content("$normal".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor("$normal".len());
+        let normal_target = composer
+            .current_mention_target()
+            .expect("expected normal mention target");
+        assert!(normal_target.prebuilt_mentions.is_none());
+
+        composer.set_text_content("$1p".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor("$1p".len());
+        let ambiguous_target = composer
+            .current_mention_target()
+            .expect("expected ambiguous mention target");
+        assert_eq!(
+            ambiguous_target.prebuilt_mentions.map(|mentions| {
+                mentions
+                    .into_iter()
+                    .map(|mention| mention.display_name)
+                    .collect::<Vec<_>>()
+            }),
+            Some(vec!["1password".to_string()])
+        );
+    }
+
+    #[test]
+    fn skill_popup_accepts_digit_leading_skill_snapshot() {
+        snapshot_composer_state(
+            "skill_popup_accepts_digit_leading_skill",
+            /*enhanced_keys_supported*/ false,
+            |composer| {
+                composer.set_skill_mentions(Some(vec![test_skill_metadata("1password")]));
+                composer.set_text_content("$1p".to_string(), Vec::new(), Vec::new());
+                composer.draft.textarea.set_cursor("$1p".len());
+                composer.sync_popups();
+
+                assert!(matches!(composer.popups.active, ActivePopup::Skill(_)));
+            },
+        );
+    }
+
+    #[test]
+    fn skill_popup_does_not_fuzzy_match_shell_variable_snapshot() {
+        snapshot_composer_state(
+            "skill_popup_does_not_fuzzy_match_shell_variable",
+            /*enhanced_keys_supported*/ false,
+            |composer| {
+                composer.set_skill_mentions(Some(vec![test_skill_metadata("home")]));
+                composer.set_text_content("$HOME".to_string(), Vec::new(), Vec::new());
+                composer.draft.textarea.set_cursor("$HOME".len());
+                composer.sync_popups();
+
+                assert!(matches!(composer.popups.active, ActivePopup::None));
+            },
+        );
+    }
+
+    #[test]
+    fn skill_popup_preserves_loaded_shell_like_skill_at_separator() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_skill_mentions(Some(vec![
+            test_skill_metadata("1password"),
+            test_skill_metadata("rustdoc"),
+        ]));
+        composer.set_text_content("$1p  $rustdoc".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor("$1p ".len());
+        composer.sync_popups();
+
+        let ActivePopup::Skill(popup) = &composer.popups.active else {
+            panic!("expected the left shell-like skill popup");
+        };
+        assert_eq!(
+            popup
+                .selected_mention()
+                .expect("expected 1password selection")
+                .insert_text,
+            "$1password"
+        );
+    }
+
+    #[test]
+    fn skill_popup_accepts_lowercase_skill_named_like_env_var() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_skill_mentions(Some(vec![test_skill_metadata("home")]));
+        composer.set_text_content("$home".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor("$home".len());
+        composer.sync_popups();
+
+        let ActivePopup::Skill(popup) = &composer.popups.active else {
+            panic!("expected skill popup for lowercase home skill");
+        };
+        assert_eq!(
+            popup
+                .selected_mention()
+                .expect("expected home skill selection")
+                .insert_text,
+            "$home"
+        );
+    }
+
+    #[test]
+    fn legacy_file_popup_falls_back_when_right_skill_is_unavailable() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_text_content("@src  $missing".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor("@src ".len());
+        composer.sync_popups();
+
+        assert!(matches!(composer.popups.active, ActivePopup::File(_)));
+    }
+
+    #[test]
+    fn unified_popup_falls_back_when_right_skill_is_unavailable() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_mentions_v2_enabled(/*enabled*/ true);
+        composer.set_text_content("@src  $missing".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor("@src ".len());
+        composer.sync_popups();
+
+        assert!(matches!(composer.popups.active, ActivePopup::MentionV2(_)));
+    }
+
+    #[test]
+    fn skill_popup_falls_back_when_right_at_mention_is_bound() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_skill_mentions(Some(vec![test_skill_metadata("old")]));
+        composer.set_text_content_with_mention_bindings(
+            "$old  @bound".to_string(),
+            Vec::new(),
+            Vec::new(),
+            vec![MentionBinding {
+                sigil: '@',
+                mention: "bound".to_string(),
+                path: "plugin://bound@test".to_string(),
+            }],
+        );
+        composer.draft.textarea.set_cursor("$old ".len());
+        composer.sync_popups();
+
+        let ActivePopup::Skill(popup) = &composer.popups.active else {
+            panic!("expected the left skill popup");
+        };
+        assert_eq!(
+            popup
+                .selected_mention()
+                .expect("expected old skill selection")
+                .insert_text,
+            "$old"
+        );
+    }
+
+    #[test]
+    fn legacy_popup_prefers_right_at_token_over_left_skill() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_skill_mentions(Some(vec![test_skill_metadata("old")]));
+        composer.set_text_content("$old  @new".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor("$old  ".len());
+        composer.sync_popups();
+
+        assert!(matches!(composer.popups.active, ActivePopup::File(_)));
+    }
+
+    #[test]
+    fn unified_popup_prefers_right_skill_over_left_at_token() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_mentions_v2_enabled(/*enabled*/ true);
+        composer.set_skill_mentions(Some(vec![test_skill_metadata("new")]));
+        composer.set_text_content("@old  $new".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor("@old  ".len());
+        composer.sync_popups();
+
+        assert!(matches!(composer.popups.active, ActivePopup::Skill(_)));
+    }
+
+    #[test]
+    fn skill_popup_closes_at_plain_text_after_whitespace() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_skill_mentions(Some(vec![test_skill_metadata("old")]));
+        composer.set_text_content("$old word".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor("$old ".len());
+        composer.sync_popups();
+
+        assert!(matches!(composer.popups.active, ActivePopup::None));
+    }
+
+    #[test]
+    fn skill_popup_closes_between_spaces_before_plain_text_snapshot() {
+        snapshot_composer_state(
+            "skill_popup_closes_between_spaces_before_plain_text",
+            /*enhanced_keys_supported*/ false,
+            |composer| {
+                composer.set_skill_mentions(Some(vec![test_skill_metadata("old")]));
+                composer.set_text_content("$old  word".to_string(), Vec::new(), Vec::new());
+                composer.draft.textarea.set_cursor("$old ".len());
+                composer.sync_popups();
+
+                assert!(matches!(composer.popups.active, ActivePopup::None));
+            },
+        );
+    }
+
+    fn assert_typed_skill_prefix_starts_new_mention(inserted: &str) {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_skill_mentions(Some(vec![test_skill_metadata("rustdoc")]));
+        composer.set_text_content("$simplify-code".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor(/*pos*/ 0);
+
+        composer.insert_str(inserted);
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(composer.current_text(), "$rustdoc $simplify-code");
+        assert_eq!(
+            composer.mention_bindings(),
+            vec![test_skill_binding("rustdoc")]
+        );
+    }
+
+    #[test]
+    fn typing_empty_skill_prefix_before_existing_skill_starts_new_mention() {
+        assert_typed_skill_prefix_starts_new_mention("$");
+    }
+
+    #[test]
+    fn typing_partial_skill_prefix_before_existing_skill_starts_new_mention() {
+        assert_typed_skill_prefix_starts_new_mention("$r");
+    }
+
     #[test]
     fn set_skill_mentions_refreshes_open_mention_popup() {
         let (tx, _rx) = unbounded_channel::<AppEvent>();
@@ -6398,10 +7291,9 @@ mod tests {
             short_description: None,
             interface: None,
             dependencies: None,
-            policy: None,
-            path_to_skills_md: skill_path.clone(),
+            path: skill_path.clone(),
             scope: crate::test_support::skill_scope_user(),
-            plugin_id: None,
+            enabled: true,
         }]));
 
         let ActivePopup::Skill(popup) = &composer.popups.active else {
@@ -6441,10 +7333,9 @@ mod tests {
                 default_prompt: None,
             }),
             dependencies: None,
-            policy: None,
-            path_to_skills_md: skill_path.clone(),
+            path: skill_path.clone(),
             scope: crate::test_support::skill_scope_repo(),
-            plugin_id: None,
+            enabled: true,
         }]));
         composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
             config_name: "google-calendar@debug".to_string(),
@@ -6557,10 +7448,9 @@ mod tests {
                         default_prompt: None,
                     }),
                     dependencies: None,
-                    policy: None,
-                    path_to_skills_md: test_path_buf("/tmp/repo/google-calendar/SKILL.md").abs(),
+                    path: test_path_buf("/tmp/repo/google-calendar/SKILL.md").abs(),
                     scope: crate::test_support::skill_scope_repo(),
-                    plugin_id: None,
+                    enabled: true,
                 }]));
                 composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
                 config_name: "google-calendar@debug".to_string(),
@@ -7412,54 +8302,51 @@ mod tests {
     /// Behavior: while a paste-like burst is active, Enter should not submit; it should insert a
     /// newline into the buffered payload and flush as a single paste later.
     #[test]
-    fn ascii_burst_treats_enter_as_newline() {
+    fn ascii_burst_treats_enter_as_newline_even_when_parent_owned() {
         use crossterm::event::KeyCode;
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
-        let sender = AppEventSender::new(tx);
-        let mut composer = ChatComposer::new(
-            /*has_input_focus*/ true,
-            sender,
-            /*enhanced_keys_supported*/ false,
-            "Ask Codex to do anything".to_string(),
-            /*disable_paste_burst*/ false,
-        );
+        for parent_owned in [false, true] {
+            let (mut composer, _rx) = new_test_composer();
+            if parent_owned {
+                composer.set_parent_owned_thread();
+            }
+            let mut now = Instant::now();
+            let step = Duration::from_millis(1);
 
-        let mut now = Instant::now();
-        let step = Duration::from_millis(1);
-
-        let _ = composer.handle_input_basic_with_time(
-            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
-            now,
-        );
-        now += step;
-        let _ = composer.handle_input_basic_with_time(
-            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
-            now,
-        );
-        now += step;
-
-        let (result, _) = composer.handle_submission_with_time(/*should_queue*/ false, now);
-        assert!(
-            matches!(result, InputResult::None),
-            "Enter during a burst should insert newline, not submit"
-        );
-
-        for ch in ['t', 'h', 'e', 'r', 'e'] {
-            now += step;
             let _ = composer.handle_input_basic_with_time(
-                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
                 now,
             );
-        }
+            now += step;
+            let _ = composer.handle_input_basic_with_time(
+                KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+                now,
+            );
+            now += step;
 
-        assert!(composer.draft.textarea.text().is_empty());
-        let flush_time = now + PasteBurst::recommended_active_flush_delay() + step;
-        let flushed = composer.handle_paste_burst_flush(flush_time);
-        assert!(flushed, "expected paste burst to flush");
-        assert_eq!(composer.draft.textarea.text(), "hi\nthere");
+            let (result, _) =
+                composer.handle_submission_with_time(/*should_queue*/ false, now);
+            assert!(
+                matches!(result, InputResult::None),
+                "Enter during a burst should insert newline, not submit"
+            );
+
+            for ch in ['t', 'h', 'e', 'r', 'e'] {
+                now += step;
+                let _ = composer.handle_input_basic_with_time(
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                    now,
+                );
+            }
+
+            assert!(composer.draft.textarea.text().is_empty());
+            let flush_time = now + PasteBurst::recommended_active_flush_delay() + step;
+            let flushed = composer.handle_paste_burst_flush(flush_time);
+            assert!(flushed, "expected paste burst to flush");
+            assert_eq!(composer.draft.textarea.text(), "hi\nthere");
+        }
     }
 
     /// Behavior: startup-pending submissions are queued immediately, so Enter should flush any
@@ -8375,6 +9262,9 @@ mod tests {
             InputResult::Queued { .. } => {
                 panic!("expected command dispatch, but composer queued literal text")
             }
+            InputResult::ParentOwnedInputBlocked => {
+                panic!("expected command dispatch, but parent-owned input was blocked")
+            }
             InputResult::None => panic!("expected Command result for '/init'"),
         }
         assert!(
@@ -8882,6 +9772,9 @@ mod tests {
             InputResult::Queued { .. } => {
                 panic!("expected command dispatch after Tab completion, got literal queue")
             }
+            InputResult::ParentOwnedInputBlocked => {
+                panic!("expected command dispatch, but parent-owned input was blocked")
+            }
             InputResult::None => panic!("expected Command result for '/diff'"),
         }
         assert!(composer.draft.textarea.is_empty());
@@ -9079,6 +9972,9 @@ mod tests {
             InputResult::Queued { .. } => {
                 panic!("expected command dispatch, but composer queued literal text")
             }
+            InputResult::ParentOwnedInputBlocked => {
+                panic!("expected command dispatch, but parent-owned input was blocked")
+            }
             InputResult::None => panic!("expected Command result for '/mention'"),
         }
         assert!(
@@ -9209,6 +10105,60 @@ mod tests {
             }],
         );
         let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn legacy_file_completion_ignores_shell_variable_to_the_right() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_skill_mentions(Some(vec![test_skill_metadata("available")]));
+        complete_file(
+            &mut composer,
+            "@src  $HOME",
+            /*cursor*/ "@src ".len(),
+            "src",
+            PathBuf::from("src/main.rs"),
+        );
+
+        assert_eq!(composer.current_text(), "src/main.rs  $HOME");
+    }
+
+    #[test]
+    fn unified_popup_preserves_empty_at_before_existing_text() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_mentions_v2_enabled(/*enabled*/ true);
+        composer.set_text_content("@ word".to_string(), Vec::new(), Vec::new());
+        composer.draft.textarea.set_cursor("@".len());
+        composer.sync_popups();
+
+        assert!(matches!(composer.popups.active, ActivePopup::MentionV2(_)));
+    }
+
+    #[test]
+    fn adjacent_file_completion_inserts_leading_separator() {
+        let (mut composer, _rx) = new_test_composer();
+        configure_bound_plugin_left_of_unbound_plugin(&mut composer);
+        composer.insert_selected_file_path("@sample".len().."@sample@other".len(), "src/main.rs");
+
+        assert_eq!(composer.current_text(), "@sample src/main.rs ");
+    }
+
+    #[test]
+    fn adjacent_image_completion_inserts_leading_separator() {
+        let tmp = tempdir().expect("create TempDir");
+        let image_path = tmp.path().join("image.png");
+        let image: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(3, 2, |_x, _y| Rgba([1, 2, 3, 255]));
+        image.save(&image_path).expect("write temp png");
+
+        let (mut composer, _rx) = new_test_composer();
+        configure_bound_plugin_left_of_unbound_plugin(&mut composer);
+        composer.insert_selected_file_path(
+            "@sample".len().."@sample@other".len(),
+            image_path.to_str().expect("UTF-8 path"),
+        );
+
+        assert_eq!(composer.current_text(), "@sample [Image #1] ");
+        assert_eq!(composer.local_image_paths(), vec![image_path]);
     }
 
     #[test]

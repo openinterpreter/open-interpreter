@@ -742,6 +742,7 @@ if (!tool) {
         })
         .expect("exec description should be present");
     assert!(exec_description.contains("filter `ALL_TOOLS` by `name` and `description`"));
+    assert!(exec_description.contains("Shared MCP Types:"));
     assert!(!exec_description.contains("calendar_timezone_option_99"));
 
     let request = follow_up_mock.single_request();
@@ -1104,6 +1105,46 @@ text(JSON.stringify(results));
     let items = custom_tool_output_items(&req, "call-1");
     assert_eq!(items.len(), 2);
     assert_eq!(text_item(&items, /*index*/ 1), "[\"ok\",\"ok\"]");
+
+    Ok(())
+}
+
+#[cfg_attr(windows, ignore = "no exec_command on Windows")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_write_stdin_calls_run_in_parallel_across_sessions() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let (_test, second_mock) = run_code_mode_turn(
+        &server,
+        "write to independent terminal sessions in parallel",
+        r#"
+const sessions = await Promise.all([
+  tools.exec_command({ cmd: "bash --noprofile --norc", tty: true, yield_time_ms: 250 }),
+  tools.exec_command({ cmd: "bash --noprofile --norc", tty: true, yield_time_ms: 250 }),
+]);
+
+const results = await Promise.all([
+  tools.write_stdin({
+    session_id: sessions[0].session_id,
+    chars: ": > .code-mode-a; while [ ! -e .code-mode-b ]; do sleep 0.01; done; printf 'code-alpha-%s\\n' ready; exit\n",
+    yield_time_ms: 5000,
+  }),
+  tools.write_stdin({
+    session_id: sessions[1].session_id,
+    chars: ": > .code-mode-b; while [ ! -e .code-mode-a ]; do sleep 0.01; done; printf 'code-beta-%s\\n' ready; exit\n",
+    yield_time_ms: 5000,
+  }),
+]);
+
+text(JSON.stringify([results[0].output.includes("code-alpha-ready"), results[1].output.includes("code-beta-ready")]));
+"#,
+    )
+    .await?;
+
+    let items = custom_tool_output_items(&second_mock.single_request(), "call-1");
+    let result: Value = serde_json::from_str(text_item(&items, /*index*/ 1))?;
+    assert_eq!(result, serde_json::json!([true, true]));
 
     Ok(())
 }
@@ -2943,6 +2984,49 @@ async fn code_mode_image_helper_rejects_remote_url() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_image_helper_rejects_invalid_image_output() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let (_test, second_mock) = run_code_mode_turn(
+        &server,
+        "use exec to return an image",
+        r#"
+const s = "Error executing tool exec: Expected at least one message to convert to CallToolResult";
+image(s.trim(), "original");
+"#,
+    )
+    .await?;
+
+    let req = second_mock.single_request();
+    let items = custom_tool_output_items(&req, "call-1");
+    let (_, success) = custom_tool_output_body_and_success(&req, "call-1");
+    assert_ne!(
+        success,
+        Some(true),
+        "code_mode invalid image output unexpectedly succeeded"
+    );
+    assert_eq!(items.len(), 2);
+    assert_regex_match(
+        concat!(
+            r"(?s)\A",
+            r"Script failed\nWall time \d+\.\d seconds\nOutput:\n\z"
+        ),
+        text_item(&items, /*index*/ 0),
+    );
+    assert_eq!(
+        text_item(&items, /*index*/ 1),
+        concat!(
+            "Script error:\n",
+            "Tool call failed: invalid image output. ",
+            "Pass a base64 data URI instead"
+        )
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_can_use_view_image_result_with_image_helper() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -3416,6 +3500,7 @@ text(JSON.stringify(Object.getOwnPropertyNames(globalThis).sort()));
         "WeakSet",
         "__codexContentItems",
         "add_content",
+        "audio",
         "decodeURI",
         "decodeURIComponent",
         "encodeURI",

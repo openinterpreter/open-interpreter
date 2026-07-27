@@ -95,6 +95,15 @@ impl TrackEventRequest {
     pub(crate) fn should_send_in_isolated_request(&self) -> bool {
         matches!(self, Self::AcceptedLineFingerprints(_))
     }
+
+    pub(crate) fn can_send_with_api_key_auth(&self) -> bool {
+        match self {
+            Self::PluginUsed(event) => event.event_params.plugin.plugin_id.is_some(),
+            Self::SkillInvocation(event) => event.event_params.plugin_id.is_some(),
+            Self::McpToolCall(event) => event.event_params.plugin_id.is_some(),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -294,6 +303,7 @@ pub struct GuardianReviewEventParams {
     pub completed_at: Option<u64>,
     pub input_tokens: Option<i64>,
     pub cached_input_tokens: Option<i64>,
+    pub cache_write_input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub reasoning_output_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
@@ -376,6 +386,10 @@ impl GuardianReviewTrackContext {
                 .token_usage
                 .as_ref()
                 .map(|usage| usage.cached_input_tokens),
+            cache_write_input_tokens: result
+                .token_usage
+                .as_ref()
+                .map(|usage| usage.cache_write_input_tokens),
             output_tokens: result.token_usage.as_ref().map(|usage| usage.output_tokens),
             reasoning_output_tokens: result
                 .token_usage
@@ -518,6 +532,7 @@ pub(crate) enum ToolItemFailureKind {
 #[derive(Serialize)]
 pub(crate) struct CodexToolItemEventBase {
     pub(crate) thread_id: String,
+    pub(crate) session_id: String,
     pub(crate) turn_id: String,
     /// App-server ThreadItem.id. For tool-originated items this generally
     /// corresponds to the originating core call_id.
@@ -674,6 +689,7 @@ pub(crate) struct CodexMcpToolCallEventParams {
     pub(crate) mcp_tool_name: String,
     pub(crate) mcp_error_present: bool,
     pub(crate) plugin_id: Option<String>,
+    pub(crate) connector_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -691,6 +707,7 @@ pub(crate) struct CodexDynamicToolCallEventParams {
     pub(crate) output_content_item_count: Option<u64>,
     pub(crate) output_text_item_count: Option<u64>,
     pub(crate) output_image_item_count: Option<u64>,
+    pub(crate) output_audio_item_count: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -811,6 +828,7 @@ pub(crate) struct CodexCompactionEventParams {
     pub(crate) retained_image_count: Option<usize>,
     pub(crate) compaction_summary_tokens: Option<i64>,
     pub(crate) cached_input_tokens: Option<i64>,
+    pub(crate) cache_write_input_tokens: Option<i64>,
     pub(crate) started_at: u64,
     pub(crate) completed_at: u64,
     pub(crate) duration_ms: Option<u64>,
@@ -890,6 +908,7 @@ pub(crate) struct CodexTurnEventParams {
     pub(crate) image_generation_count: Option<usize>,
     pub(crate) input_tokens: Option<i64>,
     pub(crate) cached_input_tokens: Option<i64>,
+    pub(crate) cache_write_input_tokens: Option<i64>,
     pub(crate) output_tokens: Option<i64>,
     pub(crate) reasoning_output_tokens: Option<i64>,
     pub(crate) total_tokens: Option<i64>,
@@ -991,7 +1010,9 @@ pub(crate) struct CodexPluginEventRequest {
 pub(crate) struct CodexPluginInstallFailedMetadata {
     #[serde(flatten)]
     pub(crate) plugin: CodexPluginMetadata,
+    pub(crate) source: crate::facts::PluginInstallSource,
     pub(crate) error_type: String,
+    pub(crate) sub_error_type: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1025,6 +1046,7 @@ pub(crate) struct CodexOnboardingExternalAgentImportFailureMetadata {
     pub(crate) item_type: String,
     pub(crate) failure_stage: String,
     pub(crate) error_type: String,
+    pub(crate) sub_error_type: Option<String>,
     pub(crate) product_client_id: Option<String>,
 }
 
@@ -1156,6 +1178,7 @@ pub(crate) fn codex_compaction_event_params(
         retained_image_count: input.retained_image_count,
         compaction_summary_tokens: input.compaction_summary_tokens,
         cached_input_tokens: input.cached_input_tokens,
+        cache_write_input_tokens: input.cache_write_input_tokens,
         started_at: input.started_at,
         completed_at: input.completed_at,
         duration_ms: input.duration_ms,
@@ -1232,6 +1255,7 @@ fn analytics_hook_event_name(event_name: HookEventName) -> &'static str {
         HookEventName::PreCompact => "PreCompact",
         HookEventName::PostCompact => "PostCompact",
         HookEventName::SessionStart => "SessionStart",
+        HookEventName::SessionEnd => "SessionEnd",
         HookEventName::UserPromptSubmit => "UserPromptSubmit",
         HookEventName::SubagentStart => "SubagentStart",
         HookEventName::SubagentStop => "SubagentStop",

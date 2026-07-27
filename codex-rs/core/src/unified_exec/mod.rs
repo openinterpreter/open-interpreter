@@ -36,7 +36,6 @@ use rand::Rng;
 use rand::rng;
 use tokio::sync::Mutex;
 
-use crate::exec::ExecCapturePolicy;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -108,7 +107,6 @@ pub(crate) struct ExecCommandRequest {
     pub additional_permissions_preapproved: bool,
     pub justification: Option<String>,
     pub prefix_rule: Option<Vec<String>>,
-    pub capture_policy: ExecCapturePolicy,
 }
 
 #[derive(Debug)]
@@ -178,6 +176,10 @@ pub(crate) fn clamp_yield_time(yield_time_ms: u64) -> u64 {
 
 pub(crate) fn resolve_max_tokens(max_tokens: Option<usize>) -> usize {
     max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
+}
+
+pub(crate) fn format_output_omission_marker(omitted_bytes: usize) -> String {
+    format!("... {omitted_bytes} bytes omitted ...")
 }
 
 pub(crate) fn generate_chunk_id() -> String {
