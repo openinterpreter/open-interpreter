@@ -191,7 +191,14 @@ impl StdioServerLauncher for LocalStdioServerLauncher {
         command: StdioServerCommand,
     ) -> BoxFuture<'static, io::Result<StdioServerTransport>> {
         let fallback_cwd = self.fallback_cwd.clone();
-        async move { Self::launch_server(command, fallback_cwd) }.boxed()
+        async move {
+            // Keep synchronous program resolution and process creation from blocking the
+            // caller's startup deadline.
+            tokio::task::spawn_blocking(move || Self::launch_server(command, fallback_cwd))
+                .await
+                .map_err(io::Error::other)?
+        }
+        .boxed()
     }
 }
 
@@ -510,6 +517,7 @@ impl ExecutorStdioServerLauncher {
                 sandbox: None,
                 enforce_managed_network: false,
                 managed_network: None,
+                network_proxy: None,
             })
             .await
             .map_err(io::Error::other)?;

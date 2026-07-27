@@ -6,9 +6,10 @@ use codex_app_server_protocol::ModelSafetyBufferingUpdatedNotification;
 const SAFETY_BUFFERING_PROMPT_VIEW_ID: &str = "safety-buffering-prompt";
 const SAFETY_BUFFERING_LEARN_MORE_URL: &str = "https://help.openai.com/en/articles/20001326";
 
-const SAFETY_BUFFERING_MESSAGE_WITH_RETRY: &str = "This request requires additional safety checks, which can take extra time. Hang tight or retry with a faster model for a quicker response, though it may be less capable of handling complex requests.";
-const SAFETY_BUFFERING_MESSAGE_WITHOUT_RETRY: &str =
-    "This request requires additional safety checks, which can take extra time.";
+const SAFETY_BUFFERING_HEADER: &str =
+    "Our systems are thinking a bit more about this request before responding.";
+const SAFETY_BUFFERING_MESSAGE_WITH_RETRY: &str = "Hang tight or retry with a faster model for a quicker response, though it may be less capable of handling complex requests.";
+const SAFETY_BUFFERING_FOOTER: &str = "No action is required. Codex will keep waiting, and this menu will close when the response is ready.";
 
 #[derive(Debug)]
 struct ActiveSafetyBuffering {
@@ -62,22 +63,20 @@ impl ChatWidget {
                 .is_some_and(|active| active.turn_id == turn_id && !active.agent_message_started)
     }
 
-    pub(crate) fn prepare_safety_buffering_retry(&mut self) {
-        let cancel_edit = std::mem::take(&mut self.cancel_edit);
+    pub(crate) fn prepare_safety_buffered_retry_submission(&mut self, prompt: UserMessage) {
         self.last_rendered_user_message_display = None;
         self.finalize_turn();
-        self.cancel_edit = cancel_edit;
+        self.safety_buffering_prompt = Some(prompt);
         self.input_queue.user_turn_pending_start = true;
     }
 
-    pub(crate) fn fail_safety_buffering_retry(&mut self) {
+    pub(crate) fn commit_safety_buffered_retry_submission(&mut self, display: UserMessageDisplay) {
+        self.on_user_message_display(display);
+    }
+
+    pub(crate) fn cancel_safety_buffered_retry_submission(&mut self) {
         self.input_queue.user_turn_pending_start = false;
         self.clear_safety_buffering();
-        let prompt = self.cancel_edit.prompt.take();
-        self.clear_cancel_edit();
-        if let Some(prompt) = prompt {
-            self.restore_user_message_to_composer(prompt);
-        }
     }
 
     pub(super) fn on_model_safety_buffering_updated(
@@ -112,14 +111,23 @@ impl ChatWidget {
             return;
         }
 
-        let retry_turn = self
-            .safety_buffering
-            .submitted_turn
-            .as_ref()
-            .filter(|(submitted_turn_id, _)| replay_kind.is_none() && submitted_turn_id == &turn_id)
-            .map(|(_, turn)| turn.clone());
+        let retry_turn = if self.side_conversation_active() {
+            None
+        } else {
+            self.safety_buffering
+                .submitted_turn
+                .as_ref()
+                .filter(|(submitted_turn_id, _)| {
+                    replay_kind.is_none() && submitted_turn_id == &turn_id
+                })
+                .map(|(_, turn)| turn.clone())
+        };
         let thread_id = self.thread_id;
-        let can_offer_retry = faster_model.is_some() && retry_turn.is_some() && thread_id.is_some();
+        let retry_prompt = self.safety_buffering_prompt.clone();
+        let can_offer_retry = faster_model.is_some()
+            && retry_turn.is_some()
+            && retry_prompt.is_some()
+            && thread_id.is_some();
         let previous_active = self
             .safety_buffering
             .active
@@ -135,15 +143,15 @@ impl ChatWidget {
             agent_message_started,
         });
 
-        let message = if can_offer_retry {
-            SAFETY_BUFFERING_MESSAGE_WITH_RETRY
+        let status_details = if can_offer_retry {
+            format!("{SAFETY_BUFFERING_HEADER} {SAFETY_BUFFERING_MESSAGE_WITH_RETRY}")
         } else {
-            SAFETY_BUFFERING_MESSAGE_WITHOUT_RETRY
+            SAFETY_BUFFERING_HEADER.to_string()
         };
         self.bottom_pane.ensure_status_indicator();
         self.set_status(
             "Working".to_string(),
-            Some(message.to_string()),
+            Some(status_details),
             StatusDetailsCapitalization::Preserve,
             /*details_max_lines*/ 6,
         );
@@ -154,13 +162,19 @@ impl ChatWidget {
         self.bottom_pane
             .dismiss_view_by_id(SAFETY_BUFFERING_PROMPT_VIEW_ID);
 
-        let header = ColumnRenderable::with(vec![
-            Box::new(Line::from("Additional safety checks").bold()) as Box<dyn Renderable>,
-            Box::new(Paragraph::new(Line::from(message).dim()).wrap(Wrap { trim: false })),
-        ]);
+        let mut header = vec![Box::new(
+            Paragraph::new(Line::from(SAFETY_BUFFERING_HEADER).bold()).wrap(Wrap { trim: false }),
+        ) as Box<dyn Renderable>];
+        if can_offer_retry {
+            header.push(Box::new(
+                Paragraph::new(Line::from(SAFETY_BUFFERING_MESSAGE_WITH_RETRY).dim())
+                    .wrap(Wrap { trim: false }),
+            ));
+        }
+        let header = ColumnRenderable::with(header);
         let mut items = Vec::new();
-        if let (Some(faster_model), Some(turn), Some(thread_id)) =
-            (faster_model, retry_turn, thread_id)
+        if let (Some(faster_model), Some(turn), Some(prompt), Some(thread_id)) =
+            (faster_model, retry_turn, retry_prompt, thread_id)
         {
             items.push(SelectionItem {
                 name: "Retry with a faster model".to_string(),
@@ -170,6 +184,7 @@ impl ChatWidget {
                         turn_id: turn_id.clone(),
                         model: faster_model.clone(),
                         turn: turn.clone(),
+                        prompt: prompt.clone(),
                     });
                 })],
                 dismiss_on_select: true,
@@ -178,7 +193,7 @@ impl ChatWidget {
         }
         items.extend([
             SelectionItem {
-                name: "Keep waiting".to_string(),
+                name: "Dismiss and keep waiting".to_string(),
                 dismiss_on_select: true,
                 ..Default::default()
             },
@@ -195,6 +210,8 @@ impl ChatWidget {
         self.bottom_pane.show_selection_view(SelectionViewParams {
             view_id: Some(SAFETY_BUFFERING_PROMPT_VIEW_ID),
             header: Box::new(header),
+            footer_note: Some(Line::from(SAFETY_BUFFERING_FOOTER).dim()),
+            footer_hint: Some(Line::default()),
             items,
             ..Default::default()
         });

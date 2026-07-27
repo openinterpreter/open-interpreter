@@ -316,7 +316,11 @@ pub(super) async fn ensure_listener_task_running(
                         thread_state.track_current_turn_event(&event.id, &event.msg);
                         thread_state.experimental_raw_events
                     };
-                    if matches!(&event.msg, EventMsg::RawResponseItem(_)) && !raw_events_enabled {
+                    if matches!(
+                        &event.msg,
+                        EventMsg::RawResponseItem(_) | EventMsg::RawResponseCompleted(_)
+                    ) && !raw_events_enabled
+                    {
                         continue;
                     }
                     let subscribed_connection_ids = thread_state_manager
@@ -526,7 +530,7 @@ pub(super) async fn handle_pending_thread_resume_request(
     thread_watch_manager: &ThreadWatchManager,
     outgoing: &Arc<OutgoingMessageSender>,
     pending_thread_unloads: &Arc<Mutex<HashSet<ThreadId>>>,
-    pending: crate::thread_state::PendingThreadResumeRequest,
+    mut pending: crate::thread_state::PendingThreadResumeRequest,
 ) {
     let active_turn = {
         let state = thread_state.lock().await;
@@ -550,11 +554,18 @@ pub(super) async fn handle_pending_thread_resume_request(
     let connection_id = request_id.connection_id;
     let mut thread = pending.thread_summary;
     if pending.include_turns {
-        populate_thread_turns_from_history(
-            &mut thread,
-            &pending.history_items,
-            active_turn.as_ref(),
-        );
+        if let Some(turns) = pending.paginated_turns.take() {
+            thread.turns = turns;
+        } else {
+            populate_thread_turns_from_history(
+                &mut thread,
+                &pending.history_items,
+                /*active_turn*/ None,
+            );
+        }
+        if let Some(active_turn) = active_turn.as_ref() {
+            merge_turn_history_with_active_turn(&mut thread.turns, active_turn.clone());
+        }
     }
 
     let thread_status = thread_watch_manager
@@ -563,11 +574,35 @@ pub(super) async fn handle_pending_thread_resume_request(
 
     set_thread_status_and_interrupt_stale_turns(
         &mut thread,
-        thread_status,
+        thread_status.clone(),
         has_live_in_progress_turn,
     );
-    let token_usage_thread = pending.include_turns.then(|| thread.clone());
-    let mut initial_turns_page = if let Some(params) = pending.initial_turns_page.as_ref() {
+    let token_usage_turn_id = pending
+        .include_turns
+        .then(|| restored_token_usage_turn_id(&pending.history_items, &thread));
+    let mut initial_turns_page = if let Some(mut page) = pending.paginated_initial_turns_page.take()
+    {
+        if let (Some(active_turn), Some(params)) =
+            (active_turn, pending.initial_turns_page.as_ref())
+        {
+            let sort_direction = params.sort_direction.unwrap_or(SortDirection::Desc);
+            let active_turn_is_in_page = page.data.iter().any(|turn| turn.id == active_turn.id);
+            if matches!(sort_direction, SortDirection::Desc)
+                && !active_turn_is_in_page
+                && let Some(page_with_active_slot) =
+                    pending.paginated_initial_turns_page_with_active_slot.take()
+            {
+                page = page_with_active_slot;
+            }
+            merge_active_turn_into_page(&mut page, active_turn, params);
+        }
+        super::thread_processor::normalize_thread_turns_status(
+            &mut page.data,
+            thread_status,
+            has_live_in_progress_turn,
+        );
+        Some(page)
+    } else if let Some(params) = pending.initial_turns_page.as_ref() {
         match super::thread_processor::build_thread_resume_initial_turns_page(
             &pending.history_items,
             thread.status.clone(),
@@ -618,7 +653,27 @@ pub(super) async fn handle_pending_thread_resume_request(
         }
     }
 
+    let (turns_backwards_cursor, items_backwards_cursor) = if let Some(thread_store) =
+        pending.resume_cursor_store.as_ref()
+    {
+        match super::thread_processor::ThreadRequestProcessor::paginated_resume_backwards_cursors(
+            thread_store.as_ref(),
+            conversation_id,
+        )
+        .await
+        {
+            Ok(cursors) => cursors,
+            Err(error) => {
+                outgoing.send_error(request_id, error).await;
+                return;
+            }
+        }
+    } else {
+        (None, None)
+    };
+
     let config_snapshot = pending.config_snapshot;
+    let sandbox = config_snapshot.sandbox_policy().into();
     let cwd = config_snapshot.cwd().clone();
     let ThreadConfigSnapshot {
         model,
@@ -626,7 +681,6 @@ pub(super) async fn handle_pending_thread_resume_request(
         service_tier,
         approval_policy,
         approvals_reviewer,
-        permission_profile,
         active_permission_profile,
         workspace_roots,
         reasoning_effort,
@@ -634,7 +688,6 @@ pub(super) async fn handle_pending_thread_resume_request(
         ..
     } = config_snapshot;
     let instruction_sources = pending.instruction_sources;
-    let sandbox = thread_response_sandbox_policy(&permission_profile, cwd.as_path());
     let active_permission_profile =
         thread_response_active_permission_profile(active_permission_profile);
     let session_id = conversation.session_configured().session_id.to_string();
@@ -655,24 +708,21 @@ pub(super) async fn handle_pending_thread_resume_request(
         reasoning_effort,
         multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         initial_turns_page,
+        turns_backwards_cursor,
+        items_backwards_cursor,
     };
     outgoing
         .send_response_with_thread_originator(request_id, response, originator)
         .await;
     // Match cold resume: metadata-only resume should attach the listener without
     // paying the cost of turn reconstruction for historical usage replay.
-    if let Some(token_usage_thread) = token_usage_thread {
-        let token_usage_turn_id = latest_token_usage_turn_id_from_rollout_items(
-            &pending.history_items,
-            token_usage_thread.turns.as_slice(),
-        );
+    if let Some(token_usage_turn_id) = token_usage_turn_id {
         // Rejoining a loaded thread has the same UI contract as a cold resume, but
         // uses the live conversation state instead of reconstructing a new session.
         send_thread_token_usage_update_to_connection(
             outgoing,
             connection_id,
             conversation_id,
-            &token_usage_thread,
             conversation.as_ref(),
             token_usage_turn_id,
         )
@@ -773,6 +823,31 @@ pub(super) async fn resolve_pending_server_request(
 pub(super) fn merge_turn_history_with_active_turn(turns: &mut Vec<Turn>, active_turn: Turn) {
     turns.retain(|turn| turn.id != active_turn.id);
     turns.push(active_turn);
+}
+
+fn merge_active_turn_into_page(
+    page: &mut codex_app_server_protocol::TurnsPage,
+    mut active_turn: Turn,
+    params: &codex_app_server_protocol::ThreadResumeInitialTurnsPageParams,
+) {
+    super::thread_processor::apply_thread_turns_items_view(
+        std::slice::from_mut(&mut active_turn),
+        params.items_view.unwrap_or(TurnItemsView::Summary),
+    );
+    let sort_direction = params.sort_direction.unwrap_or(SortDirection::Desc);
+    let page_size = super::thread_processor::thread_turns_page_size(params.limit);
+    let active_turn_is_in_page = page.data.iter().any(|turn| turn.id == active_turn.id);
+    page.data.retain(|turn| turn.id != active_turn.id);
+    match sort_direction {
+        SortDirection::Asc
+            if active_turn_is_in_page
+                || (page.data.len() < page_size && page.next_cursor.is_none()) =>
+        {
+            page.data.push(active_turn);
+        }
+        SortDirection::Asc => {}
+        SortDirection::Desc => page.data.insert(0, active_turn),
+    }
 }
 
 pub(super) fn set_thread_status_and_interrupt_stale_turns(

@@ -288,6 +288,27 @@ mod tests {
     }
 
     #[test]
+    fn event_msg_audio_only_user_message_sets_audio_placeholder_preview() {
+        let mut metadata = metadata_for_test();
+        let item = RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+            client_id: None,
+            message: String::new(),
+            images: None,
+            local_images: vec![],
+            audio: Some(vec!["https://example.com/audio.mp3".to_string()]),
+            local_audio: vec![],
+            text_elements: vec![],
+            ..Default::default()
+        }));
+
+        apply_rollout_item(&mut metadata, &item, "test-provider");
+
+        assert_eq!(metadata.first_user_message.as_deref(), Some("[Audio]"));
+        assert_eq!(metadata.preview.as_deref(), Some("[Audio]"));
+        assert_eq!(metadata.title, "");
+    }
+
+    #[test]
     fn event_msg_blank_user_message_without_images_keeps_first_user_message_empty() {
         let mut metadata = metadata_for_test();
         let item = RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
@@ -381,6 +402,8 @@ mod tests {
                     selected_capability_roots: Vec::new(),
                     memory_mode: None,
                     history_mode: Default::default(),
+                    history_base: None,
+                    subagent_history_start_ordinal: None,
                     multi_agent_version: None,
                     context_window: None,
                 },
@@ -628,6 +651,8 @@ mod tests {
                     selected_capability_roots: Vec::new(),
                     memory_mode: None,
                     history_mode: ThreadHistoryMode::Legacy,
+                    history_base: None,
+                    subagent_history_start_ordinal: None,
                     multi_agent_version: None,
                     context_window: None,
                 },
@@ -662,6 +687,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             cli_version: "0.0.0".to_string(),
             title: String::new(),
+            name: None,
             preview: None,
             sandbox_policy: "read-only".to_string(),
             approval_mode: "on-request".to_string(),

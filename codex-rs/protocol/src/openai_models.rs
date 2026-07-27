@@ -21,7 +21,7 @@ use serde::de::DeserializeOwned;
 use serde::de::Error;
 use strum_macros::Display;
 use strum_macros::EnumIter;
-use tracing::warn;
+use tracing::trace;
 use ts_rs::TS;
 
 use crate::config_types::Personality;
@@ -68,13 +68,6 @@ impl ReasoningEffort {
     }
 
     /// The "thinking on" option of a thinking-toggle model's options list.
-    ///
-    /// Models that only advertise a binary thinking control are expressed as
-    /// the two-option case of the generic reasoning options list: this sentinel
-    /// ("Thinking") and [`ReasoningEffort::None`] ("None"). The sentinel
-    /// round-trips through config as a custom effort; request builders map it
-    /// to the provider's "thinking enabled" wire shape instead of sending it
-    /// as a literal reasoning effort.
     pub fn thinking_toggle_on() -> Self {
         Self::Custom("Thinking".to_string())
     }
@@ -200,6 +193,8 @@ pub enum InputModality {
     Text,
     /// Image attachments included in user turns.
     Image,
+    /// Audio attachments included in user turns.
+    Audio,
 }
 
 /// Backward-compatible default when `input_modalities` is omitted on the wire.
@@ -273,6 +268,11 @@ pub struct ModelPreset {
     pub upgrade: Option<ModelUpgrade>,
     /// Whether this preset should appear in the picker UI.
     pub show_in_picker: bool,
+    /// Multi-agent backend selected when this model starts a new thread.
+    #[serde(default, skip_serializing, skip_deserializing)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub multi_agent_version: Option<MultiAgentVersion>,
     /// Availability NUX shown when this preset becomes accessible to the user.
     pub availability_nux: Option<ModelAvailabilityNux>,
     /// whether this model is supported in the api
@@ -392,6 +392,15 @@ const fn default_effective_context_window_percent() -> i64 {
     95
 }
 
+const fn default_true() -> bool {
+    true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_true(value: &bool) -> bool {
+    *value
+}
+
 /// Model metadata returned by the Codex backend `/models` endpoint.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
 pub struct ModelInfo {
@@ -421,7 +430,12 @@ pub struct ModelInfo {
     pub model_messages: Option<ModelMessages>,
     #[serde(default)]
     pub include_skills_usage_instructions: bool,
+    /// Whether this model can return user-visible reasoning summaries.
+    #[serde(default)]
     pub supports_reasoning_summaries: bool,
+    /// Whether the model accepts the Responses API `reasoning.summary` parameter.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub supports_reasoning_summary_parameter: bool,
     #[serde(default)]
     pub default_reasoning_summary: ReasoningSummary,
     pub support_verbosity: bool,
@@ -485,17 +499,16 @@ impl ModelInfo {
     }
 
     pub fn auto_compact_token_limit(&self) -> Option<i64> {
-        // Models with no known context window must still auto-compact:
-        // assume a conservative window rather than letting long sessions
-        // overflow the provider limit with compaction disabled.
-        const FALLBACK_CONTEXT_WINDOW: i64 = 128_000;
-        let context_limit = (self
+        let context_limit = self
             .resolved_context_window()
-            .unwrap_or(FALLBACK_CONTEXT_WINDOW)
-            * 9)
-            / 10;
+            .map(|context_window| (context_window * 9) / 10);
         let config_limit = self.auto_compact_token_limit;
-        Some(config_limit.map_or(context_limit, |limit| std::cmp::min(limit, context_limit)))
+        if let Some(context_limit) = context_limit {
+            return Some(
+                config_limit.map_or(context_limit, |limit| std::cmp::min(limit, context_limit)),
+            );
+        }
+        config_limit
     }
 
     pub fn supports_personality(&self) -> bool {
@@ -513,14 +526,17 @@ impl ModelInfo {
                 .get_personality_message(personality)
                 .unwrap_or_default();
             template.replace(PERSONALITY_PLACEHOLDER, personality_message.as_str())
-        } else if let Some(personality) = personality {
-            warn!(
-                model = %self.slug,
-                %personality,
-                "Model personality requested but model_messages is missing, falling back to base instructions."
-            );
-            self.base_instructions.clone()
         } else {
+            match personality {
+                Some(personality @ (Personality::Friendly | Personality::Pragmatic)) => {
+                    trace!(
+                        model = %self.slug,
+                        %personality,
+                        "Model personality requested but model_messages is missing, falling back to base instructions."
+                    );
+                }
+                Some(Personality::None) | None => {}
+            }
             self.base_instructions.clone()
         }
     }
@@ -534,17 +550,28 @@ pub struct ModelMessages {
     pub instructions_variables: Option<ModelInstructionsVariables>,
     pub approvals: Option<ApprovalMessages>,
     pub auto_review: Option<AutoReviewMessages>,
+    pub permissions: Option<PermissionMessages>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
 pub struct ApprovalMessages {
     pub on_request: Option<String>,
     pub on_request_auto_review: Option<String>,
+    pub never: Option<String>,
+    pub unless_trusted: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
 pub struct AutoReviewMessages {
     pub policy: Option<String>,
+    pub policy_template: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
+pub struct PermissionMessages {
+    pub danger_full_access: Option<String>,
+    pub workspace_write: Option<String>,
+    pub read_only: Option<String>,
 }
 
 impl ModelMessages {
@@ -618,63 +645,19 @@ pub struct ModelsResponse {
     pub models: Vec<ModelInfo>,
 }
 
-/// Express a model's reasoning controls as one generic options list.
-///
-/// Models with explicit reasoning levels pass them through unchanged. Models
-/// that only advertise a binary thinking toggle are expressed as the two-option
-/// case of the same list ("Thinking" / "None") so pickers render every model's
-/// thinking choices with the same options-list UI. The "Thinking" option maps
-/// to [`ReasoningEffort::thinking_toggle_on`] and "None" maps to
-/// [`ReasoningEffort::None`], matching how request builders translate the
-/// stored effort into the provider's thinking on/off wire shape.
-fn reasoning_options_from_model_info(
-    info: &ModelInfo,
-) -> (ReasoningEffort, Vec<ReasoningEffortPreset>) {
-    let thinking_toggle_only = matches!(
-        info.reasoning_control,
-        ReasoningControl::ThinkingToggle | ReasoningControl::ThinkingBudget
-    ) && info.supported_reasoning_levels.is_empty();
-    if !thinking_toggle_only {
-        return (
-            info.default_reasoning_level
-                .clone()
-                .unwrap_or(ReasoningEffort::None),
-            info.supported_reasoning_levels.clone(),
-        );
-    }
-
-    let thinking_on = ReasoningEffort::thinking_toggle_on();
-    let default_reasoning_effort = if info.default_reasoning_level == Some(ReasoningEffort::None) {
-        ReasoningEffort::None
-    } else {
-        thinking_on.clone()
-    };
-    let options = vec![
-        ReasoningEffortPreset {
-            effort: thinking_on,
-            description: "Use the model's default thinking behavior.".to_string(),
-        },
-        ReasoningEffortPreset {
-            effort: ReasoningEffort::None,
-            description: "Disable thinking explicitly for this model.".to_string(),
-        },
-    ];
-    (default_reasoning_effort, options)
-}
-
 // convert ModelInfo to ModelPreset
 impl From<ModelInfo> for ModelPreset {
     fn from(info: ModelInfo) -> Self {
         let supports_personality = info.supports_personality();
-        let (default_reasoning_effort, supported_reasoning_efforts) =
-            reasoning_options_from_model_info(&info);
         ModelPreset {
             id: info.slug.clone(),
             model: info.slug.clone(),
             display_name: info.display_name,
             description: info.description.unwrap_or_default(),
-            default_reasoning_effort,
-            supported_reasoning_efforts,
+            default_reasoning_effort: info
+                .default_reasoning_level
+                .unwrap_or(ReasoningEffort::None),
+            supported_reasoning_efforts: info.supported_reasoning_levels.clone(),
             supports_personality,
             additional_speed_tiers: info.additional_speed_tiers,
             service_tiers: info.service_tiers,
@@ -689,6 +672,7 @@ impl From<ModelInfo> for ModelPreset {
                 migration_markdown: Some(upgrade.migration_markdown.clone()),
             }),
             show_in_picker: info.visibility == ModelVisibility::List,
+            multi_agent_version: info.multi_agent_version,
             availability_nux: info.availability_nux,
             supported_in_api: info.supported_in_api,
             input_modalities: info.input_modalities,
@@ -777,6 +761,7 @@ mod tests {
             model_messages: spec,
             include_skills_usage_instructions: false,
             supports_reasoning_summaries: false,
+            supports_reasoning_summary_parameter: true,
             default_reasoning_summary: ReasoningSummary::Auto,
             support_verbosity: false,
             default_verbosity: None,
@@ -816,6 +801,7 @@ mod tests {
                 .expect("model messages should deserialize");
 
         assert_eq!(messages.approvals, None);
+        assert_eq!(messages.permissions, None);
     }
 
     #[test]
@@ -825,7 +811,8 @@ mod tests {
                 "instructions_template": null,
                 "instructions_variables": null,
                 "approvals": {
-                    "on_request": ""
+                    "on_request": "",
+                    "never": ""
                 }
             }"#,
         )
@@ -836,6 +823,71 @@ mod tests {
             Some(ApprovalMessages {
                 on_request: Some(String::new()),
                 on_request_auto_review: None,
+                never: Some(String::new()),
+                unless_trusted: None,
+            })
+        );
+    }
+
+    #[test]
+    fn auto_review_messages_preserve_missing_and_empty_template_values() {
+        let missing_template: ModelMessages = from_str(
+            r#"{
+                "instructions_template": null,
+                "instructions_variables": null,
+                "auto_review": {
+                    "policy": "policy"
+                }
+            }"#,
+        )
+        .expect("auto-review messages should deserialize without a policy template");
+        let empty_template: ModelMessages = from_str(
+            r#"{
+                "instructions_template": null,
+                "instructions_variables": null,
+                "auto_review": {
+                    "policy": "policy",
+                    "policy_template": ""
+                }
+            }"#,
+        )
+        .expect("auto-review messages should deserialize with an empty policy template");
+
+        assert_eq!(
+            missing_template.auto_review,
+            Some(AutoReviewMessages {
+                policy: Some("policy".to_string()),
+                policy_template: None,
+            })
+        );
+        assert_eq!(
+            empty_template.auto_review,
+            Some(AutoReviewMessages {
+                policy: Some("policy".to_string()),
+                policy_template: Some(String::new()),
+            })
+        );
+    }
+
+    #[test]
+    fn permission_messages_preserve_missing_and_empty_values() {
+        let messages: ModelMessages = from_str(
+            r#"{
+                "instructions_template": null,
+                "instructions_variables": null,
+                "permissions": {
+                    "workspace_write": ""
+                }
+            }"#,
+        )
+        .expect("permission messages should deserialize");
+
+        assert_eq!(
+            messages.permissions,
+            Some(PermissionMessages {
+                danger_full_access: None,
+                workspace_write: Some(String::new()),
+                read_only: None,
             })
         );
     }
@@ -913,6 +965,7 @@ mod tests {
             instructions_variables: Some(personality_variables()),
             approvals: None,
             auto_review: None,
+            permissions: None,
         }));
 
         let instructions = model.get_model_instructions(Some(Personality::Friendly));
@@ -931,6 +984,7 @@ mod tests {
             }),
             approvals: None,
             auto_review: None,
+            permissions: None,
         }));
         assert_eq!(
             model.get_model_instructions(Some(Personality::Friendly)),
@@ -958,6 +1012,7 @@ mod tests {
             }),
             approvals: None,
             auto_review: None,
+            permissions: None,
         }));
         assert_eq!(
             model_no_personality.get_model_instructions(Some(Personality::Friendly)),
@@ -988,6 +1043,7 @@ mod tests {
             }),
             approvals: None,
             auto_review: None,
+            permissions: None,
         }));
 
         let instructions = model.get_model_instructions(Some(Personality::Friendly));
@@ -1083,7 +1139,6 @@ mod tests {
             "upgrade": null,
             "base_instructions": "base",
             "model_messages": null,
-            "supports_reasoning_summaries": false,
             "default_reasoning_summary": "auto",
             "support_verbosity": false,
             "default_verbosity": null,
@@ -1097,13 +1152,17 @@ mod tests {
             "context_window": null,
             "auto_compact_token_limit": null,
             "effective_context_window_percent": 95,
-            "experimental_supported_tools": [],
-            "input_modalities": ["text", "image"]
+            "experimental_supported_tools": []
         }))
         .expect("deserialize model info");
 
         assert_eq!(model.availability_nux, None);
+        assert_eq!(
+            model.input_modalities,
+            vec![InputModality::Text, InputModality::Image]
+        );
         assert!(!model.include_skills_usage_instructions);
+        assert!(model.supports_reasoning_summary_parameter);
         assert!(!model.supports_image_detail_original);
         assert_eq!(model.web_search_tool_type, WebSearchToolType::Text);
         assert!(!model.supports_search_tool);
@@ -1187,75 +1246,6 @@ mod tests {
 
         assert_eq!(model.resolved_context_window(), Some(400_000));
         assert_eq!(model.auto_compact_token_limit(), Some(360_000));
-    }
-
-    #[test]
-    fn model_preset_expresses_thinking_toggle_as_two_option_list() {
-        let preset = ModelPreset::from(ModelInfo {
-            reasoning_control: ReasoningControl::ThinkingToggle,
-            default_reasoning_level: Some(ReasoningEffort::Medium),
-            ..test_model(/*spec*/ None)
-        });
-
-        assert_eq!(
-            (
-                preset.default_reasoning_effort,
-                preset.supported_reasoning_efforts,
-            ),
-            (
-                ReasoningEffort::thinking_toggle_on(),
-                vec![
-                    ReasoningEffortPreset {
-                        effort: ReasoningEffort::thinking_toggle_on(),
-                        description: "Use the model's default thinking behavior.".to_string(),
-                    },
-                    ReasoningEffortPreset {
-                        effort: ReasoningEffort::None,
-                        description: "Disable thinking explicitly for this model.".to_string(),
-                    },
-                ],
-            )
-        );
-    }
-
-    #[test]
-    fn model_preset_marks_no_thinking_default_for_thinking_toggle_models() {
-        let preset = ModelPreset::from(ModelInfo {
-            reasoning_control: ReasoningControl::ThinkingBudget,
-            default_reasoning_level: Some(ReasoningEffort::None),
-            ..test_model(/*spec*/ None)
-        });
-
-        assert_eq!(preset.default_reasoning_effort, ReasoningEffort::None);
-        assert_eq!(preset.supported_reasoning_efforts.len(), 2);
-    }
-
-    #[test]
-    fn model_preset_keeps_explicit_levels_for_thinking_toggle_models() {
-        let levels = vec![
-            ReasoningEffortPreset {
-                effort: ReasoningEffort::Low,
-                description: "low".to_string(),
-            },
-            ReasoningEffortPreset {
-                effort: ReasoningEffort::High,
-                description: "high".to_string(),
-            },
-        ];
-        let preset = ModelPreset::from(ModelInfo {
-            reasoning_control: ReasoningControl::ThinkingToggle,
-            default_reasoning_level: Some(ReasoningEffort::Low),
-            supported_reasoning_levels: levels.clone(),
-            ..test_model(/*spec*/ None)
-        });
-
-        assert_eq!(
-            (
-                preset.default_reasoning_effort,
-                preset.supported_reasoning_efforts,
-            ),
-            (ReasoningEffort::Low, levels)
-        );
     }
 
     #[test]

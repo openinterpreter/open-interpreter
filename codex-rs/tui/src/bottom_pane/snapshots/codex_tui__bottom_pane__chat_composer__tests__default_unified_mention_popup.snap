@@ -2,7 +2,7 @@
 source: tui/src/bottom_pane/chat_composer.rs
 expression: terminal.backend()
 ---
-"────────────────────────────────────────────────────────────────────────────────────────────────────"
+"                                                                                                    "
 "› @sa                                                                                               "
 "                                                                                                    "
 "> Sample Plugin  Plugin with skills and an MCP server                                         Plugin"

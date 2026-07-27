@@ -89,10 +89,6 @@ pub(crate) struct FooterProps {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CollaborationModeIndicator {
     Plan,
-    #[allow(dead_code)] // Hidden by current mode filtering; kept for future UI re-enablement.
-    PairProgramming,
-    #[allow(dead_code)] // Hidden by current mode filtering; kept for future UI re-enablement.
-    Execute,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -147,15 +143,14 @@ impl CollaborationModeIndicator {
         };
         match self {
             CollaborationModeIndicator::Plan => format!("Plan mode{suffix}"),
-            CollaborationModeIndicator::PairProgramming => {
-                format!("Pair Programming mode{suffix}")
-            }
-            CollaborationModeIndicator::Execute => format!("Execute mode{suffix}"),
         }
     }
 
     fn styled_span(self, show_cycle_hint: bool) -> Span<'static> {
-        Span::from(self.label(show_cycle_hint)).dim()
+        let label = self.label(show_cycle_hint);
+        match self {
+            CollaborationModeIndicator::Plan => Span::from(label).magenta(),
+        }
     }
 }
 
@@ -563,7 +558,7 @@ pub(crate) fn goal_status_indicator_line(
         }
     };
 
-    Some(Line::from(vec![Span::from(label).dim()]))
+    Some(Line::from(vec![Span::from(label).magenta()]))
 }
 
 pub(crate) fn status_line_right_indicator_line(
@@ -574,7 +569,7 @@ pub(crate) fn status_line_right_indicator_line(
 ) -> Option<Line<'static>> {
     let primary_indicator = mode_indicator_line(collaboration_mode_indicator, show_cycle_hint)
         .or_else(|| goal_status_indicator_line(goal_status_indicator));
-    let ide_context_indicator = ide_context_active.then(|| Line::from(vec!["IDE context".dim()]));
+    let ide_context_indicator = ide_context_active.then(|| Line::from(vec!["IDE context".cyan()]));
     let mut line: Option<Line<'static>> = None;
 
     for indicator in [primary_indicator, ide_context_indicator]
@@ -596,9 +591,9 @@ pub(crate) fn status_line_right_indicator_line(
 
 pub(crate) fn side_conversation_context_line(label: &str) -> Line<'static> {
     if let Some(rest) = label.strip_prefix("Side ") {
-        Line::from(vec!["Side".dim(), format!(" {rest}").dim()])
+        Line::from(vec!["Side".magenta().bold(), format!(" {rest}").magenta()])
     } else {
-        Line::from(label.to_string()).dim()
+        Line::from(label.to_string()).magenta()
     }
 }
 

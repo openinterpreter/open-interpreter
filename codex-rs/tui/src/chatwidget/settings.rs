@@ -122,10 +122,6 @@ impl ChatWidget {
         self.refresh_status_surfaces();
     }
 
-    pub(crate) fn set_full_access_warning_acknowledged(&mut self, acknowledged: bool) {
-        self.config.notices.hide_full_access_warning = Some(acknowledged);
-    }
-
     pub(crate) fn set_world_writable_warning_acknowledged(&mut self, acknowledged: bool) {
         self.config.notices.hide_world_writable_warning = Some(acknowledged);
     }
@@ -227,6 +223,7 @@ impl ChatWidget {
         self.clear_pending_token_activity_refreshes();
         self.clear_pending_rate_limit_reset_requests();
         self.codex_rate_limit_reached_type = None;
+        self.codex_spend_control_reached = None;
         self.rate_limit_warnings = RateLimitWarningState::default();
         self.rate_limit_switch_prompt = RateLimitSwitchPromptState::Idle;
         self.bottom_pane
@@ -477,6 +474,9 @@ impl ChatWidget {
         self.sync_image_paste_enabled();
         self.sync_service_tier_commands();
         self.refresh_terminal_title();
+        let effort = self.effective_reasoning_effort();
+        self.bottom_pane
+            .set_active_reasoning_effort(effort.as_ref());
     }
 
     /// Refresh every UI surface that depends on the effective model, reasoning
@@ -590,13 +590,6 @@ impl ChatWidget {
         } else {
             model
         }
-    }
-
-    pub(super) fn model_display_label(&self) -> String {
-        crate::model_display::provider_model_label(
-            &self.config.model_provider_id,
-            self.model_display_name(),
-        )
     }
 
     /// Get the label for the current collaboration mode.

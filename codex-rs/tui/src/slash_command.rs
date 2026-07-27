@@ -107,11 +107,12 @@ impl SlashCommand {
                     "continue this session in Open Interpreter Desktop"
                 }
             },
-            SlashCommand::Quit | SlashCommand::Exit => match codex_product_info::Product::current()
-            {
-                codex_product_info::Product::Codex => "exit Codex",
-                codex_product_info::Product::OpenInterpreter => "exit Open Interpreter",
-            },
+            SlashCommand::Quit | SlashCommand::Exit => {
+                match codex_product_info::Product::current() {
+                    codex_product_info::Product::Codex => "exit Codex",
+                    codex_product_info::Product::OpenInterpreter => "exit Open Interpreter",
+                }
+            }
             SlashCommand::Copy => "copy last response as markdown",
             SlashCommand::Raw => "toggle raw scrollback mode for copy-friendly terminal selection",
             SlashCommand::Diff => "show git diff (including untracked files)",
@@ -230,10 +231,6 @@ impl SlashCommand {
             | SlashCommand::Fork
             | SlashCommand::Init
             | SlashCommand::Compact
-            | SlashCommand::Model
-            | SlashCommand::Harness
-            | SlashCommand::Personality
-            | SlashCommand::Permissions
             | SlashCommand::Keymap
             | SlashCommand::Vim
             | SlashCommand::ElevateSandbox
@@ -249,6 +246,10 @@ impl SlashCommand {
             | SlashCommand::MemoryUpdate => false,
             SlashCommand::Diff
             | SlashCommand::Resume
+            | SlashCommand::Model
+            | SlashCommand::Harness
+            | SlashCommand::Personality
+            | SlashCommand::Permissions
             | SlashCommand::Copy
             | SlashCommand::Raw
             | SlashCommand::Rename

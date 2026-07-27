@@ -9,6 +9,7 @@ use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_plugins::PluginSkillRoot;
+use tokio::sync::Semaphore;
 use tracing::info;
 use tracing::instrument;
 use tracing::warn;
@@ -20,12 +21,14 @@ use crate::build_implicit_skill_path_indexes;
 use crate::config_rules::SkillConfigRules;
 use crate::config_rules::resolve_disabled_skill_paths;
 use crate::config_rules::skill_config_rules_from_stack;
+use crate::loader::MAX_CONCURRENT_ROOT_SCANS;
 use crate::loader::SkillRoot;
 use crate::loader::load_skills_from_roots;
-use crate::loader::skill_roots;
+use crate::loader::skill_roots_with_home_dir;
 use crate::system::install_system_skills;
 use crate::system::uninstall_system_skills;
 use codex_config::SkillsConfig;
+use dirs::home_dir;
 
 #[derive(Debug, Clone)]
 pub struct SkillsLoadInput {
@@ -67,10 +70,13 @@ impl SkillsLoadInput {
 /// Source-specific model exposure remains the responsibility of the skills extension.
 pub struct SkillsService {
     codex_home: AbsolutePathBuf,
+    user_home: Option<AbsolutePathBuf>,
     restriction_product: Option<Product>,
     extra_roots: RwLock<Vec<AbsolutePathBuf>>,
     cache_by_cwd: RwLock<HashMap<AbsolutePathBuf, HostSkillsSnapshot>>,
     cache_by_config: RwLock<HashMap<ConfigSkillsCacheKey, HostSkillsSnapshot>>,
+    // Shared across cwds so root scheduling cannot multiply per-root I/O fanout.
+    root_scan_slots: Arc<Semaphore>,
 }
 
 impl SkillsService {
@@ -83,12 +89,47 @@ impl SkillsService {
         bundled_skills_enabled: bool,
         restriction_product: Option<Product>,
     ) -> Self {
+        let user_home =
+            home_dir().and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok());
+        Self::new_inner(
+            codex_home,
+            bundled_skills_enabled,
+            restriction_product,
+            user_home,
+        )
+    }
+
+    /// Creates a skills service whose user-installed skills are resolved from an explicit home.
+    ///
+    /// This is useful for isolated runtimes and tests that must not inspect the host process home.
+    pub fn new_with_restriction_product_and_user_home(
+        codex_home: AbsolutePathBuf,
+        bundled_skills_enabled: bool,
+        restriction_product: Option<Product>,
+        user_home: AbsolutePathBuf,
+    ) -> Self {
+        Self::new_inner(
+            codex_home,
+            bundled_skills_enabled,
+            restriction_product,
+            Some(user_home),
+        )
+    }
+
+    fn new_inner(
+        codex_home: AbsolutePathBuf,
+        bundled_skills_enabled: bool,
+        restriction_product: Option<Product>,
+        user_home: Option<AbsolutePathBuf>,
+    ) -> Self {
         let service = Self {
             codex_home,
+            user_home,
             restriction_product,
             extra_roots: RwLock::new(Vec::new()),
             cache_by_cwd: RwLock::new(HashMap::new()),
             cache_by_config: RwLock::new(HashMap::new()),
+            root_scan_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
         };
         if !bundled_skills_enabled {
             // The loader caches bundled skills under `skills/.system`. Clearing that directory is
@@ -152,10 +193,11 @@ impl SkillsService {
         input: &SkillsLoadInput,
         fs: Option<Arc<dyn ExecutorFileSystem>>,
     ) -> Vec<SkillRoot> {
-        let mut roots = skill_roots(
+        let mut roots = skill_roots_with_home_dir(
             fs,
             &input.config_layer_stack,
             &input.cwd,
+            self.user_home.as_ref(),
             input.effective_skill_roots.clone(),
             self.extra_roots(),
         )
@@ -180,10 +222,11 @@ impl SkillsService {
             return snapshot;
         }
 
-        let mut roots = skill_roots(
+        let mut roots = skill_roots_with_home_dir(
             fs.clone(),
             &input.config_layer_stack,
             &input.cwd,
+            self.user_home.as_ref(),
             input.effective_skill_roots.clone(),
             self.extra_roots(),
         )
@@ -213,7 +256,12 @@ impl SkillsService {
         roots: Vec<SkillRoot>,
         skill_config_rules: &SkillConfigRules,
     ) -> SkillLoadOutcome {
-        let outcome = load_skills_from_roots(roots, input.plugin_skill_snapshots.as_ref()).await;
+        let outcome = load_skills_from_roots(
+            roots,
+            input.plugin_skill_snapshots.as_ref(),
+            Arc::clone(&self.root_scan_slots),
+        )
+        .await;
         let outcome =
             crate::filter_skill_load_outcome_for_product(outcome, self.restriction_product);
         let disabled_paths = resolve_disabled_skill_paths(&outcome.skills, skill_config_rules);

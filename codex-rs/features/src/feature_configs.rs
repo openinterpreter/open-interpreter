@@ -62,6 +62,10 @@ pub struct MultiAgentV2ConfigToml {
     pub tool_namespace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hide_spawn_agent_metadata: Option<bool>,
+    /// Exposes `model` and `reasoning_effort` on the multi-agent v2 spawn tool and adds
+    /// corresponding guidance to root and subagent usage hints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expose_spawn_agent_model_overrides: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub non_code_mode_only: Option<bool>,
 }
@@ -94,6 +98,14 @@ pub struct TokenBudgetConfigToml {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 2000))]
     pub guidance_message: Option<String>,
+    /// Developer message sampled before an automatic context-window rollover.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 2000))]
+    pub auto_compact_fallback_prompt: Option<String>,
+    /// Additional tokens available after the compaction threshold for fallback note-taking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub auto_compact_fallback_buffer_tokens: Option<i64>,
 }
 
 impl FeatureConfig for TokenBudgetConfigToml {

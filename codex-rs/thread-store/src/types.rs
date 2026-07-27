@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use chrono::DateTime;
 use chrono::Utc;
+use codex_app_server_protocol::CodexErrorInfo;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -94,6 +95,8 @@ pub struct CreateThreadParams {
     pub multi_agent_version: Option<MultiAgentVersion>,
     /// Persisted thread history contract selected when the thread was created.
     pub history_mode: ThreadHistoryMode,
+    /// First rollout ordinal that belongs to this subagent's projected history.
+    pub subagent_history_start_ordinal: Option<u64>,
     /// Initial context-window identity captured when the thread was created.
     pub initial_window_id: String,
     /// Metadata captured for the newly created thread.
@@ -154,6 +157,19 @@ pub struct LoadThreadHistoryParams {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredThreadHistory {
     /// Thread id represented by the history.
+    pub thread_id: ThreadId,
+    /// Persisted rollout items in replay order.
+    pub items: Vec<RolloutItem>,
+}
+
+/// Persisted rollout items needed to reconstruct the latest model-visible context.
+///
+/// Local stores may return only a resumable suffix while stores without targeted reads may return
+/// the full persisted history. In either case, `items` remain in replay order and are suitable for
+/// the existing rollout reconstruction path.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredModelContext {
+    /// Thread id represented by the model context.
     pub thread_id: ThreadId,
     /// Persisted rollout items in replay order.
     pub items: Vec<RolloutItem>,
@@ -292,8 +308,6 @@ pub enum StoredTurnItemsView {
     /// Return display summary items for each turn.
     #[default]
     Summary,
-    /// Return every persisted item available for each turn.
-    Full,
 }
 
 /// Store-owned status for a persisted turn.
@@ -311,9 +325,12 @@ pub enum StoredTurnStatus {
 
 /// Store-owned error details for a failed persisted turn.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StoredTurnError {
     /// User-visible error message.
     pub message: String,
+    /// Structured Codex error classification, when available.
+    pub codex_error_info: Option<CodexErrorInfo>,
     /// Optional additional detail for clients that expose expanded error context.
     pub additional_details: Option<String>,
 }
@@ -340,13 +357,8 @@ pub struct ListTurnsParams {
 pub struct StoredTurn {
     /// Turn id.
     pub turn_id: String,
-    /// Persisted rollout items associated with this turn, according to `items_view`.
-    pub items: Vec<RolloutItem>,
-    /// Opaque serialized turn metadata supplied by a projected durable store.
-    pub metadata_json: Option<Vec<u8>>,
-    /// Semantic turn creation timestamp in milliseconds, when supplied by a projected durable
-    /// store.
-    pub turn_created_at_ms: Option<i64>,
+    /// Projected app-server item snapshots associated with this turn, according to `items_view`.
+    pub items: Vec<StoredThreadItem>,
     /// Amount of item detail included in `items`.
     pub items_view: StoredTurnItemsView,
     /// Store-owned status for API layer projection.
@@ -392,11 +404,14 @@ pub struct ListItemsParams {
 /// A projected app-server `ThreadItem` snapshot within a turn.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredThreadItem {
-    pub turn_id: Option<String>,
-    pub item_key: String,
-    pub item_ordinal: u64,
-    pub item_created_at_ms: i64,
-    pub materialized_thread_item_json: Vec<u8>,
+    /// Turn containing this item.
+    pub turn_id: String,
+    /// Stable item identifier within the turn.
+    pub item_id: String,
+    /// Unix timestamp (milliseconds) when this logical item was first projected.
+    pub created_at_ms: i64,
+    /// Serialized app-server ThreadItem snapshot.
+    pub item_json: Vec<u8>,
 }
 
 /// A page of persisted items within a thread, optionally filtered to a turn.
@@ -408,6 +423,44 @@ pub struct ItemPage {
     pub next_cursor: Option<String>,
     /// Opaque cursor for fetching in the opposite direction.
     pub backwards_cursor: Option<String>,
+}
+
+/// Parameters for searching visible message occurrences within one paginated thread.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchThreadOccurrencesParams {
+    /// Thread id to search.
+    pub thread_id: ThreadId,
+    /// Case-insensitive literal substring to find.
+    pub search_term: String,
+    /// Opaque cursor returned by a previous search call.
+    pub cursor: Option<String>,
+    /// Maximum number of occurrences to return.
+    pub page_size: usize,
+}
+
+/// UTF-16 code-unit range within `snippet`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchTextRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// One visible message occurrence within a stored thread.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredThreadOccurrence {
+    pub turn_id: String,
+    pub item_id: String,
+    pub snippet: String,
+    pub snippet_match_range: SearchTextRange,
+    /// Inclusive cursor accepted by `thread/turns/list` for this turn.
+    pub turn_cursor: String,
+}
+
+/// A page of visible message occurrences within one stored thread.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ThreadOccurrenceSearchPage {
+    pub items: Vec<StoredThreadOccurrence>,
+    pub next_cursor: Option<String>,
 }
 
 /// Store-owned thread metadata used by list/read/resume responses.

@@ -574,7 +574,10 @@ impl App {
             .await;
 
         let fork_config = self.side_fork_config();
-        match app_server.fork_thread(fork_config, parent_thread_id).await {
+        match app_server
+            .fork_side_thread(fork_config, parent_thread_id)
+            .await
+        {
             Ok(forked) => {
                 let child_thread_id = forked.session.thread_id;
                 let channel = self.ensure_thread_channel(child_thread_id);
@@ -584,6 +587,14 @@ impl App {
                 }
                 self.side_threads
                     .insert(child_thread_id, SideThreadState::new(parent_thread_id));
+                // `thread/started` is delivered after the fork response; seed navigation before
+                // the first selection without blocking on another app-server read.
+                self.upsert_agent_picker_thread(
+                    child_thread_id,
+                    /*agent_nickname*/ None,
+                    /*agent_role*/ None,
+                    /*is_closed*/ false,
+                );
                 if let Err(err) = app_server
                     .thread_inject_items(child_thread_id, vec![Self::side_boundary_prompt_item()])
                     .await

@@ -184,11 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             StreamableHttpService::new(
                 || Ok(TestToolServer::new()),
                 Arc::new(LocalSessionManager::default()),
-                // This test server is also launched inside the remote-test
-                // container and reached through that container's bridge IP.
-                // Host validation is not under test here, and the bridge IP is
-                // only known to the host-side test harness after startup.
-                StreamableHttpServerConfig::default().disable_allowed_hosts(),
+                StreamableHttpServerConfig::default(),
             ),
         )
         .layer(middleware::from_fn_with_state(

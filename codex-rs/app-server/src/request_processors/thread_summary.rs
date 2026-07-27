@@ -172,17 +172,6 @@ pub(crate) fn thread_response_active_permission_profile(
     active_permission_profile.map(Into::into)
 }
 
-pub(crate) fn thread_response_sandbox_policy(
-    permission_profile: &codex_protocol::models::PermissionProfile,
-    cwd: &Path,
-) -> codex_app_server_protocol::SandboxPolicy {
-    let sandbox_policy = codex_sandboxing::compatibility_sandbox_policy_for_permission_profile(
-        permission_profile,
-        cwd,
-    );
-    sandbox_policy.into()
-}
-
 pub(crate) fn thread_settings_from_config_snapshot(
     config_snapshot: &ThreadConfigSnapshot,
 ) -> ThreadSettings {
@@ -190,10 +179,7 @@ pub(crate) fn thread_settings_from_config_snapshot(
         cwd: config_snapshot.cwd().clone(),
         approval_policy: config_snapshot.approval_policy.into(),
         approvals_reviewer: config_snapshot.approvals_reviewer.into(),
-        sandbox_policy: thread_response_sandbox_policy(
-            &config_snapshot.permission_profile,
-            config_snapshot.cwd().as_path(),
-        ),
+        sandbox_policy: config_snapshot.sandbox_policy().into(),
         active_permission_profile: thread_response_active_permission_profile(
             config_snapshot.active_permission_profile.clone(),
         ),
@@ -225,7 +211,11 @@ pub(crate) fn thread_settings_from_core_snapshot(
         personality,
         collaboration_mode,
     } = snapshot;
-    let sandbox_policy = thread_response_sandbox_policy(&permission_profile, cwd.as_path());
+    let sandbox_policy = codex_sandboxing::compatibility_sandbox_policy_for_permission_profile(
+        &permission_profile,
+        cwd.as_path(),
+    )
+    .into();
     ThreadSettings {
         sandbox_policy,
         cwd,
@@ -329,6 +319,7 @@ pub(crate) fn summary_to_thread(
         agent_nickname: source.get_nickname(),
         agent_role: source.get_agent_role(),
         source: source.into(),
+        can_accept_direct_input: None,
         thread_source: None,
         git_info,
         name: None,

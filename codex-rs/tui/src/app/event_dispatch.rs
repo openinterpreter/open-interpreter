@@ -4,10 +4,18 @@
 //! actions are delegated to focused app submodules so the central match remains the routing layer.
 
 use super::resize_reflow::trailing_run_start;
+use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
 use crate::app_event::KimiCodeLoginOutcome;
+use crate::app_server_session::ForkGoalContinuation;
 use crate::config_update::format_config_error;
 use crate::external_agent_config_migration_flow::ExternalAgentConfigMigrationFlowOutcome;
+use codex_app_server_protocol::InterpreterHarnessListParams;
+use codex_app_server_protocol::InterpreterHarnessListResponse;
+use codex_app_server_protocol::InterpreterModelListParams;
+use codex_app_server_protocol::InterpreterModelListResponse;
+use codex_app_server_protocol::InterpreterProviderListParams;
+use codex_app_server_protocol::InterpreterProviderListResponse;
 use codex_app_server_protocol::RequestId;
 #[cfg(target_os = "windows")]
 use codex_config::types::WindowsSandboxModeToml;
@@ -186,7 +194,10 @@ impl App {
                             self.shutdown_current_thread(app_server).await;
                             match self
                                 .replace_chat_widget_with_app_server_thread(
-                                    tui, app_server, forked, /*initial_user_message*/ None,
+                                    tui,
+                                    forked,
+                                    ThreadAttachPresentation::SessionLineage,
+                                    /*initial_user_message*/ None,
                                 )
                                 .await
                             {
@@ -228,6 +239,77 @@ impl App {
 
                 tui.frame_requester().schedule_frame();
             }
+            AppEvent::ForkSessionForPromptEdit {
+                thread_id,
+                nth_user_message,
+                mut prompt,
+            } => {
+                if self.chat_widget.thread_id() != Some(thread_id) {
+                    return Ok(AppRunControl::Continue);
+                }
+                self.session_telemetry.counter(
+                    "codex.thread.fork",
+                    /*inc*/ 1,
+                    &[("source", "transcript")],
+                );
+                self.refresh_in_memory_config_from_disk_best_effort("forking the thread")
+                    .await;
+                let config = self.fresh_session_config();
+                let started = match app_server
+                    .thread_read(thread_id, /*include_turns*/ true)
+                    .await
+                {
+                    Ok(thread) => match crate::app_backtrack::backtrack_fork_before_turn_id(
+                        &thread.turns,
+                        nth_user_message,
+                        &mut prompt,
+                    ) {
+                        Ok(Some(before_turn_id)) => {
+                            app_server
+                                .fork_thread_at(
+                                    config.clone(),
+                                    thread_id,
+                                    /*last_turn_id*/ None,
+                                    /*before_turn_id*/ Some(before_turn_id),
+                                    ForkGoalContinuation::StartIfIdle,
+                                )
+                                .await
+                        }
+                        Ok(None) => {
+                            app_server
+                                .start_thread_with_session_start_source(
+                                    &config, /*session_start_source*/ None,
+                                )
+                                .await
+                        }
+                        Err(err) => Err(err),
+                    },
+                    Err(err) => Err(err),
+                };
+                match started {
+                    Ok(forked) => {
+                        self.shutdown_current_thread(app_server).await;
+                        match self
+                            .replace_chat_widget_with_app_server_thread(
+                                tui,
+                                forked,
+                                ThreadAttachPresentation::PromptEdit,
+                                /*initial_user_message*/ None,
+                            )
+                            .await
+                        {
+                            Ok(()) => self.chat_widget.restore_user_message_to_composer(prompt),
+                            Err(err) => {
+                                self.restore_backtrack_prompt_after_branch_error(prompt, err);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        self.restore_backtrack_prompt_after_branch_error(prompt, err);
+                    }
+                }
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::BeginInitialHistoryReplayBuffer => {
                 self.begin_initial_history_replay_buffer();
             }
@@ -243,6 +325,7 @@ impl App {
             AppEvent::ConsolidateAgentMessage {
                 source,
                 cwd,
+                inline_visualization_context,
                 scrollback_reflow,
                 deferred_history_cell,
             } => {
@@ -250,6 +333,7 @@ impl App {
                     tui,
                     source,
                     cwd,
+                    inline_visualization_context,
                     scrollback_reflow,
                     deferred_history_cell,
                 )?;
@@ -291,11 +375,6 @@ impl App {
                 }
                 self.chat_widget.note_stream_consolidation_completed();
                 self.insert_pending_usage_output_after_stream_shutdown(tui);
-            }
-            AppEvent::ApplyThreadRollback { num_turns } => {
-                if self.apply_non_pending_thread_rollback(num_turns) {
-                    tui.frame_requester().schedule_frame();
-                }
             }
             AppEvent::StartCommitAnimation => {
                 if self
@@ -342,6 +421,15 @@ impl App {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }
             AppEvent::CodexOp(op) => {
+                if matches!(&op, AppCommand::UserTurn { .. }) {
+                    self.handle_draw_pre_render(tui)?;
+                    if self.transcript_reflow.has_pending_reflow() {
+                        self.transcript_reflow.schedule_immediate();
+                        self.maybe_run_resize_reflow(tui)?;
+                    }
+                    self.chat_widget.pre_draw_tick();
+                    self.render_chat_widget_frame(tui)?;
+                }
                 self.chat_widget.prepare_local_op_submission(&op);
                 self.submit_active_thread_op(app_server, op).await?;
             }
@@ -349,77 +437,21 @@ impl App {
                 thread_id,
                 turn_id,
                 model,
-                mut turn,
+                turn,
+                prompt,
             } => {
-                if self.active_thread_id != Some(thread_id)
-                    || self.chat_widget.thread_id() != Some(thread_id)
-                {
-                    return Ok(AppRunControl::Continue);
-                }
-                if !self.chat_widget.can_retry_safety_buffered_turn(&turn_id) {
-                    self.app_event_tx.send(AppEvent::UpdateModel(model));
-                    self.app_event_tx.send(AppEvent::UpdateReasoningEffort(Some(
-                        ReasoningEffortConfig::Low,
-                    )));
-                    return Ok(AppRunControl::Continue);
-                }
-
-                let AppCommand::UserTurn {
-                    model: turn_model,
-                    effort,
-                    collaboration_mode,
-                    ..
-                } = &mut turn
-                else {
-                    self.chat_widget.add_error_message(
-                        "Failed to retry with a faster model: original turn is unavailable."
-                            .to_string(),
-                    );
-                    return Ok(AppRunControl::Continue);
-                };
-                *turn_model = model.clone();
-                *effort = Some(ReasoningEffortConfig::Low);
-                *collaboration_mode = collaboration_mode.as_ref().map(|mode| {
-                    mode.with_updates(
-                        Some(model),
-                        Some(Some(ReasoningEffortConfig::Low)),
-                        /*developer_instructions*/ None,
-                    )
-                });
-
-                if let Err(err) = app_server.turn_interrupt(thread_id, turn_id).await {
-                    self.chat_widget
-                        .add_error_message(format!("Failed to retry with a faster model: {err}"));
-                    return Ok(AppRunControl::Continue);
-                }
-                let rollback_response =
-                    match app_server.thread_rollback(thread_id, /*num_turns*/ 1).await {
-                        Ok(response) => response,
-                        Err(err) => {
-                            self.chat_widget.add_error_message(format!(
-                                "Failed to retry with a faster model: {err}"
-                            ));
-                            return Ok(AppRunControl::Continue);
-                        }
-                    };
-
-                self.chat_widget.prepare_safety_buffering_retry();
-                self.handle_thread_rollback_response_with_origin(
-                    thread_id,
-                    /*num_turns*/ 1,
-                    &rollback_response,
-                    super::thread_routing::ThreadRollbackOrigin::SafetyBufferingRetry,
+                self.retry_safety_buffered_turn(
+                    tui,
+                    app_server,
+                    super::safety_buffering::SafetyBufferedRetry {
+                        thread_id,
+                        turn_id,
+                        model,
+                        turn,
+                        prompt,
+                    },
                 )
                 .await;
-
-                if let Err(err) = self.submit_thread_op(app_server, thread_id, turn).await {
-                    self.chat_widget.fail_safety_buffering_retry();
-                    self.chat_widget
-                        .add_error_message(format!("Failed to retry with a faster model: {err}"));
-                }
-            }
-            AppEvent::RestoreCancelledTurn(prompt) => {
-                self.apply_cancelled_turn_edit(prompt);
             }
             AppEvent::AppendMessageHistoryEntry { thread_id, text } => {
                 self.append_message_history_entry(thread_id, text);
@@ -438,6 +470,14 @@ impl App {
                 log_id,
             } => {
                 self.lookup_message_history_entry(thread_id, offset, log_id)
+                    .await?;
+            }
+            AppEvent::LookupMessageHistoryBatch {
+                thread_id,
+                cursor,
+                log_id,
+            } => {
+                self.lookup_message_history_batch(thread_id, cursor, log_id)
                     .await?;
             }
             AppEvent::ApproveRecentAutoReviewDenial { thread_id, id } => {
@@ -836,10 +876,19 @@ impl App {
                 self.chat_widget
                     .finish_add_credits_nudge_email_request(result);
             }
-            AppEvent::RateLimitsLoaded { origin, result } => match result {
+            AppEvent::RateLimitsLoaded {
+                origin,
+                hard_stop_generation,
+                result,
+            } => match result {
                 Ok(response) => {
                     let rate_limit_reset_credits = response.rate_limit_reset_credits.clone();
-                    let snapshots = app_server_rate_limit_snapshots(response);
+                    let snapshots = if hard_stop_generation == self.rate_limit_hard_stop_generation
+                    {
+                        app_server_rate_limit_snapshots(response)
+                    } else {
+                        Vec::new()
+                    };
                     match origin {
                         RateLimitRefreshOrigin::StartupPrefetch {
                             reset_hint_request_id,
@@ -944,17 +993,38 @@ impl App {
                     RateLimitRefreshOrigin::ResetPicker { request_id },
                 );
             }
+            AppEvent::OpenRateLimitResetConfirmation {
+                picker_request_id,
+                confirmation_gate,
+                credit_id,
+                reset_title,
+                reset_detail,
+                reset_description,
+            } => {
+                self.chat_widget.show_rate_limit_reset_confirmation(
+                    picker_request_id,
+                    confirmation_gate,
+                    credit_id,
+                    reset_title,
+                    reset_detail,
+                    reset_description,
+                );
+            }
             AppEvent::ConsumeRateLimitResetCredit {
                 idempotency_key,
                 credit_id,
             } => {
-                let request_id = self.chat_widget.show_rate_limit_reset_consuming_popup();
-                self.consume_rate_limit_reset_credit(
-                    app_server,
-                    request_id,
-                    idempotency_key,
-                    credit_id,
-                );
+                if let Some(request_id) = self
+                    .chat_widget
+                    .start_rate_limit_reset_consumption(&idempotency_key)
+                {
+                    self.consume_rate_limit_reset_credit(
+                        app_server,
+                        request_id,
+                        idempotency_key,
+                        credit_id,
+                    );
+                }
             }
             AppEvent::RateLimitResetCreditConsumed {
                 request_id,
@@ -1031,28 +1101,54 @@ impl App {
                     self.chat_widget.maybe_send_next_queued_input();
                 }
             }
-            AppEvent::OpenReasoningPopup { model } => {
-                self.chat_widget.open_reasoning_popup(model);
+            AppEvent::LoadProviderCatalog => {
+                let request_handle = app_server.request_handle();
+                let tx = self.app_event_tx.clone();
+                tokio::spawn(async move {
+                    let result = request_handle
+                        .request_typed::<InterpreterProviderListResponse>(
+                            ClientRequest::InterpreterProviderList {
+                                request_id: RequestId::String(format!(
+                                    "provider-list-{}",
+                                    Uuid::new_v4()
+                                )),
+                                params: InterpreterProviderListParams {
+                                    include_unconfigured: Some(true),
+                                },
+                            },
+                        )
+                        .await
+                        .map(|response| response.data)
+                        .map_err(|err| err.to_string());
+                    tx.send(AppEvent::ProviderCatalogLoaded { result });
+                });
             }
+            AppEvent::ProviderCatalogLoaded { result } => match result {
+                Ok(providers) => self.chat_widget.open_model_provider_popup(providers),
+                Err(err) => self.chat_widget.on_model_provider_catalog_error(err),
+            },
             AppEvent::LoadProviderModels {
                 provider_id,
                 provider_name,
             } => {
+                self.chat_widget
+                    .open_provider_models_loading_popup(&provider_name);
                 let request_handle = app_server.request_handle();
                 let tx = self.app_event_tx.clone();
                 tokio::spawn(async move {
-                    let request_id =
-                        RequestId::String(format!("provider-model-list-{}", Uuid::new_v4()));
                     let result = request_handle
-                        .request_typed::<ModelListResponse>(ClientRequest::ModelList {
-                            request_id,
-                            params: ModelListParams {
-                                cursor: None,
-                                limit: None,
-                                include_hidden: Some(true),
-                                model_provider: Some(provider_id.clone()),
+                        .request_typed::<InterpreterModelListResponse>(
+                            ClientRequest::InterpreterModelList {
+                                request_id: RequestId::String(format!(
+                                    "provider-model-list-{}",
+                                    Uuid::new_v4()
+                                )),
+                                params: InterpreterModelListParams {
+                                    model_provider: Some(provider_id.clone()),
+                                    include_hidden: Some(true),
+                                },
                             },
-                        })
+                        )
                         .await
                         .map(|response| {
                             response
@@ -1074,22 +1170,14 @@ impl App {
                 provider_name,
                 result,
             } => match result {
-                Ok(models) => {
-                    self.chat_widget.open_model_popup_for_provider(
-                        provider_id,
-                        provider_name,
-                        models,
-                    );
-                }
+                Ok(models) => self.chat_widget.open_model_popup_for_provider(
+                    provider_id,
+                    provider_name,
+                    models,
+                ),
                 Err(err) => {
-                    self.chat_widget.add_error_message(format!(
-                        "Failed to load models for {provider_name}: {err}"
-                    ));
-                    self.chat_widget.open_custom_model_prompt_for_provider(
-                        provider_id,
-                        provider_name,
-                        /*initial_text*/ None,
-                    );
+                    self.chat_widget
+                        .on_provider_models_error(provider_id, provider_name, err)
                 }
             },
             AppEvent::StartKimiCodeLogin {
@@ -1194,48 +1282,89 @@ impl App {
                         provider_name,
                     });
                 }
-                Err(err) => {
-                    self.chat_widget
-                        .add_error_message(format!("{provider_name} sign-in failed: {err}"));
-                }
+                Err(err) => self
+                    .chat_widget
+                    .add_error_message(format!("{provider_name} sign-in failed: {err}")),
             },
             AppEvent::OpenCustomProviderModelPrompt {
                 provider_id,
                 provider_name,
                 initial_text,
-            } => {
-                self.chat_widget.open_custom_model_prompt_for_provider(
-                    provider_id,
-                    provider_name,
-                    initial_text,
-                );
-            }
+            } => self.chat_widget.open_custom_model_prompt_for_provider(
+                provider_id,
+                provider_name,
+                initial_text,
+            ),
             AppEvent::OpenReasoningPopupForProvider {
                 provider_id,
                 provider_name,
                 model,
-            } => {
-                self.chat_widget.open_reasoning_popup_for_provider(
-                    provider_id,
-                    provider_name,
-                    model,
-                );
-            }
-            AppEvent::OpenHarnessPopup { model, effort } => {
-                self.chat_widget.open_harness_popup(model, effort);
-            }
-            AppEvent::OpenHarnessPopupForProvider {
+            } => self.chat_widget.open_reasoning_popup_for_provider(
+                provider_id,
+                provider_name,
+                model,
+            ),
+            AppEvent::LoadHarnesses {
                 provider_id,
                 provider_name,
                 model,
                 effort,
             } => {
-                self.chat_widget.open_harness_popup_for_provider(
-                    provider_id,
-                    provider_name,
-                    model,
-                    effort,
-                );
+                self.chat_widget
+                    .open_harness_loading_popup(&provider_name, &model);
+                let request_handle = app_server.request_handle();
+                let tx = self.app_event_tx.clone();
+                tokio::spawn(async move {
+                    let result = request_handle
+                        .request_typed::<InterpreterHarnessListResponse>(
+                            ClientRequest::InterpreterHarnessList {
+                                request_id: RequestId::String(format!(
+                                    "harness-list-{}",
+                                    Uuid::new_v4()
+                                )),
+                                params: InterpreterHarnessListParams {
+                                    provider_id: provider_id.clone(),
+                                    model: Some(model.clone()),
+                                },
+                            },
+                        )
+                        .await
+                        .map(|response| response.data)
+                        .map_err(|err| err.to_string());
+                    tx.send(AppEvent::HarnessesLoaded {
+                        provider_id,
+                        provider_name,
+                        model,
+                        effort,
+                        result,
+                    });
+                });
+            }
+            AppEvent::HarnessesLoaded {
+                provider_id,
+                provider_name,
+                model,
+                effort,
+                result,
+            } => match result {
+                Ok(harnesses) if !harnesses.is_empty() => {
+                    self.chat_widget.open_harness_popup_for_provider(
+                        provider_id,
+                        provider_name,
+                        model,
+                        effort,
+                        harnesses,
+                    );
+                }
+                Ok(_) => self
+                    .chat_widget
+                    .on_harnesses_error("No compatible harnesses are available.".to_string()),
+                Err(err) => self
+                    .chat_widget
+                    .on_harnesses_error(format!("Failed to load tool harnesses: {err}")),
+            },
+            AppEvent::OpenReasoningPopup { model } => {
+                self.chat_widget.open_reasoning_popup(model);
             }
             AppEvent::OpenAdvancedReasoningPopup { model } => {
                 self.chat_widget.open_advanced_reasoning_popup(model);
@@ -1730,11 +1859,8 @@ impl App {
                                     Line::from(vec!["• ".dim(), "Sandbox ready".into()]),
                                     Line::from(vec![
                                         "  ".into(),
-                                        format!(
-                                            "{} can now safely edit files and execute commands in your computer",
-                                            codex_product_info::Product::current().display_name()
-                                        )
-                                        .dark_gray(),
+                                        "Codex can now safely edit files and execute commands in your computer"
+                                            .dark_gray(),
                                     ]),
                                 ]);
                             } else {
@@ -1766,11 +1892,8 @@ impl App {
                                     Line::from(vec!["• ".dim(), "Sandbox ready".into()]),
                                     Line::from(vec![
                                         "  ".into(),
-                                        format!(
-                                            "{} can now safely edit files and execute commands in your computer",
-                                            codex_product_info::Product::current().display_name()
-                                        )
-                                        .dark_gray(),
+                                        "Codex can now safely edit files and execute commands in your computer"
+                                            .dark_gray(),
                                     ]),
                                 ]);
                             }
@@ -1825,43 +1948,6 @@ impl App {
                     }
                 }
             }
-            AppEvent::PersistHarnessSelection { harness } => {
-                match crate::config_update::write_config_batch(
-                    app_server.request_handle(),
-                    vec![crate::config_update::build_harness_selection_edit(
-                        harness.as_deref(),
-                    )],
-                )
-                .await
-                {
-                    Ok(_) => {
-                        self.config.harness = harness.clone();
-                        self.chat_widget.set_harness(harness.clone());
-                        self.start_fresh_session_with_summary_hint(
-                            tui, app_server, /*session_start_source*/ None,
-                            /*initial_user_message*/ None,
-                        )
-                        .await;
-                        let native_harness_label = match codex_product_info::Product::current() {
-                            codex_product_info::Product::Codex => "Codex",
-                            codex_product_info::Product::OpenInterpreter => "Open Interpreter",
-                        };
-                        let harness_label = harness.as_deref().unwrap_or(native_harness_label);
-                        self.chat_widget.add_info_message(
-                            format!("Harness changed to {harness_label}. Started a new chat."),
-                            /*hint*/ None,
-                        );
-                    }
-                    Err(err) => {
-                        tracing::error!(
-                            error = %err,
-                            "failed to persist harness selection"
-                        );
-                        self.chat_widget
-                            .add_error_message(format!("Failed to save default harness: {err}"));
-                    }
-                }
-            }
             AppEvent::PersistProviderModelSelection {
                 provider_id,
                 provider_name,
@@ -1902,17 +1988,14 @@ impl App {
                         )
                         .await;
 
-                        let mut message = format!("Model changed to {provider_name} / {model}");
+                        let harness_label = harness.as_deref().unwrap_or("Open Interpreter native");
+                        let mut message = format!(
+                            "Model changed to {provider_name} / {model} with {harness_label} harness"
+                        );
                         if let Some(label) = Self::reasoning_label_for(&model, effort.as_ref()) {
                             message.push(' ');
                             message.push_str(&label);
                         }
-                        let native_harness_label = match codex_product_info::Product::current() {
-                            codex_product_info::Product::Codex => "Codex",
-                            codex_product_info::Product::OpenInterpreter => "Open Interpreter",
-                        };
-                        let harness_label = harness.as_deref().unwrap_or(native_harness_label);
-                        message.push_str(&format!(" with {harness_label} harness"));
                         self.chat_widget.add_info_message(message, /*hint*/ None);
                     }
                     Err(err) => {
@@ -2146,9 +2229,6 @@ impl App {
             AppEvent::SkipNextWorldWritableScan => {
                 self.windows_sandbox.skip_world_writable_scan_once = true;
             }
-            AppEvent::UpdateFullAccessWarningAcknowledged(ack) => {
-                self.chat_widget.set_full_access_warning_acknowledged(ack);
-            }
             AppEvent::UpdateWorldWritableWarningAcknowledged(ack) => {
                 self.chat_widget
                     .set_world_writable_warning_acknowledged(ack);
@@ -2160,21 +2240,6 @@ impl App {
                 self.on_update_plan_mode_reasoning_effort(effort);
                 self.sync_active_thread_plan_mode_reasoning_setting(app_server)
                     .await;
-            }
-            AppEvent::PersistFullAccessWarningAcknowledged => {
-                if let Err(err) = ConfigEditsBuilder::for_config(&self.config)
-                    .set_hide_full_access_warning(/*acknowledged*/ true)
-                    .apply()
-                    .await
-                {
-                    tracing::error!(
-                        error = %err,
-                        "failed to persist full access warning acknowledgement"
-                    );
-                    self.chat_widget.add_error_message(format!(
-                        "Failed to save full access confirmation preference: {err}"
-                    ));
-                }
             }
             AppEvent::PersistWorldWritableWarningAcknowledged => {
                 if let Err(err) = ConfigEditsBuilder::for_config(&self.config)
@@ -2388,18 +2453,18 @@ impl App {
                 self.chat_widget.handle_manage_skills_closed();
             }
             AppEvent::FullScreenApprovalRequest(request) => match request {
-                ApprovalRequest::ApplyPatch { cwd, changes, .. } => {
+                ApprovalRequest::ApplyPatch(request) => {
                     let _ = tui.enter_alt_screen();
-                    let diff_summary = DiffSummary::new(changes, cwd);
+                    let diff_summary = DiffSummary::new(request.changes, request.cwd);
                     self.overlay = Some(Overlay::new_static_with_renderables(
                         vec![diff_summary.into()],
                         "P A T C H".to_string(),
                         self.keymap.pager.clone(),
                     ));
                 }
-                ApprovalRequest::Exec { command, .. } => {
+                ApprovalRequest::Exec(request) => {
                     let _ = tui.enter_alt_screen();
-                    let full_cmd = strip_bash_lc_and_escape(&command);
+                    let full_cmd = strip_bash_lc_and_escape(&request.command);
                     let full_cmd_lines = highlight_bash_to_lines(&full_cmd);
                     self.overlay = Some(Overlay::new_static_with_lines(
                         full_cmd_lines,
@@ -2407,27 +2472,22 @@ impl App {
                         self.keymap.pager.clone(),
                     ));
                 }
-                ApprovalRequest::Permissions {
-                    environment_id,
-                    permissions,
-                    reason,
-                    ..
-                } => {
+                ApprovalRequest::Permissions(request) => {
                     let _ = tui.enter_alt_screen();
                     let mut lines = Vec::new();
-                    if let Some(environment_id) = environment_id {
+                    if let Some(environment_id) = request.environment_id {
                         lines.push(Line::from(vec![
                             "Environment: ".into(),
                             environment_id.bold(),
                         ]));
                         lines.push(Line::from(""));
                     }
-                    if let Some(reason) = reason {
+                    if let Some(reason) = request.reason {
                         lines.push(Line::from(vec!["Reason: ".into(), reason.italic()]));
                         lines.push(Line::from(""));
                     }
                     if let Some(rule_line) =
-                        crate::bottom_pane::format_requested_permissions_rule(&permissions)
+                        crate::bottom_pane::format_requested_permissions_rule(&request.permissions)
                     {
                         lines.push(Line::from(vec![
                             "Permission rule: ".into(),
@@ -2440,16 +2500,12 @@ impl App {
                         self.keymap.pager.clone(),
                     ));
                 }
-                ApprovalRequest::McpElicitation {
-                    server_name,
-                    message,
-                    ..
-                } => {
+                ApprovalRequest::McpElicitation(request) => {
                     let _ = tui.enter_alt_screen();
                     let paragraph = Paragraph::new(vec![
-                        Line::from(vec!["Server: ".into(), server_name.bold()]),
+                        Line::from(vec!["Server: ".into(), request.server_name.bold()]),
                         Line::from(""),
-                        Line::from(message),
+                        Line::from(request.message),
                     ])
                     .wrap(Wrap { trim: false });
                     self.overlay = Some(Overlay::new_static_with_renderables(

@@ -7,7 +7,6 @@ use std::sync::atomic::Ordering;
 use codex_core_skills::HostSkillsSnapshot;
 use codex_core_skills::SKILLS_INTRO_WITH_ABSOLUTE_PATHS;
 use codex_core_skills::SkillLoadOutcome;
-use codex_core_skills::SkillMetadata;
 use codex_core_skills::injection::InjectedHostSkillPrompts;
 use codex_extension_api::ConversationHistory;
 use codex_extension_api::ExtensionData;
@@ -31,6 +30,7 @@ use codex_protocol::protocol::SkillScope;
 use codex_protocol::protocol::TruncationPolicy;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
+use codex_skills::SkillMetadata;
 use codex_skills_extension::SkillProviders;
 use codex_skills_extension::SkillsExtensionConfig;
 use codex_skills_extension::catalog::SkillAuthority;
@@ -69,7 +69,8 @@ async fn installed_extension_uses_host_service_snapshot() -> TestResult {
             .ok_or("skill path should have a parent")?,
     )?;
     std::fs::write(&skill_path, DEMO_SKILL_CONTENTS)?;
-    let config = default_config();
+    let mut config = default_config();
+    config.shadow_selection_enabled = true;
 
     let mut builder = ExtensionRegistryBuilder::new();
     install(&mut builder, skills_extension_config);
@@ -199,6 +200,7 @@ async fn selected_executor_catalog_follows_step_availability_and_reuses_its_cach
     let turn_environment = TurnEnvironmentSelection {
         environment_id: "turn-env".to_string(),
         cwd: PathUri::parse("file:///workspace").expect("cwd URI"),
+        workspace_roots: Vec::new(),
     };
     let available_sections = registry.context_contributors()[0]
         .contribute_world_state(WorldStateContributionInput {
@@ -206,6 +208,7 @@ async fn selected_executor_catalog_follows_step_availability_and_reuses_its_cach
             turn_id: "turn-1",
             environments: std::slice::from_ref(&turn_environment),
             ready_selected_capability_roots: &selected_roots,
+            executor_capability_discovery: None,
             session_store: &session_store,
             thread_store: &thread_store,
             turn_store: &turn_store,
@@ -258,6 +261,7 @@ async fn selected_executor_catalog_follows_step_availability_and_reuses_its_cach
             turn_id: "turn-2",
             environments: &[],
             ready_selected_capability_roots: &[],
+            executor_capability_discovery: None,
             session_store: &session_store,
             thread_store: &thread_store,
             turn_store: &unavailable_turn_store,
@@ -280,6 +284,7 @@ async fn selected_executor_catalog_follows_step_availability_and_reuses_its_cach
             turn_id: "turn-3",
             environments: &[turn_environment],
             ready_selected_capability_roots: &selected_roots,
+            executor_capability_discovery: None,
             session_store: &session_store,
             thread_store: &thread_store,
             turn_store: &restored_turn_store,
@@ -307,6 +312,7 @@ async fn selected_executor_catalog_follows_step_availability_and_reuses_its_cach
             turn_id: "turn-4",
             environments: &[],
             ready_selected_capability_roots: &selected_roots,
+            executor_capability_discovery: None,
             session_store: &session_store,
             thread_store: &thread_store,
             turn_store: &listing_disabled_turn_store,
@@ -437,6 +443,7 @@ async fn skills_list_truncates_catalog_descriptions_in_tool_output() -> TestResu
             call_id: "call-1".to_string(),
             tool_name: list_tool.tool_name(),
             model: "gpt-test".to_string(),
+            codex_turn_metadata: None,
             truncation_policy: TruncationPolicy::Bytes(1_024),
             conversation_history: ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
@@ -593,8 +600,10 @@ async fn root_qualified_locator_selects_only_the_matching_executor_skill() -> Te
             environments: &[TurnEnvironmentSelection {
                 environment_id: "env-1".to_string(),
                 cwd: PathUri::parse("file:///workspace").expect("cwd URI"),
+                workspace_roots: Vec::new(),
             }],
             ready_selected_capability_roots: &selected_roots,
+            executor_capability_discovery: None,
             session_store: &session_store,
             thread_store: &thread_store,
             turn_store: &turn_store,
@@ -781,6 +790,7 @@ struct TestConfig {
     include_instructions: bool,
     bundled_skills_enabled: bool,
     orchestrator_skills_enabled: bool,
+    shadow_selection_enabled: bool,
 }
 
 fn default_config() -> TestConfig {
@@ -788,6 +798,7 @@ fn default_config() -> TestConfig {
         include_instructions: true,
         bundled_skills_enabled: true,
         orchestrator_skills_enabled: true,
+        shadow_selection_enabled: false,
     }
 }
 
@@ -796,6 +807,7 @@ fn skills_extension_config(config: &TestConfig) -> SkillsExtensionConfig {
         include_instructions: config.include_instructions,
         bundled_skills_enabled: config.bundled_skills_enabled,
         orchestrator_skills_enabled: config.orchestrator_skills_enabled,
+        shadow_selection_enabled: config.shadow_selection_enabled,
     }
 }
 

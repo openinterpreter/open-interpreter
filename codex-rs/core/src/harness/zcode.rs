@@ -870,6 +870,10 @@ fn map_message_content_item(item: &ContentItem) -> Option<AnthropicContentBlock>
             text: "[image omitted by zcode harness]".to_string(),
             cache_control: None,
         }),
+        ContentItem::InputAudio { .. } => Some(AnthropicContentBlock::Text {
+            text: "[audio omitted by zcode harness]".to_string(),
+            cache_control: None,
+        }),
     }
 }
 
@@ -1039,6 +1043,7 @@ fn map_tool_result_content_item(
             })
         }
         FunctionCallOutputContentItem::InputVideo { .. } => None,
+        FunctionCallOutputContentItem::InputAudio { .. } => None,
         FunctionCallOutputContentItem::EncryptedContent { .. } => None,
     }
 }
@@ -1477,7 +1482,9 @@ mod tests {
     fn build_request_uses_expected_zcode_basics() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
-                id: Some(std::convert::identity("user".to_string())),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "hello".to_string(),
@@ -1577,7 +1584,7 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
-                    id: Some(std::convert::identity(
+                    id: Some(codex_protocol::ResponseItemId::from_server(
                         "user".to_string(),
                     )),
                     role: "user".to_string(),
@@ -1693,7 +1700,9 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
-                    id: Some(std::convert::identity("user-1".to_string())),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "user-1".to_string(),
+                    )),
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
                         text: "first request".to_string(),
@@ -1702,7 +1711,9 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
-                    id: Some(std::convert::identity("compact".to_string())),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "compact".to_string(),
+                    )),
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
                         text: crate::compact::SUMMARIZATION_PROMPT.to_string(),
@@ -1754,7 +1765,9 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
-                    id: Some(std::convert::identity("user-1".to_string())),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "user-1".to_string(),
+                    )),
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
                         text: "first request".to_string(),
@@ -1763,7 +1776,9 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
-                    id: Some(std::convert::identity("assistant-1".to_string())),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "assistant-1".to_string(),
+                    )),
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "Summary of Turn 5:\n\nZCODE_WEB_GAME_TURN_5_DONE".to_string(),
@@ -1772,7 +1787,9 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
-                    id: Some(std::convert::identity("compact".to_string())),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "compact".to_string(),
+                    )),
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
                         text: crate::compact::SUMMARIZATION_PROMPT.to_string(),

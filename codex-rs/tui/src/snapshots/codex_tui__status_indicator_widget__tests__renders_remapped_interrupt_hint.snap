@@ -2,4 +2,4 @@
 source: tui/src/status_indicator_widget.rs
 expression: terminal.backend()
 ---
-"Interpreting (0s • f12 to interrupt)                                            "
+"Working (0s • f12 to interrupt)                                                 "

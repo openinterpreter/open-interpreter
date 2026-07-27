@@ -2,6 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use codex_extension_api::ExtensionData;
+use codex_protocol::ResponseItemId;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::items::TurnItem;
 use codex_utils_stream_parser::strip_citations;
@@ -24,43 +25,11 @@ use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_rollout::state_db;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_stream_parser::strip_proposed_plan_blocks;
 use futures::Future;
 use tracing::debug;
 use tracing::instrument;
 use tracing::warn;
-
-const GENERATED_IMAGE_ARTIFACTS_DIR: &str = "generated_images";
-
-/// Returns the host-owned default artifact path for a generated image.
-pub fn image_generation_artifact_path(
-    codex_home: &AbsolutePathBuf,
-    session_id: &str,
-    call_id: &str,
-) -> AbsolutePathBuf {
-    let sanitize = |value: &str| {
-        let mut sanitized: String = value
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                    ch
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        if sanitized.is_empty() {
-            sanitized = "generated_image".to_string();
-        }
-        sanitized
-    };
-
-    codex_home
-        .join(GENERATED_IMAGE_ARTIFACTS_DIR)
-        .join(sanitize(session_id))
-        .join(format!("{}.png", sanitize(call_id)))
-}
 
 fn strip_hidden_assistant_markup(text: &str, plan_mode: bool) -> String {
     let (without_citations, _) = strip_citations(text);
@@ -130,7 +99,7 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
         || {
             completed_item_defers_mailbox_delivery_to_next_turn(
                 item,
-                turn_context.collaboration_mode.mode == ModeKind::Plan,
+                turn_context.mode == ModeKind::Plan,
             )
         },
         |facts| facts.defers_mailbox_delivery_to_next_turn,
@@ -321,7 +290,7 @@ pub(crate) async fn handle_output_item_done(
     previously_active_item: Option<TurnItem>,
 ) -> Result<OutputItemResult> {
     let mut output = OutputItemResult::default();
-    let plan_mode = ctx.turn_context.collaboration_mode.mode == ModeKind::Plan;
+    let plan_mode = ctx.turn_context.mode == ModeKind::Plan;
 
     match ToolRouter::build_tool_call(item.clone()) {
         // The model emitted a tool call; log it, persist the item immediately, and queue the tool execution.
@@ -344,18 +313,6 @@ pub(crate) async fn handle_output_item_done(
 
             record_completed_response_item(ctx.sess.as_ref(), ctx.turn_context.as_ref(), &item)
                 .await;
-
-            if ctx
-                .turn_context
-                .config
-                .harness
-                .as_deref()
-                .is_some_and(|harness| harness == "zcode")
-                && call.tool_name.namespace.is_none()
-                && call.tool_name.name == "ExitPlanMode"
-            {
-                return Ok(output);
-            }
 
             let cancellation_token = ctx.cancellation_token.child_token();
             let tool_future: InFlightFuture<'static> = Box::pin(
@@ -437,7 +394,30 @@ pub(crate) async fn handle_non_tool_response_item(
     item: &ResponseItem,
     plan_mode: bool,
 ) -> Option<TurnItem> {
-    debug!(?item, "Output item");
+    let item_type = match item {
+        ResponseItem::AdditionalTools { .. } => "additional_tools",
+        ResponseItem::Message { .. } => "message",
+        ResponseItem::AgentMessage { .. } => "agent_message",
+        ResponseItem::Reasoning { .. } => "reasoning",
+        ResponseItem::LocalShellCall { .. } => "local_shell_call",
+        ResponseItem::FunctionCall { .. } => "function_call",
+        ResponseItem::ToolSearchCall { .. } => "tool_search_call",
+        ResponseItem::FunctionCallOutput { .. } => "function_call_output",
+        ResponseItem::CustomToolCall { .. } => "custom_tool_call",
+        ResponseItem::CustomToolCallOutput { .. } => "custom_tool_call_output",
+        ResponseItem::ToolSearchOutput { .. } => "tool_search_output",
+        ResponseItem::WebSearchCall { .. } => "web_search_call",
+        ResponseItem::ImageGenerationCall { .. } => "image_generation_call",
+        ResponseItem::Compaction { .. } => "compaction",
+        ResponseItem::CompactionTrigger { .. } => "compaction_trigger",
+        ResponseItem::ContextCompaction { .. } => "context_compaction",
+        ResponseItem::Other => "other",
+    };
+    debug!(
+        item_type,
+        item_id = item.id().map(ResponseItemId::as_str),
+        "Output item"
+    );
 
     match item {
         ResponseItem::Message { .. }

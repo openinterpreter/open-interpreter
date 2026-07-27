@@ -54,6 +54,7 @@
         "SUBAGENTS",
         "HOOKS",
         "COMMANDS",
+        "MEMORY",
         "SESSIONS"
       ],
       "type": "string"
@@ -100,6 +101,12 @@
           "default": [],
           "items": {
             "$ref": "#/definitions/McpServerMigration"
+          },
+          "type": "array"
+        },
+        "memory": {
+          "items": {
+            "type": "string"
           },
           "type": "array"
         },
@@ -203,8 +210,15 @@
       },
       "type": "array"
     },
+    "migrationSource": {
+      "description": "Migration-source selector used to produce the migration items. Pass the same value to detection and import; missing or unrecognized values use the default source.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "source": {
-      "description": "Source product that produced the migration items. Missing means unspecified.",
+      "description": "Optional identifier for the product that initiated the import.",
       "type": [
         "string",
         "null"

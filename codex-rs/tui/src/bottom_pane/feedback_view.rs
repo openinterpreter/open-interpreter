@@ -1,3 +1,5 @@
+use codex_feedback::CODEX_APP_DIRECTORY_CACHE_ATTACHMENT_FILENAME;
+use codex_feedback::CODEX_APPS_TOOLS_CACHE_ATTACHMENT_FILENAME;
 use codex_feedback::DOCTOR_REPORT_ATTACHMENT_FILENAME;
 use codex_feedback::FEEDBACK_DIAGNOSTICS_ATTACHMENT_FILENAME;
 use codex_feedback::FeedbackDiagnostics;
@@ -316,29 +318,12 @@ pub(crate) fn feedback_success_cell(
     thread_id: &str,
     feedback_audience: FeedbackAudience,
 ) -> history_cell::WebHyperlinkHistoryCell {
-    feedback_success_cell_for_product(
-        category,
-        include_logs,
-        thread_id,
-        feedback_audience,
-        codex_product_info::Product::current(),
-    )
-}
-
-fn feedback_success_cell_for_product(
-    category: FeedbackCategory,
-    include_logs: bool,
-    thread_id: &str,
-    feedback_audience: FeedbackAudience,
-    product: codex_product_info::Product,
-) -> history_cell::WebHyperlinkHistoryCell {
     let prefix = if include_logs {
         "• Feedback uploaded."
     } else {
         "• Feedback recorded (no logs)."
     };
-    let issue_url =
-        issue_url_for_category_and_product(category, thread_id, feedback_audience, product);
+    let issue_url = issue_url_for_category(category, thread_id, feedback_audience);
     let mut lines = vec![Line::from(match issue_url.as_ref() {
         Some(_) if feedback_audience == FeedbackAudience::OpenAiEmployee => {
             format!("{prefix} Please report this in #codex-feedback:")
@@ -381,25 +366,10 @@ fn feedback_success_cell_for_product(
     history_cell::WebHyperlinkHistoryCell::new(lines)
 }
 
-#[cfg(test)]
 fn issue_url_for_category(
     category: FeedbackCategory,
     thread_id: &str,
     feedback_audience: FeedbackAudience,
-) -> Option<String> {
-    issue_url_for_category_and_product(
-        category,
-        thread_id,
-        feedback_audience,
-        codex_product_info::Product::current(),
-    )
-}
-
-fn issue_url_for_category_and_product(
-    category: FeedbackCategory,
-    thread_id: &str,
-    feedback_audience: FeedbackAudience,
-    product: codex_product_info::Product,
 ) -> Option<String> {
     // Only certain categories provide a follow-up link. We intentionally keep
     // the external GitHub behavior identical while routing internal users to
@@ -411,7 +381,7 @@ fn issue_url_for_category_and_product(
         | FeedbackCategory::Other => Some(match feedback_audience {
             FeedbackAudience::OpenAiEmployee => slack_feedback_url(thread_id),
             FeedbackAudience::External => {
-                let issue_url = match product {
+                let issue_url = match codex_product_info::Product::current() {
                     codex_product_info::Product::Codex => CODEX_CLI_BUG_ISSUE_URL,
                     codex_product_info::Product::OpenInterpreter => {
                         OPEN_INTERPRETER_CLI_BUG_ISSUE_URL
@@ -548,6 +518,16 @@ pub(crate) fn feedback_upload_consent_params(
         Line::from(vec![
             "  • ".into(),
             DOCTOR_REPORT_ATTACHMENT_FILENAME.into(),
+        ])
+        .into(),
+        Line::from(vec![
+            "  • ".into(),
+            format!("{CODEX_APPS_TOOLS_CACHE_ATTACHMENT_FILENAME} (if available)").into(),
+        ])
+        .into(),
+        Line::from(vec![
+            "  • ".into(),
+            format!("{CODEX_APP_DIRECTORY_CACHE_ATTACHMENT_FILENAME} (if available)").into(),
         ])
         .into(),
     ];
@@ -893,44 +873,26 @@ mod tests {
             )
             .is_none()
         );
-        let bug_url_non_employee = issue_url_for_category_and_product(
-            FeedbackCategory::Bug,
-            "t",
-            FeedbackAudience::External,
-            codex_product_info::Product::OpenInterpreter,
-        );
-        let expected_external_url = "https://github.com/openinterpreter/openinterpreter/issues/new?template=3-cli.yml&steps=Uploaded%20thread:%20t";
+        let bug_url_non_employee =
+            issue_url_for_category(FeedbackCategory::Bug, "t", FeedbackAudience::External);
+        let expected_external_url = "https://github.com/openai/codex/issues/new?template=3-cli.yml&steps=Uploaded%20thread:%20t";
         assert_eq!(bug_url_non_employee.as_deref(), Some(expected_external_url));
-
-        let codex_bug_url = issue_url_for_category_and_product(
-            FeedbackCategory::Bug,
-            "t",
-            FeedbackAudience::External,
-            codex_product_info::Product::Codex,
-        );
-        assert_eq!(
-            codex_bug_url.as_deref(),
-            Some(
-                "https://github.com/openai/codex/issues/new?template=3-cli.yml&steps=Uploaded%20thread:%20t"
-            )
-        );
     }
 
     #[test]
     fn feedback_success_cell_matches_external_bug_copy() {
         let rendered = render_cell(
-            &feedback_success_cell_for_product(
+            &feedback_success_cell(
                 FeedbackCategory::Bug,
                 /*include_logs*/ true,
                 "thread-1",
                 FeedbackAudience::External,
-                codex_product_info::Product::OpenInterpreter,
             ),
             /*width*/ 120,
         );
         assert_eq!(
             rendered,
-            "• Feedback uploaded. Please open an issue using the following URL:\n\n  https://github.com/openinterpreter/openinterpreter/issues/new?template=3-cli.yml&steps=Uploaded%20thread:%20thread-1\n\n  Or mention your thread ID thread-1 in an existing issue."
+            "• Feedback uploaded. Please open an issue using the following URL:\n\n  https://github.com/openai/codex/issues/new?template=3-cli.yml&steps=Uploaded%20thread:%20thread-1\n\n  Or mention your thread ID thread-1 in an existing issue."
         );
     }
 

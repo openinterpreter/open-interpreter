@@ -4,6 +4,7 @@ use crate::error::ApiError;
 use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
 use codex_client::StreamResponse;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
@@ -283,7 +284,7 @@ async fn process_anthropic_event(
                     if tx_event
                         .send(Ok(ResponseEvent::OutputItemAdded(
                             ResponseItem::Reasoning {
-                                id: Some(std::convert::identity(format!(
+                                id: Some(ResponseItemId::from_server(format!(
                                     "anthropic-thinking-{index}"
                                 ))),
                                 summary: vec![],
@@ -390,7 +391,7 @@ async fn process_anthropic_event(
                     text,
                     signature,
                 } => ResponseItem::Reasoning {
-                    id: Some(std::convert::identity(id)),
+                    id: Some(ResponseItemId::from_server(id)),
                     summary: vec![],
                     content: Some(vec![ReasoningItemContent::ReasoningText { text }]),
                     encrypted_content: signature,
@@ -505,6 +506,7 @@ fn build_token_usage(state: &AnthropicStreamState) -> Option<TokenUsage> {
     Some(TokenUsage {
         input_tokens: state.input_tokens,
         cached_input_tokens: state.cache_read_input_tokens,
+        cache_write_input_tokens: state.cache_creation_input_tokens,
         output_tokens: state.output_tokens,
         reasoning_output_tokens: 0,
         total_tokens,
@@ -626,6 +628,7 @@ mod tests {
                     &Some(TokenUsage {
                         input_tokens: 12,
                         cached_input_tokens: 0,
+                        cache_write_input_tokens: 0,
                         output_tokens: 3,
                         reasoning_output_tokens: 0,
                         total_tokens: 15,
@@ -681,6 +684,7 @@ mod tests {
                     &Some(TokenUsage {
                         input_tokens: 20,
                         cached_input_tokens: 0,
+                        cache_write_input_tokens: 0,
                         output_tokens: 7,
                         reasoning_output_tokens: 0,
                         total_tokens: 27,
@@ -913,6 +917,7 @@ data: {"type":"message_stop"   }
                 token_usage: Some(TokenUsage {
                     input_tokens: 1,
                     cached_input_tokens: 4914,
+                    cache_write_input_tokens: 287,
                     output_tokens: 63,
                     reasoning_output_tokens: 0,
                     total_tokens: 5265,

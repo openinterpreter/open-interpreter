@@ -5,6 +5,7 @@ use codex_api::ResponseEvent;
 use codex_api::ResponseStream;
 use codex_api::SseTelemetry;
 use codex_client::ByteStream;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
@@ -234,7 +235,9 @@ async fn process_chat_sse(
                         if tx_event
                             .send(Ok(ResponseEvent::OutputItemAdded(
                                 ResponseItem::Reasoning {
-                                    id: Some(state.reasoning_item_id.clone()),
+                                    id: Some(ResponseItemId::from_server(
+                                        state.reasoning_item_id.clone(),
+                                    )),
                                     summary: vec![],
                                     content: Some(vec![ReasoningItemContent::ReasoningText {
                                         text: String::new(),
@@ -269,7 +272,9 @@ async fn process_chat_sse(
                             state.assistant_item_started = true;
                             if tx_event
                                 .send(Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message {
-                                    id: Some(state.message_item_id.clone()),
+                                    id: Some(ResponseItemId::from_server(
+                                        state.message_item_id.clone(),
+                                    )),
                                     role: "assistant".to_string(),
                                     content: vec![ContentItem::OutputText {
                                         text: String::new(),
@@ -403,6 +408,7 @@ async fn finalize_and_complete(
             token_usage: state.usage.map(|usage| TokenUsage {
                 input_tokens: usage.prompt_tokens.unwrap_or(0),
                 cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
                 output_tokens: usage.completion_tokens.unwrap_or(0),
                 reasoning_output_tokens: 0,
                 total_tokens: usage.total_tokens.unwrap_or_else(|| {
@@ -425,7 +431,7 @@ async fn finalize_assistant_message(
     }
     tx_event
         .send(Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
-            id: Some(state.message_item_id.clone()),
+            id: Some(ResponseItemId::from_server(state.message_item_id.clone())),
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: state.assistant_text.clone(),
@@ -449,7 +455,7 @@ async fn finalize_reasoning(
 
     tx_event
         .send(Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
-            id: Some(state.reasoning_item_id.clone()),
+            id: Some(ResponseItemId::from_server(state.reasoning_item_id.clone())),
             summary: vec![],
             content: Some(vec![ReasoningItemContent::ReasoningText {
                 text: std::mem::take(&mut state.reasoning_content),

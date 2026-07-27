@@ -113,6 +113,7 @@ pub(super) fn snapshot(percent: f64) -> RateLimitSnapshot {
         secondary: None,
         credits: None,
         individual_limit: None,
+        spend_control_reached: None,
         plan_type: None,
         rate_limit_reached_type: None,
     }
@@ -153,6 +154,7 @@ pub(super) async fn make_chatwidget_manual(
         model_override,
         /*has_chatgpt_account*/ false,
         /*has_codex_backend_auth*/ false,
+        FrameRequester::test_dummy(),
     )
     .await
 }
@@ -161,6 +163,7 @@ pub(super) async fn make_chatwidget_manual_with_auth(
     model_override: Option<&str>,
     has_chatgpt_account: bool,
     has_codex_backend_auth: bool,
+    frame_requester: FrameRequester,
 ) -> (
     ChatWidget,
     tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
@@ -180,7 +183,7 @@ pub(super) async fn make_chatwidget_manual_with_auth(
     let model_catalog = test_model_catalog(&cfg);
     let common = ChatWidgetInit {
         config: cfg,
-        frame_requester: FrameRequester::test_dummy(),
+        frame_requester,
         app_event_tx,
         workspace_command_runner: None,
         initial_user_message: None,
@@ -212,6 +215,10 @@ pub(super) async fn make_chatwidget_manual_with_auth(
     (widget, rx, op_rx)
 }
 
+pub(crate) fn set_active_cell(chat: &mut ChatWidget, cell: Box<dyn HistoryCell>) {
+    chat.transcript.active_cell = Some(cell);
+}
+
 // ChatWidget may emit other `Op`s (e.g. history/logging updates) on the same channel; this helper
 // filters until we see a submission op.
 pub(super) fn next_submit_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) -> Op {
@@ -228,7 +235,7 @@ pub(super) fn next_submit_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op
 pub(super) fn next_interrupt_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) {
     loop {
         match op_rx.try_recv() {
-            Ok(Op::Interrupt { .. }) => return,
+            Ok(Op::Interrupt) => return,
             Ok(_) => continue,
             Err(TryRecvError::Empty) => panic!("expected interrupt op but queue was empty"),
             Err(TryRecvError::Disconnected) => panic!("expected interrupt op but channel closed"),
@@ -276,7 +283,6 @@ fn test_model_info(slug: &str, priority: i32, supports_fast_mode: bool) -> Model
         "availability_nux": null,
         "upgrade": null,
         "base_instructions": "base instructions",
-        "supports_reasoning_summaries": false,
         "default_reasoning_summary": "none",
         "support_verbosity": false,
         "default_verbosity": null,
@@ -375,6 +381,7 @@ fn token_usage_breakdown(usage: TokenUsage) -> codex_app_server_protocol::TokenU
         total_tokens: usage.total_tokens,
         input_tokens: usage.input_tokens,
         cached_input_tokens: usage.cached_input_tokens,
+        cache_write_input_tokens: 0,
         output_tokens: usage.output_tokens,
         reasoning_output_tokens: usage.reasoning_output_tokens,
     }
@@ -1341,6 +1348,7 @@ pub(super) fn plugins_test_summary(
         enabled,
         install_policy,
         install_policy_source: None,
+        must_show_installation_interstitial: None,
         auth_policy: PluginAuthPolicy::OnInstall,
         availability: PluginAvailability::Available,
         interface: Some(plugins_test_interface(
@@ -1371,6 +1379,7 @@ pub(super) fn plugins_test_remote_summary(
         enabled: true,
         install_policy: PluginInstallPolicy::Available,
         install_policy_source: None,
+        must_show_installation_interstitial: None,
         auth_policy: PluginAuthPolicy::OnInstall,
         availability: PluginAvailability::Available,
         interface: Some(plugins_test_interface(
@@ -1504,6 +1513,7 @@ pub(super) fn plugins_test_detail(
             .collect(),
         app_templates: Vec::new(),
         mcp_servers: mcp_servers.iter().map(|name| (*name).to_string()).collect(),
+        scheduled_tasks: None,
     }
 }
 
@@ -1523,6 +1533,7 @@ pub(super) fn plugins_test_remote_detail(
         apps: Vec::new(),
         app_templates: Vec::new(),
         mcp_servers: Vec::new(),
+        scheduled_tasks: None,
     }
 }
 
@@ -1683,6 +1694,7 @@ fn hook_event_label(event_name: codex_app_server_protocol::HookEventName) -> &'s
         codex_app_server_protocol::HookEventName::PreCompact => "PreCompact",
         codex_app_server_protocol::HookEventName::PostCompact => "PostCompact",
         codex_app_server_protocol::HookEventName::SessionStart => "SessionStart",
+        codex_app_server_protocol::HookEventName::SessionEnd => "SessionEnd",
         codex_app_server_protocol::HookEventName::UserPromptSubmit => "UserPromptSubmit",
         codex_app_server_protocol::HookEventName::SubagentStart => "SubagentStart",
         codex_app_server_protocol::HookEventName::SubagentStop => "SubagentStop",

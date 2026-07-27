@@ -6,7 +6,6 @@ use std::path::PathBuf;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::canonicalize_preserving_symlinks;
-use codex_utils_path_uri::PathUri;
 use globset::GlobBuilder;
 use globset::GlobMatcher;
 use schemars::JsonSchema;
@@ -36,11 +35,6 @@ pub fn is_protected_metadata_name(name: &OsStr) -> bool {
     PROTECTED_METADATA_PATH_NAMES
         .iter()
         .any(|metadata_name| name == OsStr::new(metadata_name))
-}
-
-pub fn is_protected_metadata_directory_name(name: &OsStr) -> bool {
-    name == OsStr::new(PROTECTED_METADATA_AGENTS_PATH_NAME)
-        || name == OsStr::new(PROTECTED_METADATA_CODEX_PATH_NAME)
 }
 
 /// Returns the protected workspace metadata name when an agent write to `path`
@@ -143,7 +137,7 @@ pub enum FileSystemSpecialPath {
     ProjectRoots {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
-        subpath: Option<PathBuf>,
+        subpath: Option<String>,
     },
     Tmpdir,
     SlashTmp,
@@ -159,16 +153,16 @@ pub enum FileSystemSpecialPath {
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
-        subpath: Option<PathBuf>,
+        subpath: Option<String>,
     },
 }
 
 impl FileSystemSpecialPath {
-    pub fn project_roots(subpath: Option<PathBuf>) -> Self {
+    pub fn project_roots(subpath: Option<String>) -> Self {
         Self::ProjectRoots { subpath }
     }
 
-    pub fn unknown(path: impl Into<String>, subpath: Option<PathBuf>) -> Self {
+    pub fn unknown(path: impl Into<String>, subpath: Option<String>) -> Self {
         Self::Unknown {
             path: path.into(),
             subpath,
@@ -177,29 +171,9 @@ impl FileSystemSpecialPath {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
-pub struct FileSystemSandboxEntry<PathType = AbsolutePathBuf> {
-    pub path: FileSystemPath<PathType>,
+pub struct FileSystemSandboxEntry {
+    pub path: FileSystemPath,
     pub access: FileSystemAccessMode,
-}
-
-impl From<FileSystemSandboxEntry<AbsolutePathBuf>> for FileSystemSandboxEntry<PathUri> {
-    fn from(value: FileSystemSandboxEntry<AbsolutePathBuf>) -> Self {
-        FileSystemSandboxEntry {
-            path: value.path.into(),
-            access: value.access,
-        }
-    }
-}
-
-impl TryFrom<FileSystemSandboxEntry<PathUri>> for FileSystemSandboxEntry<AbsolutePathBuf> {
-    type Error = io::Error;
-
-    fn try_from(value: FileSystemSandboxEntry<PathUri>) -> Result<Self, Self::Error> {
-        Ok(FileSystemSandboxEntry {
-            path: value.path.try_into()?,
-            access: value.access,
-        })
-    }
 }
 
 #[derive(
@@ -359,9 +333,10 @@ enum InvalidDenyReadGlobBehavior {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type")]
-pub enum FileSystemPath<PathType = AbsolutePathBuf> {
+pub enum FileSystemPath {
     Path {
-        path: PathType,
+        // TODO(anp): Use PathUri once permission paths no longer require native-path rollout serialization.
+        path: AbsolutePathBuf,
     },
     /// A git-style glob pattern. Pattern entries currently support
     /// FileSystemAccessMode::Deny only.
@@ -371,32 +346,6 @@ pub enum FileSystemPath<PathType = AbsolutePathBuf> {
     Special {
         value: FileSystemSpecialPath,
     },
-}
-
-impl From<FileSystemPath<AbsolutePathBuf>> for FileSystemPath<PathUri> {
-    fn from(value: FileSystemPath<AbsolutePathBuf>) -> Self {
-        match value {
-            FileSystemPath::Path { path } => FileSystemPath::Path {
-                path: PathUri::from_abs_path(&path),
-            },
-            FileSystemPath::GlobPattern { pattern } => FileSystemPath::GlobPattern { pattern },
-            FileSystemPath::Special { value } => FileSystemPath::Special { value },
-        }
-    }
-}
-
-impl TryFrom<FileSystemPath<PathUri>> for FileSystemPath<AbsolutePathBuf> {
-    type Error = io::Error;
-
-    fn try_from(value: FileSystemPath<PathUri>) -> Result<Self, Self::Error> {
-        Ok(match value {
-            FileSystemPath::Path { path } => FileSystemPath::Path {
-                path: path.to_abs_path()?,
-            },
-            FileSystemPath::GlobPattern { pattern } => FileSystemPath::GlobPattern { pattern },
-            FileSystemPath::Special { value } => FileSystemPath::Special { value },
-        })
-    }
 }
 
 const PROJECT_ROOTS_GLOB_PATTERN_PREFIX: &str = "codex-project-roots://";
@@ -1712,7 +1661,7 @@ fn legacy_runtime_file_system_policy_for_cwd(
 
 fn append_default_read_only_project_root_subpath_if_no_explicit_rule(
     entries: &mut Vec<FileSystemSandboxEntry>,
-    subpath: impl Into<PathBuf>,
+    subpath: impl Into<String>,
 ) {
     append_default_read_only_entry_if_no_explicit_rule(
         entries,

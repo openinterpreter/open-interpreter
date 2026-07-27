@@ -56,7 +56,6 @@ async fn thread_name_updated_broadcasts_for_loaded_threads() -> Result<()> {
         let resume_resp: JSONRPCResponse = read_response_for_id(&mut ws1, /*id*/ 10).await?;
         let resume: ThreadResumeResponse = to_response::<ThreadResumeResponse>(resume_resp)?;
         assert_eq!(resume.thread.id, conversation_id);
-        read_notification_for_method(&mut ws1, "thread/goal/cleared").await?;
 
         let renamed = "Loaded rename";
         send_request(
