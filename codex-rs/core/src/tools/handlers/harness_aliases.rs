@@ -10,6 +10,8 @@ use std::time::Instant;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_protocol::ThreadId;
+use codex_protocol::items::FileChangeItem;
+use codex_protocol::items::TurnItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
@@ -17,6 +19,8 @@ use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::FileChange;
+use codex_protocol::protocol::PatchApplyStatus;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -1751,6 +1755,71 @@ struct WriteArgs {
     mode: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+enum HarnessFileChangeStage<'a> {
+    Started,
+    Completed,
+    Failed(&'a str),
+}
+
+fn harness_file_change(
+    path: &Path,
+    previous_content: Option<&str>,
+    updated_content: &str,
+) -> HashMap<PathBuf, FileChange> {
+    let change = match previous_content {
+        Some(previous_content) => FileChange::Update {
+            unified_diff: similar::TextDiff::from_lines(previous_content, updated_content)
+                .unified_diff()
+                .context_radius(3)
+                .to_string(),
+            move_path: None,
+        },
+        None => FileChange::Add {
+            content: updated_content.to_string(),
+        },
+    };
+    HashMap::from([(path.to_path_buf(), change)])
+}
+
+async fn emit_harness_file_change(
+    invocation: &ToolInvocation,
+    changes: &HashMap<PathBuf, FileChange>,
+    stage: HarnessFileChangeStage<'_>,
+) {
+    let (status, auto_approved, stderr) = match stage {
+        HarnessFileChangeStage::Started => (None, Some(true), None),
+        HarnessFileChangeStage::Completed => (Some(PatchApplyStatus::Completed), None, None),
+        HarnessFileChangeStage::Failed(message) => (
+            Some(PatchApplyStatus::Failed),
+            None,
+            Some(message.to_string()),
+        ),
+    };
+    let item = TurnItem::FileChange(FileChangeItem {
+        id: invocation.call_id.clone(),
+        changes: changes.clone(),
+        status,
+        auto_approved,
+        stdout: None,
+        stderr,
+    });
+    match stage {
+        HarnessFileChangeStage::Started => {
+            invocation
+                .session
+                .emit_turn_item_started(&invocation.turn, &item)
+                .await;
+        }
+        HarnessFileChangeStage::Completed | HarnessFileChangeStage::Failed(_) => {
+            invocation
+                .session
+                .emit_turn_item_completed(&invocation.turn, item)
+                .await;
+        }
+    }
+}
+
 async fn handle_write(
     invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
@@ -1761,21 +1830,43 @@ async fn handle_write(
         std::fs::create_dir_all(parent)
             .map_err(|err| FunctionCallError::RespondToModel(format!("Write failed: {err}")))?;
     }
+    let previous_content = std::fs::read(&path)
+        .ok()
+        .map(|content| String::from_utf8_lossy(&content).into_owned());
+    let updated_content = if args.mode.as_deref() == Some("append") {
+        format!(
+            "{}{}",
+            previous_content.as_deref().unwrap_or_default(),
+            args.content
+        )
+    } else {
+        args.content.clone()
+    };
+    let changes = harness_file_change(&path, previous_content.as_deref(), &updated_content);
+    emit_harness_file_change(&invocation, &changes, HarnessFileChangeStage::Started).await;
     let bytes_written = args.content.len();
-    match args.mode.as_deref() {
+    let write_result = match args.mode.as_deref() {
         Some("append") => {
             use std::io::Write as _;
-            let mut file = std::fs::OpenOptions::new()
+            std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path)
-                .map_err(|err| FunctionCallError::RespondToModel(format!("Write failed: {err}")))?;
-            file.write_all(args.content.as_bytes())
-                .map_err(|err| FunctionCallError::RespondToModel(format!("Write failed: {err}")))?;
+                .and_then(|mut file| file.write_all(args.content.as_bytes()))
         }
-        _ => std::fs::write(&path, &args.content)
-            .map_err(|err| FunctionCallError::RespondToModel(format!("Write failed: {err}")))?,
+        _ => std::fs::write(&path, &args.content),
+    };
+    if let Err(err) = write_result {
+        let message = format!("Write failed: {err}");
+        emit_harness_file_change(
+            &invocation,
+            &changes,
+            HarnessFileChangeStage::Failed(&message),
+        )
+        .await;
+        return Err(FunctionCallError::RespondToModel(message));
     }
+    emit_harness_file_change(&invocation, &changes, HarnessFileChangeStage::Completed).await;
     let message = if is_zcode(&invocation) {
         record_zcode_current_file(&invocation, &path);
         record_zcode_current_file_hash(
@@ -1874,8 +1965,19 @@ async fn handle_edit(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
             updated.replacen(&replacement.old_text, &replacement.new_text, 1)
         };
     }
-    std::fs::write(&path, &updated)
-        .map_err(|err| FunctionCallError::RespondToModel(format!("Edit failed: {err}")))?;
+    let changes = harness_file_change(&path, Some(&text), &updated);
+    emit_harness_file_change(&invocation, &changes, HarnessFileChangeStage::Started).await;
+    if let Err(err) = std::fs::write(&path, &updated) {
+        let message = format!("Edit failed: {err}");
+        emit_harness_file_change(
+            &invocation,
+            &changes,
+            HarnessFileChangeStage::Failed(&message),
+        )
+        .await;
+        return Err(FunctionCallError::RespondToModel(message));
+    }
+    emit_harness_file_change(&invocation, &changes, HarnessFileChangeStage::Completed).await;
     record_claude_read_file(&path);
     if is_zcode(&invocation) {
         record_zcode_current_file(&invocation, &path);
@@ -4051,7 +4153,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::environment_selection::TurnEnvironmentState;
-    use crate::session::tests::make_session_and_context;
+    use crate::session::tests::make_session_and_context_with_rx;
     use crate::session::turn_context::TurnEnvironment;
     use crate::tools::context::ToolCallSource;
     use crate::tools::context::ToolPayload;
@@ -4072,7 +4174,22 @@ mod tests {
         args: serde_json::Value,
         harness: Option<&str>,
     ) -> ToolInvocation {
-        let (session, mut turn) = make_session_and_context().await;
+        invocation_with_harness_and_events(workspace, tool_name, args, harness)
+            .await
+            .0
+    }
+
+    async fn invocation_with_harness_and_events(
+        workspace: &TempDir,
+        tool_name: &str,
+        args: serde_json::Value,
+        harness: Option<&str>,
+    ) -> (
+        ToolInvocation,
+        async_channel::Receiver<codex_protocol::protocol::Event>,
+    ) {
+        let (session, turn, events) = make_session_and_context_with_rx().await;
+        let mut turn = Arc::into_inner(turn).expect("sole turn context owner");
         if let Some(harness) = harness {
             Arc::make_mut(&mut turn.config).harness = Some(harness.to_string());
         }
@@ -4109,19 +4226,24 @@ mod tests {
             NetworkSandboxPolicy::Restricted,
         );
         let turn = Arc::new(turn);
-        ToolInvocation {
-            session: session.into(),
-            turn: Arc::clone(&turn),
-            step_context: crate::session::step_context::StepContext::for_test(Arc::clone(&turn)),
-            cancellation_token: CancellationToken::new(),
-            tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
-            call_id: "call-harness-alias".to_string(),
-            tool_name: codex_tools::ToolName::plain(tool_name),
-            source: ToolCallSource::Direct,
-            payload: ToolPayload::Function {
-                arguments: args.to_string(),
+        (
+            ToolInvocation {
+                session,
+                turn: Arc::clone(&turn),
+                step_context: crate::session::step_context::StepContext::for_test(Arc::clone(
+                    &turn,
+                )),
+                cancellation_token: CancellationToken::new(),
+                tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
+                call_id: "call-harness-alias".to_string(),
+                tool_name: codex_tools::ToolName::plain(tool_name),
+                source: ToolCallSource::Direct,
+                payload: ToolPayload::Function {
+                    arguments: args.to_string(),
+                },
             },
-        }
+            events,
+        )
     }
 
     async fn handle_text(
@@ -4189,6 +4311,109 @@ mod tests {
             "assert(true);\n"
         );
         assert_eq!(output, "Wrote 14 bytes to tests/game-logic.test.js");
+    }
+
+    #[tokio::test]
+    async fn write_alias_emits_file_change_events() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let path = workspace.path().join("created.txt");
+        let (invocation, events) = invocation_with_harness_and_events(
+            &workspace,
+            "Write",
+            json!({ "path": "created.txt", "content": "created\n" }),
+            /*harness*/ None,
+        )
+        .await;
+
+        HarnessAliasHandler::Write
+            .handle(invocation)
+            .await
+            .expect("write should succeed");
+
+        let started = events.recv().await.expect("file change started event");
+        let completed = events.recv().await.expect("file change completed event");
+        assert!(matches!(
+            started.msg,
+            EventMsg::ItemStarted(event)
+                if matches!(
+                    event.item,
+                    TurnItem::FileChange(FileChangeItem {
+                        ref changes,
+                        status: None,
+                        ..
+                    }) if changes == &HashMap::from([(
+                        path.clone(),
+                        FileChange::Add {
+                            content: "created\n".to_string(),
+                        },
+                    )])
+                )
+        ));
+        assert!(matches!(
+            completed.msg,
+            EventMsg::ItemCompleted(event)
+                if matches!(
+                    event.item,
+                    TurnItem::FileChange(FileChangeItem {
+                        status: Some(PatchApplyStatus::Completed),
+                        ..
+                    })
+                )
+        ));
+    }
+
+    #[tokio::test]
+    async fn edit_alias_emits_file_change_events() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let path = workspace.path().join("existing.txt");
+        std::fs::write(&path, "before\n").expect("seed file");
+        let (invocation, events) = invocation_with_harness_and_events(
+            &workspace,
+            "Edit",
+            json!({
+                "path": "existing.txt",
+                "old_string": "before",
+                "new_string": "after"
+            }),
+            /*harness*/ None,
+        )
+        .await;
+
+        HarnessAliasHandler::Edit
+            .handle(invocation)
+            .await
+            .expect("edit should succeed");
+
+        let started = events.recv().await.expect("file change started event");
+        let completed = events.recv().await.expect("file change completed event");
+        assert!(matches!(
+            started.msg,
+            EventMsg::ItemStarted(event)
+                if matches!(
+                    event.item,
+                    TurnItem::FileChange(FileChangeItem {
+                        ref changes,
+                        status: None,
+                        ..
+                    }) if matches!(
+                        changes.get(&path),
+                        Some(FileChange::Update { unified_diff, move_path: None })
+                            if unified_diff.contains("-before")
+                                && unified_diff.contains("+after")
+                    )
+                )
+        ));
+        assert!(matches!(
+            completed.msg,
+            EventMsg::ItemCompleted(event)
+                if matches!(
+                    event.item,
+                    TurnItem::FileChange(FileChangeItem {
+                        status: Some(PatchApplyStatus::Completed),
+                        ..
+                    })
+                )
+        ));
     }
 
     #[tokio::test]
