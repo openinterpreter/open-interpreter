@@ -3,6 +3,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_core::StartThreadOptions;
 use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_features::Feature;
@@ -12,16 +13,24 @@ use codex_plugin::PluginHookSource;
 use codex_plugin::PluginId;
 use codex_protocol::items::parse_hook_prompt_fragment;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::request_permissions::PermissionGrantScope;
+use codex_protocol::request_permissions::RequestPermissionProfile;
+use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use core_test_support::TestTargetOs;
 use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::hooks::trust_hooks;
 use core_test_support::managed_network_requirements_loader;
@@ -40,9 +49,12 @@ use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_host_windows;
 use core_test_support::skip_if_no_network;
+use core_test_support::skip_if_wine_exec;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::turn_permission_fields;
+use core_test_support::test_target_os;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -164,6 +176,41 @@ else:
     });
 
     fs::write(&script_path, script).context("write stop hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
+fn write_session_end_hook(home: &Path) -> Result<()> {
+    let script_path = home.join("session_end_hook.py");
+    let log_path = home.join("session_end_hook_log.jsonl");
+    let script = format!(
+        r#"import json
+from pathlib import Path
+import sys
+
+payload = json.load(sys.stdin)
+transcript = Path(payload["transcript_path"])
+payload["transcript_exists"] = transcript.exists()
+payload["transcript_text"] = transcript.read_text(encoding="utf-8") if transcript.exists() else ""
+with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload) + "\n")
+print(json.dumps({{"continue": False, "decision": "block", "reason": "ignored"}}))
+"#,
+        log_path = log_path.display(),
+    );
+    let hooks = serde_json::json!({
+        "hooks": {
+            "SessionEnd": [{
+                "matcher": "other",
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("python3 {}", script_path.display()),
+                }]
+            }]
+        }
+    });
+
+    fs::write(&script_path, script).context("write session end hook script")?;
     fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
     Ok(())
 }
@@ -795,6 +842,34 @@ print(json.dumps({{
     Ok(())
 }
 
+fn write_session_start_hooks_with_individual_context_limits(
+    home: &Path,
+    limited_additional_context: &str,
+    expanded_additional_context: &str,
+) -> Result<()> {
+    let mut hook_handlers = Vec::new();
+    for (additional_context, additional_context_limit) in [
+        (limited_additional_context, 1),
+        (expanded_additional_context, 100),
+    ] {
+        hook_handlers.push(serde_json::json!({
+            "type": "command",
+            "command": format!("echo {additional_context}"),
+            "additionalContextLimit": additional_context_limit,
+        }));
+    }
+    let hooks = serde_json::json!({
+        "hooks": {
+            "SessionStart": [{
+                "hooks": hook_handlers,
+            }]
+        }
+    });
+
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
 fn write_compact_session_start_hook_with_context(
     home: &Path,
     additional_context: &str,
@@ -835,6 +910,70 @@ print(json.dumps({{
     });
 
     fs::write(&script_path, script).context("write compact session start hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
+enum DynamicCompactSessionStartHook {
+    IndexedContexts,
+    Stop,
+}
+
+fn write_dynamic_compact_session_start_hook(
+    home: &Path,
+    behavior: DynamicCompactSessionStartHook,
+) -> Result<()> {
+    let script_path = home.join("dynamic_compact_session_start_hook.py");
+    let log_path = home.join("session_start_hook_log.jsonl");
+    let output = match behavior {
+        DynamicCompactSessionStartHook::IndexedContexts => {
+            r#"invocation_index = len(existing) + 1
+print(json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": "SessionStart",
+        "additionalContext": f"compact hook context {invocation_index}",
+    }
+}))"#
+        }
+        DynamicCompactSessionStartHook::Stop => {
+            r#"print(json.dumps({
+    "continue": False,
+    "stopReason": "compact hook stopped continuation",
+}))"#
+        }
+    };
+    let script = format!(
+        r#"import json
+from pathlib import Path
+import sys
+
+payload = json.load(sys.stdin)
+log_path = Path(r"{log_path}")
+existing = []
+if log_path.exists():
+    existing = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+with log_path.open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload) + "\n")
+
+{output}
+"#,
+        log_path = log_path.display(),
+    );
+    let hooks = serde_json::json!({
+        "hooks": {
+            "SessionStart": [{
+                "matcher": "compact",
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("python3 {}", script_path.display()),
+                    "statusMessage": "running compact session start hook",
+                }]
+            }]
+        }
+    });
+
+    fs::write(&script_path, script).context("write dynamic compact session start hook script")?;
     fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
     Ok(())
 }
@@ -1213,6 +1352,99 @@ async fn session_start_hook_sees_materialized_transcript_path() -> Result<()> {
 }
 
 #[tokio::test]
+async fn session_end_flushes_transcript_and_ignores_control_output() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let _response = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "persisted answer"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            write_session_end_hook(home).expect("write session end hook fixture");
+        })
+        .with_config(trust_discovered_hooks);
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("persist this before shutdown").await?;
+    test.codex.shutdown_and_wait().await?;
+
+    let inputs = read_hook_inputs_from_log(
+        test.codex_home_path()
+            .join("session_end_hook_log.jsonl")
+            .as_path(),
+    )?;
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0]["hook_event_name"], "SessionEnd");
+    assert_eq!(inputs[0]["reason"], "other");
+    assert_eq!(inputs[0]["transcript_exists"], true);
+    let transcript = inputs[0]["transcript_text"]
+        .as_str()
+        .expect("session end transcript text");
+    assert!(transcript.contains("persist this before shutdown"));
+    assert!(transcript.contains("persisted answer"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_end_skips_subagents() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            write_session_end_hook(home).expect("write session end hook fixture");
+        })
+        .with_config(trust_discovered_hooks);
+    let test = builder.build(&server).await?;
+    for source in [
+        SubAgentSource::Review,
+        SubAgentSource::ThreadSpawn {
+            parent_thread_id: test.session_configured.thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        },
+    ] {
+        let subagent = test
+            .thread_manager
+            .start_thread_with_options(StartThreadOptions {
+                config: test.config.clone(),
+                allow_provider_model_fallback: false,
+                initial_history: InitialHistory::New,
+                history_mode: None,
+                session_source: Some(SessionSource::SubAgent(source)),
+                thread_source: None,
+                dynamic_tools: Vec::new(),
+                metrics_service_name: None,
+                parent_trace: None,
+                environments: Vec::new(),
+                thread_extension_init: Default::default(),
+                supports_openai_form_elicitation: false,
+            })
+            .await?;
+
+        subagent.thread.shutdown_and_wait().await?;
+    }
+
+    assert!(
+        !test
+            .codex_home_path()
+            .join("session_end_hook_log.jsonl")
+            .exists(),
+        "subagents must not run SessionEnd hooks"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn session_start_runs_before_user_prompt_submit_on_first_turn() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -1298,6 +1530,59 @@ async fn session_start_hook_spills_large_additional_context() -> Result<()> {
     let path = spilled_hook_output_path(developer_message).context("spill path")?;
     assert_eq!(fs::read_to_string(path)?, additional_context);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_start_hooks_apply_additional_context_limits_individually() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "hello from the reef"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let limited_additional_context = "spill this limited reef context".to_string();
+    let expanded_additional_context = "keep this expanded reef context inline".to_string();
+
+    let test = test_codex()
+        .with_pre_build_hook({
+            let limited_additional_context = limited_additional_context.clone();
+            let expanded_additional_context = expanded_additional_context.clone();
+            move |home| {
+                write_session_start_hooks_with_individual_context_limits(
+                    home,
+                    &limited_additional_context,
+                    &expanded_additional_context,
+                )
+                .expect("failed to write session start hook test fixtures");
+            }
+        })
+        .with_config(trust_discovered_hooks)
+        .build(&server)
+        .await?;
+
+    test.submit_turn("hello").await?;
+
+    let request = response.single_request();
+    let developer_messages = request.message_input_texts("developer");
+    let spilled_message = developer_messages
+        .iter()
+        .find(|message| spilled_hook_output_path(message).is_some())
+        .context("spilled limited session start context")?;
+    let path = spilled_hook_output_path(spilled_message).context("spill path")?;
+    assert_eq!(fs::read_to_string(path)?, limited_additional_context);
+    assert!(
+        developer_messages
+            .iter()
+            .any(|message| message == &expanded_additional_context),
+        "expected the expanded-limit hook context inline, got {developer_messages:?}"
+    );
     Ok(())
 }
 
@@ -1429,6 +1714,213 @@ async fn compact_session_start_hook_records_additional_context_for_next_turn() -
     assert_eq!(
         hook_inputs[0].get("source").and_then(Value::as_str),
         Some("compact")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mid_turn_auto_compact_session_start_hooks_run_before_each_continuation() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let limit = 200_000;
+    let over_limit_tokens = 250_000;
+    let compacted_tokens = 50;
+    let _first_turn = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_function_call("call-1", "test_tool", "{}"),
+            ev_completed_with_tokens("resp-1", over_limit_tokens),
+        ]),
+    )
+    .await;
+    let _first_compact = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-2"),
+            ev_assistant_message("summary-1", "first compact summary"),
+            ev_completed_with_tokens("resp-2", compacted_tokens),
+        ]),
+    )
+    .await;
+    let first_continuation = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-3"),
+            ev_function_call("call-2", "test_tool", "{}"),
+            ev_completed_with_tokens("resp-3", over_limit_tokens),
+        ]),
+    )
+    .await;
+    let _second_compact = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-4"),
+            ev_assistant_message("summary-2", "second compact summary"),
+            ev_completed_with_tokens("resp-4", compacted_tokens),
+        ]),
+    )
+    .await;
+    let second_continuation = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-5"),
+            ev_assistant_message("final", "finished after compaction"),
+            ev_completed_with_tokens("resp-5", compacted_tokens),
+        ]),
+    )
+    .await;
+    let next_turn = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-6"),
+            ev_assistant_message("next", "finished next turn"),
+            ev_completed_with_tokens("resp-6", compacted_tokens),
+        ]),
+    )
+    .await;
+    let model_provider = non_openai_model_provider(&server);
+
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            write_dynamic_compact_session_start_hook(
+                home,
+                DynamicCompactSessionStartHook::IndexedContexts,
+            )
+            .expect("failed to write indexed compact session start hook fixture");
+        })
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            config.model_auto_compact_token_limit = Some(limit);
+            trust_discovered_hooks(config);
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("start auto compact turn").await?;
+
+    let first_continuation_context = first_continuation
+        .single_request()
+        .message_input_texts("developer");
+    assert!(
+        first_continuation_context
+            .iter()
+            .any(|message| message == "compact hook context 1"),
+        "the first compact hook context should reach the immediate continuation request",
+    );
+    assert!(
+        !first_continuation_context
+            .iter()
+            .any(|message| message == "compact hook context 2"),
+        "the second compact hook should not run before its compaction",
+    );
+    assert!(
+        second_continuation
+            .single_request()
+            .message_input_texts("developer")
+            .iter()
+            .any(|message| message == "compact hook context 2"),
+        "the second compact hook context should reach the immediate continuation request",
+    );
+
+    let hook_inputs = read_session_start_hook_inputs(test.codex_home_path())?;
+    assert_eq!(
+        hook_inputs
+            .iter()
+            .filter_map(|input| input.get("source").and_then(Value::as_str))
+            .collect::<Vec<_>>(),
+        vec!["compact", "compact"],
+        "each successful mid-turn compaction should drain exactly one compact hook",
+    );
+
+    test.submit_turn("next user turn").await?;
+
+    assert!(
+        !next_turn
+            .single_request()
+            .message_input_texts("developer")
+            .iter()
+            .any(|message| message == "compact hook context 3"),
+        "the next user turn should not receive a stale compact hook",
+    );
+    let hook_inputs = read_session_start_hook_inputs(test.codex_home_path())?;
+    assert_eq!(
+        hook_inputs
+            .iter()
+            .filter_map(|input| input.get("source").and_then(Value::as_str))
+            .collect::<Vec<_>>(),
+        vec!["compact", "compact"],
+        "the next user turn should not invoke stale compact hooks",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mid_turn_auto_compact_session_start_hook_stop_blocks_continuation() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let limit = 200_000;
+    let over_limit_tokens = 250_000;
+    let compacted_tokens = 50;
+    let first_turn = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_function_call("call-1", "test_tool", "{}"),
+            ev_completed_with_tokens("resp-1", over_limit_tokens),
+        ]),
+    )
+    .await;
+    let compact = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-2"),
+            ev_assistant_message("summary-1", "compact summary"),
+            ev_completed_with_tokens("resp-2", compacted_tokens),
+        ]),
+    )
+    .await;
+    let unexpected_continuation = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-3"),
+            ev_assistant_message("unexpected", "continued after hook stop"),
+            ev_completed_with_tokens("resp-3", compacted_tokens),
+        ]),
+    )
+    .await;
+    let model_provider = non_openai_model_provider(&server);
+
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            write_dynamic_compact_session_start_hook(home, DynamicCompactSessionStartHook::Stop)
+                .expect("failed to write stopping compact session start hook fixture");
+        })
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            config.model_auto_compact_token_limit = Some(limit);
+            trust_discovered_hooks(config);
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("stop after auto compact").await?;
+
+    first_turn.single_request();
+    compact.single_request();
+    assert!(
+        unexpected_continuation.requests().is_empty(),
+        "a compact SessionStart stop should prevent the next sampling request",
+    );
+    let hook_inputs = read_session_start_hook_inputs(test.codex_home_path())?;
+    assert_eq!(
+        hook_inputs
+            .iter()
+            .filter_map(|input| input.get("source").and_then(Value::as_str))
+            .collect::<Vec<_>>(),
+        vec!["compact"],
     );
 
     Ok(())
@@ -2013,6 +2505,151 @@ async fn permission_request_hook_allows_shell_command_without_user_approval() ->
 }
 
 #[tokio::test]
+async fn permission_request_hook_allow_bypasses_strict_auto_review() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "request_permissions currently requires a host-native cwd"
+    );
+
+    let server = start_mock_server().await;
+    let permission_call_id = "strict-hook-permissions";
+    let command_call_id = "strict-hook-shell-command";
+    let marker_name = "strict-hook-shell-command-marker";
+    let command = match test_target_os() {
+        TestTargetOs::Linux | TestTargetOs::MacOs => format!("rm -f {marker_name}"),
+        TestTargetOs::Windows => {
+            format!("Remove-Item -Force -ErrorAction SilentlyContinue {marker_name}")
+        }
+    };
+    let requested_permissions = RequestPermissionProfile {
+        network: Some(NetworkPermissions {
+            enabled: Some(true),
+        }),
+        ..Default::default()
+    };
+    let request_permissions_args = serde_json::json!({
+        "reason": "Enable strict auto review",
+        "permissions": requested_permissions,
+    });
+    let command_args = serde_json::json!({ "command": command });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-strict-hook-1"),
+                ev_function_call(
+                    permission_call_id,
+                    "request_permissions",
+                    &serde_json::to_string(&request_permissions_args)?,
+                ),
+                ev_completed("resp-strict-hook-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-strict-hook-2"),
+                ev_function_call(
+                    command_call_id,
+                    "shell_command",
+                    &serde_json::to_string(&command_args)?,
+                ),
+                ev_completed("resp-strict-hook-2"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-strict-hook-3"),
+                ev_assistant_message("msg-strict-hook", "permission hook allowed it"),
+                ev_completed("resp-strict-hook-3"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            install_allow_permission_request_hook(home)
+                .expect("failed to write permission request hook test fixture");
+        })
+        .with_config(|config| {
+            trust_discovered_hooks(config);
+            config
+                .features
+                .enable(Feature::RequestPermissionsTool)
+                .expect("test config should allow feature update");
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    let marker = test
+        .executor_environment()
+        .selection()
+        .cwd
+        .join(marker_name)?;
+    test.fs()
+        .write_file(&marker, b"seed".to_vec(), /*sandbox*/ None)
+        .await
+        .context("create strict auto-review marker")?;
+    let (sandbox_policy, permission_profile) =
+        turn_permission_fields(PermissionProfile::Disabled, test.config.cwd.as_path());
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "request strict review, then run the shell command".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                approval_policy: Some(AskForApproval::OnRequest),
+                sandbox_policy: Some(sandbox_policy),
+                permission_profile,
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let request = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::RequestPermissions(_))
+    })
+    .await;
+    let EventMsg::RequestPermissions(request) = request else {
+        panic!("expected request permissions event");
+    };
+    assert_eq!(request.call_id, permission_call_id);
+    test.codex
+        .submit(Op::RequestPermissionsResponse {
+            id: permission_call_id.to_string(),
+            response: RequestPermissionsResponse {
+                permissions: request.permissions,
+                scope: PermissionGrantScope::Turn,
+                strict_auto_review: true,
+            },
+        })
+        .await?;
+
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 3);
+    requests[2].function_call_output(command_call_id);
+    assert!(
+        test.fs()
+            .read_file(&marker, /*sandbox*/ None)
+            .await
+            .is_err(),
+        "hook-approved command should remove marker without Guardian review"
+    );
+    assert_single_permission_request_hook_input(
+        test.codex_home_path(),
+        &command,
+        /*description*/ None,
+    )?;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn permission_request_hook_allows_apply_patch_with_write_alias() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -2163,6 +2800,38 @@ async fn permission_request_hook_sees_raw_exec_command_input() -> Result<()> {
 
 #[tokio::test]
 async fn permission_request_hook_allows_network_approval_without_prompt() -> Result<()> {
+    let command = r#"python3 -c "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler()); print('OK:' + opener.open('http://codex-network-test.invalid', timeout=2).read().decode(errors='replace'))""#;
+    run_network_permission_hook_test(
+        "allow",
+        PERMISSION_REQUEST_ALLOW_REASON,
+        "permissionrequest-network-approval",
+        command,
+        /*expected_denial*/ None,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn permission_request_hook_denies_network_approval_with_custom_message() -> Result<()> {
+    let denial = "network access denied by the integration-test hook";
+    let command = r#"python3 -c "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler()); opener.open('http://codex-network-test.invalid', timeout=2).read()""#;
+    run_network_permission_hook_test(
+        "deny",
+        denial,
+        "permissionrequest-network-denied",
+        command,
+        Some(denial),
+    )
+    .await
+}
+
+async fn run_network_permission_hook_test(
+    hook_mode: &'static str,
+    hook_reason: &'static str,
+    call_id: &'static str,
+    command: &'static str,
+    expected_denial: Option<&'static str>,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -2180,21 +2849,19 @@ mode = "limited"
 allow_local_binding = true
 "#,
     )?;
-    let call_id = "permissionrequest-network-approval";
-    let command = r#"python3 -c "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler()); print('OK:' + opener.open('http://codex-network-test.invalid', timeout=2).read().decode(errors='replace'))""#;
     let args = serde_json::json!({ "command": command });
-    let _responses = mount_sse_sequence(
+    let responses = mount_sse_sequence(
         &server,
         vec![
             sse(vec![
-                ev_response_created("resp-1"),
+                ev_response_created("resp-network-hook-1"),
                 ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
-                ev_completed("resp-1"),
+                ev_completed("resp-network-hook-1"),
             ]),
             sse(vec![
-                ev_response_created("resp-2"),
-                ev_assistant_message("msg-1", "permission request hook allowed network access"),
-                ev_completed("resp-2"),
+                ev_response_created("resp-network-hook-2"),
+                ev_assistant_message("msg-network-hook", "done"),
+                ev_completed("resp-network-hook-2"),
             ]),
         ],
     )
@@ -2205,13 +2872,19 @@ allow_local_binding = true
     let permission_profile_for_config = permission_profile.clone();
     let test = test_codex()
         .with_home(Arc::clone(&home))
-        .with_pre_build_hook(|home| {
-            install_allow_permission_request_hook(home)
-                .expect("failed to write permission request hook test fixture");
+        .with_pre_build_hook(move |home| {
+            write_permission_request_hook(
+                home,
+                Some(PERMISSION_REQUEST_HOOK_MATCHER),
+                hook_mode,
+                hook_reason,
+            )
+            .expect("failed to write permission request hook test fixture");
         })
         .with_cloud_config_bundle(managed_network_requirements_loader())
         .with_config(move |config| {
             trust_discovered_hooks(config);
+            config.approvals_reviewer = codex_config::types::ApprovalsReviewer::AutoReview;
             config.permissions.approval_policy = Constrained::allow_any(approval_policy);
             config
                 .permissions
@@ -2220,65 +2893,71 @@ allow_local_binding = true
         })
         .build(&server)
         .await?;
-    assert!(
-        test.config.managed_network_requirements_enabled(),
-        "expected managed network requirements to be enabled"
-    );
-    assert!(
-        test.config.permissions.network.is_some(),
-        "expected managed network proxy config to be present"
-    );
-    test.session_configured
-        .network_proxy
-        .as_ref()
-        .expect("expected runtime managed network proxy addresses");
 
     test.submit_turn_with_approval_and_permission_profile(
-        "run the shell command after network hook approval",
+        "run the shell command after the network permission hook",
         approval_policy,
         permission_profile,
     )
     .await?;
-
-    timeout(Duration::from_secs(10), async {
-        loop {
-            if test
-                .codex_home_path()
-                .join("permission_request_hook_log.jsonl")
-                .exists()
-            {
-                break;
+    if expected_denial.is_none() {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if test
+                    .codex_home_path()
+                    .join("permission_request_hook_log.jsonl")
+                    .exists()
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(100)).await;
             }
-            sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect("expected network approval hook to run");
-
-    assert!(
-        timeout(
-            Duration::from_secs(2),
-            wait_for_event(&test.codex, |event| matches!(
-                event,
-                EventMsg::ExecApprovalRequest(_)
-            ))
-        )
+        })
         .await
-        .is_err(),
-        "expected the network approval hook to bypass the approval prompt"
-    );
+        .expect("expected network approval hook to run");
+        assert!(
+            timeout(
+                Duration::from_secs(2),
+                wait_for_event(&test.codex, |event| matches!(
+                    event,
+                    EventMsg::ExecApprovalRequest(_)
+                ))
+            )
+            .await
+            .is_err(),
+            "expected the network approval hook to bypass the approval prompt"
+        );
+    }
 
     assert_single_permission_request_hook_input(
         test.codex_home_path(),
         command,
         Some("network-access http://codex-network-test.invalid:80"),
     )?;
-
-    test.codex.submit(Op::Shutdown {}).await?;
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::ShutdownComplete)
-    })
-    .await;
+    let requests = responses.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                request.body_json()["client_metadata"]["x-openai-subagent"].as_str()
+                    == Some("guardian")
+            })
+            .count(),
+        0
+    );
+    if let Some(expected_denial) = expected_denial {
+        let tool_output = requests
+            .iter()
+            .find_map(|request| request.function_call_output_text(call_id))
+            .expect("expected denied tool output");
+        assert!(tool_output.contains(expected_denial));
+    } else {
+        test.codex.submit(Op::Shutdown {}).await?;
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::ShutdownComplete)
+        })
+        .await;
+    }
 
     Ok(())
 }

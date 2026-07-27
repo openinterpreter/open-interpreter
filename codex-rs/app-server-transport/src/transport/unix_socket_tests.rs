@@ -53,49 +53,6 @@ fn listen_unix_socket_accepts_relative_custom_path() {
     );
 }
 
-#[test]
-fn control_socket_path_uses_codex_home_when_path_fits() {
-    assert_eq!(
-        app_server_control_socket_path(Path::new("/tmp/codex-home"))
-            .expect("control socket path should resolve"),
-        absolute_path("/tmp/codex-home/app-server-control/app-server-control.sock")
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn control_socket_path_uses_short_tmp_path_when_codex_home_is_too_long() {
-    use std::os::unix::ffi::OsStrExt;
-
-    let codex_home = Path::new("/private/var/folders")
-        .join("very-long-test-suite-temp-root")
-        .join("interpreter-auth-reference-home-1780329159071214000")
-        .join("open-interpreter-app-server-control-test-home")
-        .join("nested-open-interpreter-home");
-    let socket_path =
-        app_server_control_socket_path(&codex_home).expect("control socket path should resolve");
-
-    assert!(
-        socket_path
-            .as_path()
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(std::ffi::OsStr::to_str)
-            .is_some_and(|name| name.starts_with("codex-app-server-control-"))
-    );
-    assert_eq!(socket_path.as_path().file_name().unwrap(), "control.sock");
-    assert!(socket_path.as_path().as_os_str().as_bytes().len() < 100);
-    assert_eq!(
-        socket_path,
-        app_server_control_socket_path(&codex_home).expect("control socket path should resolve")
-    );
-    assert_ne!(
-        socket_path,
-        app_server_control_socket_path(&codex_home.join("other"))
-            .expect("control socket path should resolve")
-    );
-}
-
 #[tokio::test]
 async fn control_socket_acceptor_upgrades_and_forwards_websocket_text_messages_and_pings() {
     let temp_dir = tempfile::TempDir::new().expect("temp dir");

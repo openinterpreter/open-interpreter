@@ -2,6 +2,8 @@ use core_test_support::test_codex::local_selections;
 use std::fs;
 
 use anyhow::Result;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_core::compact::SUMMARY_PREFIX;
 use codex_features::Feature;
 use codex_login::CodexAuth;
@@ -9,13 +11,19 @@ use codex_login::auth::AgentIdentityAuth;
 use codex_login::auth::AgentIdentityAuthRecord;
 use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
+use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::ConversationStartParams;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -52,6 +60,29 @@ use wiremock::ResponseTemplate;
 
 const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE: &str =
     "Output exceeded the available model context and was truncated";
+const TEST_WAV_SAMPLE_RATE: u32 = 8_000;
+
+fn pcm_wav_data_url(sample_count: u32) -> String {
+    let padding = sample_count % 2;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + sample_count + padding).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&TEST_WAV_SAMPLE_RATE.to_le_bytes());
+    bytes.extend_from_slice(&TEST_WAV_SAMPLE_RATE.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&8u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&sample_count.to_le_bytes());
+    bytes.resize(
+        bytes.len() + sample_count as usize + padding as usize,
+        /*value*/ 0,
+    );
+    format!("data:audio/wav;base64,{}", BASE64_STANDARD.encode(bytes))
+}
 
 fn approx_token_count(text: &str) -> i64 {
     i64::try_from(text.len().saturating_add(3) / 4).unwrap_or(i64::MAX)
@@ -212,10 +243,12 @@ async fn start_realtime_conversation(codex: &codex_core::CodexThread) -> Result<
             flush_transcript_tail_on_session_end: false,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
-            codex_response_handoff_prefix: None,
+            codex_response_handoff_mode:
+                codex_protocol::protocol::CodexResponseHandoffMode::Thinking,
             model: None,
             output_modality: RealtimeOutputModality::Audio,
             include_startup_context: true,
+            initial_items: Vec::new(),
             prompt: Some(Some("backend prompt".to_string())),
             realtime_session_id: None,
             transport: None,
@@ -1308,6 +1341,123 @@ async fn remote_compact_filters_deferred_dynamic_tools() -> Result<()> {
     assert_eq!(
         namespace_child_tool_names(&compact_body, "codex_app"),
         vec![visible_tool.to_string()]
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_compact_does_not_charge_inline_audio_payload_as_text() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let call_id = "audio-call";
+    let tool_name = "recording";
+    let audio_url = pcm_wav_data_url(/*sample_count*/ 300_000);
+    let responses_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                responses::ev_response_created("resp-1"),
+                responses::ev_function_call_with_namespace(call_id, "codex_app", tool_name, "{}"),
+                responses::ev_completed_with_tokens("resp-1", /*total_tokens*/ 100),
+            ]),
+            sse(vec![
+                responses::ev_response_created("resp-2"),
+                responses::ev_assistant_message("msg-1", "done"),
+                responses::ev_completed_with_tokens("resp-2", /*total_tokens*/ 200),
+            ]),
+        ],
+    )
+    .await;
+    let compact_mock = responses::mount_compact_json_once(
+        &server,
+        json!({ "output": compacted_summary_only_output("compact summary") }),
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_model_info_override("gpt-5.5", |model_info| {
+            model_info.input_modalities.push(InputModality::Audio);
+        })
+        .with_config(|config| {
+            config.model_context_window = Some(50_000);
+        });
+    let mut test = builder.build(&server).await?;
+    let dynamic_tool = DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+        name: "codex_app".to_string(),
+        description: "Audio tools.".to_string(),
+        tools: vec![DynamicToolNamespaceTool::Function(
+            DynamicToolFunctionSpec {
+                name: tool_name.to_string(),
+                description: "Returns a recording.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false,
+                }),
+                defer_loading: false,
+            },
+        )],
+    });
+    let new_thread = test
+        .thread_manager
+        .start_thread_with_tools(test.config.clone(), vec![dynamic_tool])
+        .await?;
+    test.codex = new_thread.thread;
+    test.session_configured = new_thread.session_configured;
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "Return a recording".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    let EventMsg::DynamicToolCallRequest(request) = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::DynamicToolCallRequest(_))
+    })
+    .await
+    else {
+        unreachable!("event guard guarantees DynamicToolCallRequest");
+    };
+    test.codex
+        .submit(Op::DynamicToolResponse {
+            id: request.call_id,
+            response: DynamicToolResponse {
+                content_items: vec![DynamicToolCallOutputContentItem::InputAudio {
+                    audio_url: audio_url.clone(),
+                }],
+                success: true,
+            },
+        })
+        .await?;
+    wait_for_turn_complete(&test.codex).await;
+
+    test.codex.submit(Op::Compact).await?;
+    wait_for_turn_complete(&test.codex).await;
+
+    assert_eq!(responses_mock.requests().len(), 2);
+    let output = compact_mock
+        .single_request()
+        .function_call_output(call_id)
+        .get("output")
+        .cloned()
+        .expect("compact request should retain the dynamic tool output");
+    assert_eq!(
+        serde_json::from_value::<FunctionCallOutputPayload>(output)?,
+        FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::ContentItems(vec![
+                FunctionCallOutputContentItem::InputAudio { audio_url },
+            ]),
+            success: None,
+        }
     );
 
     Ok(())
@@ -2943,95 +3093,74 @@ async fn remote_request_uses_custom_experimental_realtime_start_instructions() -
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn snapshot_request_shape_remote_pre_turn_compaction_restates_realtime_end() -> Result<()> {
+async fn active_realtime_does_not_diff_changed_start_instructions_after_resume() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = wiremock::MockServer::start().await;
-    let realtime_server = start_remote_realtime_server().await;
-    let mut builder = remote_realtime_test_codex_builder(&realtime_server).with_config(|config| {
-        config.model_auto_compact_token_limit = Some(200);
-    });
-    let test = builder.build(&server).await?;
-
+    let initial_realtime_server = start_remote_realtime_server().await;
+    let initial_instructions = "initial custom realtime start instructions";
+    let mut initial_builder = remote_realtime_test_codex_builder(&initial_realtime_server)
+        .with_config({
+            let initial_instructions = initial_instructions.to_string();
+            move |config| {
+                config.experimental_realtime_start_instructions = Some(initial_instructions);
+            }
+        });
+    let initial = initial_builder.build(&server).await?;
+    let home = initial.home.clone();
+    let rollout_path = initial
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
     let responses_mock = responses::mount_sse_sequence(
         &server,
         vec![
-            responses::sse(vec![
-                responses::ev_assistant_message("m1", "REMOTE_FIRST_REPLY"),
-                responses::ev_completed_with_tokens("r1", /*total_tokens*/ 500),
-            ]),
-            responses::sse(vec![
-                responses::ev_assistant_message("m2", "REMOTE_SECOND_REPLY"),
-                responses::ev_completed_with_tokens("r2", /*total_tokens*/ 80),
-            ]),
+            responses::sse(vec![responses::ev_completed("r1")]),
+            responses::sse(vec![responses::ev_completed("r2")]),
         ],
     )
     .await;
-    let compact_mock = responses::mount_compact_json_once(
-        &server,
-        serde_json::json!({
-            "output": compacted_summary_only_output(
-                "REMOTE_PRETURN_REALTIME_CLOSED_SUMMARY"
-            )
-        }),
-    )
+
+    start_realtime_conversation(initial.codex.as_ref()).await?;
+    initial.submit_turn("USER_ONE").await?;
+    close_realtime_conversation(initial.codex.as_ref()).await?;
+    initial.codex.submit(Op::Shutdown).await?;
+    wait_for_event(&initial.codex, |ev| {
+        matches!(ev, EventMsg::ShutdownComplete)
+    })
     .await;
+    initial_realtime_server.shutdown().await;
 
-    start_realtime_conversation(test.codex.as_ref()).await?;
+    let resumed_realtime_server = start_remote_realtime_server().await;
+    let changed_instructions = "changed custom realtime start instructions";
+    let mut resume_builder = remote_realtime_test_codex_builder(&resumed_realtime_server)
+        .with_config({
+            let changed_instructions = changed_instructions.to_string();
+            move |config| {
+                config.experimental_realtime_start_instructions = Some(changed_instructions);
+            }
+        });
+    let resumed = resume_builder.resume(&server, home, rollout_path).await?;
 
-    test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "USER_ONE".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
-        .await?;
-    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    start_realtime_conversation(resumed.codex.as_ref()).await?;
+    resumed.submit_turn("USER_TWO").await?;
 
-    close_realtime_conversation(test.codex.as_ref()).await?;
-
-    test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "USER_TWO".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
-        .await?;
-    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
-
-    assert_eq!(compact_mock.requests().len(), 1);
     let requests = responses_mock.requests();
-    assert_eq!(requests.len(), 2, "expected two model requests");
-
-    let compact_request = compact_mock.single_request();
-    let post_compact_request = &requests[1];
-    assert_request_contains_realtime_end(post_compact_request);
-
-    insta::assert_snapshot!(
-        "remote_pre_turn_compaction_restates_realtime_end_shapes",
-        format_labeled_requests_snapshot(
-            "Remote pre-turn auto-compaction after realtime was closed between turns: the follow-up request emits realtime-end instructions from previous-turn settings even though compaction cleared the reference baseline.",
-            &[
-                ("Remote Compaction Request", &compact_request),
-                (
-                    "Remote Post-Compaction History Layout",
-                    post_compact_request
-                ),
-            ]
-        )
+    assert_eq!(requests.len(), 2, "expected one request per session");
+    assert_request_contains_custom_realtime_start(&requests[0], initial_instructions);
+    let resumed_body = requests[1].body_json().to_string();
+    assert!(
+        resumed_body.contains(initial_instructions),
+        "expected resumed history to retain the original realtime instructions"
+    );
+    assert!(
+        !resumed_body.contains(changed_instructions),
+        "did not expect an active-to-active instruction change to emit a diff"
     );
 
-    realtime_server.shutdown().await;
+    close_realtime_conversation(resumed.codex.as_ref()).await?;
+    resumed_realtime_server.shutdown().await;
     Ok(())
 }
 
@@ -3227,115 +3356,6 @@ async fn snapshot_request_shape_remote_mid_turn_compaction_does_not_restate_real
                     "Remote Post-Compaction History Layout",
                     post_compact_request
                 ),
-            ]
-        )
-    );
-
-    realtime_server.shutdown().await;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn snapshot_request_shape_remote_compact_resume_restates_realtime_end() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = wiremock::MockServer::start().await;
-    let realtime_server = start_remote_realtime_server().await;
-    let mut builder = remote_realtime_test_codex_builder(&realtime_server);
-    let initial = builder.build(&server).await?;
-    let home = initial.home.clone();
-    let rollout_path = initial
-        .session_configured
-        .rollout_path
-        .clone()
-        .expect("rollout path");
-
-    let responses_mock = responses::mount_sse_sequence(
-        &server,
-        vec![
-            responses::sse(vec![
-                responses::ev_assistant_message("m1", "REMOTE_FIRST_REPLY"),
-                responses::ev_completed_with_tokens("r1", /*total_tokens*/ 60),
-            ]),
-            responses::sse(vec![
-                responses::ev_assistant_message("m2", "REMOTE_AFTER_RESUME_REPLY"),
-                responses::ev_completed_with_tokens("r2", /*total_tokens*/ 80),
-            ]),
-        ],
-    )
-    .await;
-    let compact_mock = responses::mount_compact_json_once(
-        &server,
-        serde_json::json!({
-            "output": compacted_summary_only_output(
-                "REMOTE_RESUME_REALTIME_CLOSED_SUMMARY"
-            )
-        }),
-    )
-    .await;
-
-    start_realtime_conversation(initial.codex.as_ref()).await?;
-
-    initial
-        .codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "USER_ONE".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
-        .await?;
-    wait_for_event(&initial.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
-
-    close_realtime_conversation(initial.codex.as_ref()).await?;
-
-    initial.codex.submit(Op::Compact).await?;
-    wait_for_event(&initial.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
-
-    initial.codex.submit(Op::Shutdown).await?;
-    wait_for_event(&initial.codex, |ev| {
-        matches!(ev, EventMsg::ShutdownComplete)
-    })
-    .await;
-
-    let mut resume_builder =
-        test_codex().with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
-    let resumed = resume_builder.resume(&server, home, rollout_path).await?;
-
-    resumed
-        .codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "USER_TWO".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
-        .await?;
-    wait_for_event(&resumed.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
-
-    assert_eq!(compact_mock.requests().len(), 1);
-    let requests = responses_mock.requests();
-    assert_eq!(requests.len(), 2, "expected two model requests");
-
-    let compact_request = compact_mock.single_request();
-    let after_resume_request = &requests[1];
-    assert_request_contains_realtime_end(after_resume_request);
-
-    insta::assert_snapshot!(
-        "remote_compact_resume_restates_realtime_end_shapes",
-        format_labeled_requests_snapshot(
-            "After remote manual /compact and resume, the first resumed turn rebuilds history from the compaction item and restates realtime-end instructions from reconstructed previous-turn settings.",
-            &[
-                ("Remote Compaction Request", &compact_request),
-                ("Remote Post-Resume History Layout", after_resume_request),
             ]
         )
     );

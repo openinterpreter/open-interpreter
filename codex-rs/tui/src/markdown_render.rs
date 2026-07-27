@@ -43,8 +43,6 @@ use crate::markdown_text_merge::DecodedTextMerge;
 use crate::render::highlight::foreground_style_for_scopes;
 use crate::render::highlight::highlight_code_to_lines;
 use crate::render::line_utils::line_to_static;
-use crate::style::app_accent_style;
-use crate::style::app_accent_underlined_style;
 use crate::style::table_separator_style;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::annotate_web_urls_in_line;
@@ -79,7 +77,11 @@ use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 use url::Url;
 
+mod streaming;
 mod table_key_value;
+
+pub(crate) use streaming::StreamingMarkdownRender;
+pub(crate) use streaming::render_streaming_markdown_lines_with_width_and_cwd;
 
 const TABLE_COLUMN_GAP: usize = 2;
 const TABLE_CELL_PADDING: usize = 1;
@@ -105,7 +107,6 @@ struct MarkdownStyles {
 
 impl Default for MarkdownStyles {
     fn default() -> Self {
-        let accent = app_accent_style();
         Self {
             h1: Style::new().bold().underlined(),
             h2: Style::new().bold(),
@@ -113,14 +114,14 @@ impl Default for MarkdownStyles {
             h4: Style::new().italic(),
             h5: Style::new().italic(),
             h6: Style::new().italic(),
-            code: accent,
+            code: Style::new().cyan(),
             emphasis: Style::new().italic(),
             strong: Style::new().bold(),
             strikethrough: Style::new().crossed_out(),
-            ordered_list_marker: accent,
-            unordered_list_marker: accent,
-            link: app_accent_underlined_style(),
-            blockquote: accent,
+            ordered_list_marker: Style::new().light_blue(),
+            unordered_list_marker: Style::new(),
+            link: Style::new().cyan().underlined(),
+            blockquote: Style::new().green(),
         }
     }
 }
@@ -323,11 +324,29 @@ pub(crate) fn render_markdown_lines_with_width_and_cwd(
     width: Option<usize>,
     cwd: Option<&Path>,
 ) -> Vec<HyperlinkLine> {
+    render_markdown_lines_with_width_cwd_and_hidden_link_destinations(
+        input,
+        width,
+        cwd,
+        &never_hide_link_destination,
+    )
+}
+
+fn never_hide_link_destination(_: &str) -> bool {
+    false
+}
+
+pub(crate) fn render_markdown_lines_with_width_cwd_and_hidden_link_destinations(
+    input: &str,
+    width: Option<usize>,
+    cwd: Option<&Path>,
+    is_hidden_link_destination: &dyn Fn(&str) -> bool,
+) -> Vec<HyperlinkLine> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
     let parser = DecodedTextMerge::new(Parser::new_ext(input, options).into_offset_iter());
-    let mut w = Writer::new(input, parser, width, cwd);
+    let mut w = Writer::new(input, parser, width, cwd, is_hidden_link_destination);
     w.run();
     w.text
 }
@@ -336,6 +355,7 @@ pub(crate) fn render_markdown_lines_with_width_and_cwd(
 struct LinkState {
     destination: String,
     show_destination: bool,
+    style_label: bool,
     /// Pre-rendered display text for local file links.
     ///
     /// When this is present, the markdown label is intentionally suppressed so the rendered
@@ -368,7 +388,7 @@ static HASH_LOCATION_SUFFIX_RE: LazyLock<Regex> =
 /// and an optional `TableState` for accumulating table events.  The
 /// `wrap_width` field enables width-aware line wrapping and table column
 /// allocation; when `None`, lines keep their intrinsic width.
-struct Writer<'a, I>
+struct Writer<'a, 'policy, I>
 where
     I: Iterator<Item = (Event<'a>, Range<usize>)>,
 {
@@ -390,6 +410,7 @@ where
     code_block_buffer: String,
     wrap_width: Option<usize>,
     cwd: Option<PathBuf>,
+    is_hidden_link_destination: &'policy dyn Fn(&str) -> bool,
     line_ends_with_local_link_target: bool,
     pending_local_link_soft_break: bool,
     current_line_content: Option<HyperlinkLine>,
@@ -400,11 +421,17 @@ where
     table_state: Option<TableState>,
 }
 
-impl<'a, I> Writer<'a, I>
+impl<'a, 'policy, I> Writer<'a, 'policy, I>
 where
     I: Iterator<Item = (Event<'a>, Range<usize>)>,
 {
-    fn new(input: &'a str, iter: I, wrap_width: Option<usize>, cwd: Option<&Path>) -> Self {
+    fn new(
+        input: &'a str,
+        iter: I,
+        wrap_width: Option<usize>,
+        cwd: Option<&Path>,
+        is_hidden_link_destination: &'policy dyn Fn(&str) -> bool,
+    ) -> Self {
         Self {
             input,
             iter,
@@ -424,6 +451,7 @@ where
             code_block_buffer: String::new(),
             wrap_width,
             cwd: cwd.map(Path::to_path_buf),
+            is_hidden_link_destination,
             line_ends_with_local_link_target: false,
             pending_local_link_soft_break: false,
             current_line_content: None,
@@ -1092,8 +1120,7 @@ where
 
         let metrics = Self::collect_table_column_metrics(&header, &rows, column_count);
         let available_width = self.available_table_width(column_count);
-        let widths =
-            self.compute_column_widths(&header, &rows, &table_state.alignments, available_width);
+        let widths = Self::compute_column_widths(&metrics, available_width);
         let spillover_lines: Vec<HyperlinkLine> = spillover_rows
             .into_iter()
             .flat_map(|spillover| spillover.lines)
@@ -1208,19 +1235,15 @@ where
     /// Allocate column widths for aligned, row-separated table rendering.
     ///
     /// Each column starts at its natural (max cell content) width, then columns
-    /// are iteratively shrunk one character at a time until the total fits within
-    /// `available_width`. Token-heavy columns surrender excess width before
-    /// narrative prose; compact columns are preserved last. Returns `None` when
-    /// even the minimum width (3 chars per column) cannot fit.
+    /// are shrunk by priority until the total fits within `available_width`.
+    /// Token-heavy columns surrender excess width before narrative prose; compact
+    /// columns are preserved last. Returns `None` when even the minimum width
+    /// (3 chars per column) cannot fit.
     fn compute_column_widths(
-        &self,
-        header: &[TableCell],
-        rows: &[Vec<TableCell>],
-        alignments: &[Alignment],
+        metrics: &[TableColumnMetrics],
         available_width: Option<usize>,
     ) -> Option<Vec<usize>> {
         let min_column_width = 3usize;
-        let metrics = Self::collect_table_column_metrics(header, rows, alignments.len());
         let mut widths: Vec<usize> = metrics
             .iter()
             .map(|col| col.max_width.max(min_column_width))
@@ -1229,7 +1252,7 @@ where
         let Some(max_width) = available_width else {
             return Some(widths);
         };
-        let minimum_total = alignments.len() * min_column_width;
+        let minimum_total = metrics.len() * min_column_width;
         if max_width < minimum_total {
             return None;
         }
@@ -1238,41 +1261,19 @@ where
             .iter()
             .map(|col| Self::preferred_column_floor(col, min_column_width))
             .collect();
-        let mut floor_total: usize = floors.iter().sum();
+        let floor_total: usize = floors.iter().sum();
         if floor_total > max_width {
-            // Relax preferred floors in wrapping priority order until the hard width budget fits.
-            while floor_total > max_width {
-                let Some((idx, _)) = floors
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, floor)| **floor > min_column_width)
-                    .min_by_key(|(idx, floor)| {
-                        (
-                            Self::column_shrink_priority(metrics[*idx].kind),
-                            usize::MAX.saturating_sub(**floor),
-                        )
-                    })
-                else {
-                    break;
-                };
-
-                floors[idx] -= 1;
-                floor_total -= 1;
-            }
+            let minimums = vec![min_column_width; floors.len()];
+            Self::shrink_columns(&mut floors, &minimums, metrics, floor_total - max_width);
         }
 
-        let mut total_width: usize = widths.iter().sum();
-
-        while total_width > max_width {
-            let Some(idx) = Self::next_column_to_shrink(&widths, &floors, &metrics) else {
-                break;
-            };
-            widths[idx] -= 1;
-            total_width -= 1;
-        }
-
+        let total_width: usize = widths.iter().sum();
         if total_width > max_width {
-            return None;
+            let remaining =
+                Self::shrink_columns(&mut widths, &floors, metrics, total_width - max_width);
+            if remaining > 0 {
+                return None;
+            }
         }
 
         Some(widths)
@@ -1300,14 +1301,15 @@ where
                 let cell = &row[column];
                 max_width = max_width.max(Self::cell_display_width(cell));
                 let plain = cell.plain_text();
-                body_token_width = body_token_width.max(Self::longest_token_width(&plain));
-                let word_count = plain.split_whitespace().count();
+                let mut word_count = 0usize;
+                for token in plain.split_whitespace() {
+                    let token_width = token.width();
+                    body_token_width = body_token_width.max(token_width);
+                    long_body_token_count += usize::from(token_width >= 20);
+                    word_count += 1;
+                }
                 if word_count > 0 {
                     body_token_count += word_count;
-                    long_body_token_count += plain
-                        .split_whitespace()
-                        .filter(|token| token.width() >= 20)
-                        .count();
                     total_words += word_count;
                     total_cells += 1;
                     total_cell_width += plain.width();
@@ -1361,36 +1363,87 @@ where
         token_target.max(min_column_width).min(metrics.max_width)
     }
 
-    /// Pick the next column to shrink by one character during width allocation.
+    /// Shrink columns in priority order, balancing slack within each priority.
     ///
     /// Priority: TokenHeavy columns are shrunk before Narrative, then Compact.
-    /// Within the same kind, the column with the most slack above its floor is
-    /// chosen so similarly-shaped columns stay balanced.
-    fn next_column_to_shrink(
-        widths: &[usize],
+    /// Within the same kind, columns with the most slack above their floor are
+    /// shrunk first so similarly-shaped columns stay balanced. This produces the
+    /// same result as repeatedly shrinking one display cell, without repeatedly
+    /// scanning every column for long tokens.
+    fn shrink_columns(
+        widths: &mut [usize],
         floors: &[usize],
         metrics: &[TableColumnMetrics],
-    ) -> Option<usize> {
-        widths
-            .iter()
-            .enumerate()
-            .filter(|(idx, width)| **width > floors[*idx])
-            .min_by_key(|(idx, width)| {
-                let slack = width.saturating_sub(floors[*idx]);
-                (
-                    Self::column_shrink_priority(metrics[*idx].kind),
-                    usize::MAX.saturating_sub(slack),
-                )
-            })
-            .map(|(idx, _)| idx)
-    }
+        mut amount: usize,
+    ) -> usize {
+        for kind in [
+            TableColumnKind::TokenHeavy,
+            TableColumnKind::Narrative,
+            TableColumnKind::Compact,
+        ] {
+            let slack_total = widths
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| metrics[*idx].kind == kind)
+                .map(|(idx, width)| width.saturating_sub(floors[idx]))
+                .sum::<usize>();
+            let to_remove = amount.min(slack_total);
+            if to_remove == 0 {
+                continue;
+            }
 
-    fn column_shrink_priority(kind: TableColumnKind) -> usize {
-        match kind {
-            TableColumnKind::TokenHeavy => 0,
-            TableColumnKind::Narrative => 1,
-            TableColumnKind::Compact => 2,
+            let mut low = 0usize;
+            let mut high = widths
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| metrics[*idx].kind == kind)
+                .map(|(idx, width)| width.saturating_sub(floors[idx]))
+                .max()
+                .unwrap_or(/*default*/ 0);
+            while low < high {
+                let cap = low + (high - low) / 2;
+                let removed = widths
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, _)| metrics[*idx].kind == kind)
+                    .map(|(idx, width)| width.saturating_sub(floors[idx]).saturating_sub(cap))
+                    .sum::<usize>();
+                if removed > to_remove {
+                    low = cap + 1;
+                } else {
+                    high = cap;
+                }
+            }
+
+            let cap = low;
+            let mut removed = 0usize;
+            for (idx, width) in widths.iter_mut().enumerate() {
+                if metrics[idx].kind != kind {
+                    continue;
+                }
+                let reduction = width.saturating_sub(floors[idx]).saturating_sub(cap);
+                *width -= reduction;
+                removed += reduction;
+            }
+
+            let mut remainder = to_remove - removed;
+            for (idx, width) in widths.iter_mut().enumerate() {
+                if remainder == 0 {
+                    break;
+                }
+                if metrics[idx].kind == kind && width.saturating_sub(floors[idx]) == cap {
+                    *width -= 1;
+                    remainder -= 1;
+                }
+            }
+
+            amount -= to_remove;
+            if amount == 0 {
+                break;
+            }
         }
+
+        amount
     }
 
     fn render_table_separator(
@@ -1737,9 +1790,14 @@ where
     }
 
     fn push_link(&mut self, dest_url: String) {
-        let show_destination = should_render_link_destination(&dest_url);
+        let style_label = (self.is_hidden_link_destination)(&dest_url);
+        if style_label {
+            self.push_inline_style(self.styles.link);
+        }
+        let show_destination = !style_label && should_render_link_destination(&dest_url);
         self.link = Some(LinkState {
             show_destination,
+            style_label,
             local_target_display: if is_local_path_like_link(&dest_url) {
                 render_local_link_target(&dest_url, self.cwd.as_deref())
             } else {
@@ -1751,6 +1809,9 @@ where
 
     fn pop_link(&mut self) {
         if let Some(link) = self.link.take() {
+            if link.style_label {
+                self.pop_inline_style();
+            }
             if link.show_destination {
                 // Link destinations are rendered as " (url)" suffixes. When parsing table cells,
                 // append the suffix into the active cell buffer rather than the outer paragraph
@@ -2407,7 +2468,13 @@ mod tests {
         cell.hard_break();
         cell.push_span("second line".into());
 
-        let writer = W::new("", std::iter::empty(), Some(80), /*cwd*/ None);
+        let writer = W::new(
+            "",
+            std::iter::empty(),
+            /*wrap_width*/ Some(80),
+            /*cwd*/ None,
+            &never_hide_link_destination,
+        );
         let wrapped = writer.wrap_cell(&cell, /*width*/ 40);
         let rendered = wrapped
             .iter()
@@ -2429,7 +2496,7 @@ mod tests {
     // ---------------------------------------------------------------
     // Type alias for calling private associated functions on Writer.
     // ---------------------------------------------------------------
-    type W<'a> = Writer<'a, std::iter::Empty<(Event<'a>, Range<usize>)>>;
+    type W<'a> = Writer<'a, 'a, std::iter::Empty<(Event<'a>, Range<usize>)>>;
 
     /// Build a single-line `TableCell` from plain text.
     fn make_cell(text: &str) -> TableCell {
@@ -2554,38 +2621,100 @@ mod tests {
     }
 
     #[test]
-    fn next_column_to_shrink_prefers_token_heavy_then_narrative() {
-        let widths = [20usize, 20, 20];
-        let floors = [8usize, 8, 8];
+    fn bulk_column_shrink_matches_one_cell_at_a_time() {
+        fn priority(kind: TableColumnKind) -> usize {
+            match kind {
+                TableColumnKind::TokenHeavy => 0,
+                TableColumnKind::Narrative => 1,
+                TableColumnKind::Compact => 2,
+            }
+        }
+
+        fn shrink_one_at_a_time(
+            widths: &mut [usize],
+            floors: &[usize],
+            metrics: &[TableColumnMetrics],
+            mut amount: usize,
+        ) -> usize {
+            while amount > 0 {
+                let Some(idx) = widths
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, width)| **width > floors[*idx])
+                    .min_by_key(|(idx, width)| {
+                        (
+                            priority(metrics[*idx].kind),
+                            usize::MAX - width.saturating_sub(floors[*idx]),
+                        )
+                    })
+                    .map(|(idx, _)| idx)
+                else {
+                    break;
+                };
+                widths[idx] -= 1;
+                amount -= 1;
+            }
+            amount
+        }
+
+        for case in 0..64usize {
+            let metrics = (0..5)
+                .map(|idx| TableColumnMetrics {
+                    max_width: 100,
+                    header_token_width: 8,
+                    body_token_width: 8,
+                    kind: match (case + idx) % 3 {
+                        0 => TableColumnKind::TokenHeavy,
+                        1 => TableColumnKind::Narrative,
+                        _ => TableColumnKind::Compact,
+                    },
+                })
+                .collect::<Vec<_>>();
+            let floors = (0..5)
+                .map(|idx| 3 + (case * (idx + 1) + idx) % 14)
+                .collect::<Vec<_>>();
+            let initial = floors
+                .iter()
+                .enumerate()
+                .map(|(idx, floor)| floor + (case * (idx + 3) + idx * 7) % 41)
+                .collect::<Vec<_>>();
+            let slack = initial
+                .iter()
+                .zip(&floors)
+                .map(|(width, floor)| width - floor)
+                .sum::<usize>();
+
+            for amount in 0..=slack + 1 {
+                let mut expected = initial.clone();
+                let expected_remaining =
+                    shrink_one_at_a_time(&mut expected, &floors, &metrics, amount);
+                let mut actual = initial.clone();
+                let actual_remaining = W::shrink_columns(&mut actual, &floors, &metrics, amount);
+                assert_eq!((actual, actual_remaining), (expected, expected_remaining));
+            }
+        }
+    }
+
+    #[test]
+    fn column_widths_bulk_shrink_large_token_heavy_column() {
         let metrics = [
             TableColumnMetrics {
-                max_width: 30,
-                header_token_width: 8,
-                body_token_width: 6,
-                kind: TableColumnKind::Narrative,
-            },
-            TableColumnMetrics {
-                max_width: 30,
-                header_token_width: 8,
-                body_token_width: 28,
+                max_width: 1_000_000,
+                header_token_width: 4,
+                body_token_width: 1_000_000,
                 kind: TableColumnKind::TokenHeavy,
             },
             TableColumnMetrics {
-                max_width: 30,
-                header_token_width: 8,
-                body_token_width: 6,
+                max_width: 8,
+                header_token_width: 5,
+                body_token_width: 8,
                 kind: TableColumnKind::Compact,
             },
         ];
-        let idx = W::next_column_to_shrink(&widths, &floors, &metrics);
-        assert_eq!(idx, Some(1), "token-heavy column should shrink first");
 
-        let widths = [20usize, 8, 20];
-        let idx = W::next_column_to_shrink(&widths, &floors, &metrics);
         assert_eq!(
-            idx,
-            Some(0),
-            "narrative column should shrink before compact"
+            W::compute_column_widths(&metrics, /*available_width*/ Some(24)),
+            Some(vec![16, 8])
         );
     }
 

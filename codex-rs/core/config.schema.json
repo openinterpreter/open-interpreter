@@ -36,26 +36,35 @@
         "$ref": "#/definitions/AgentRoleToml"
       },
       "properties": {
+        "default_subagent_model": {
+          "description": "Default model for spawned subagents when the spawn call does not select one.",
+          "type": "string"
+        },
+        "default_subagent_reasoning_effort": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            }
+          ],
+          "description": "Default reasoning effort for spawned subagents when the spawn call does not select one."
+        },
+        "enabled": {
+          "description": "Whether multi-agent tools are enabled. Defaults to true. An enabled `features.multi_agent_v2` setting takes precedence.",
+          "type": "boolean"
+        },
         "interrupt_message": {
           "description": "Whether to record a model-visible message when an agent turn is interrupted. Defaults to true.",
           "type": "boolean"
         },
-        "job_max_runtime_seconds": {
-          "description": "Default maximum runtime in seconds for agent job workers.",
-          "format": "uint64",
+        "max_concurrent_threads_per_session": {
+          "description": "Maximum number of spawned agent threads that can be open concurrently per session. When unset, the selected multi-agent backend uses its default.",
+          "format": "uint",
           "minimum": 1.0,
           "type": "integer"
         },
         "max_depth": {
-          "description": "Maximum nesting depth allowed for spawned agent threads. Root sessions start at depth 0.",
+          "description": "Maximum nesting depth for V1 agent threads. Ignored by V2.",
           "format": "int32",
-          "minimum": 1.0,
-          "type": "integer"
-        },
-        "max_threads": {
-          "description": "Maximum number of agent threads that can be open concurrently. When unset, no limit is enforced.",
-          "format": "uint",
-          "minimum": 1.0,
           "type": "integer"
         }
       },
@@ -449,6 +458,9 @@
             "code_mode": {
               "$ref": "#/definitions/FeatureToml_for_CodeModeConfigToml"
             },
+            "code_mode_buffered_exec": {
+              "type": "boolean"
+            },
             "code_mode_host": {
               "type": "boolean"
             },
@@ -503,10 +515,16 @@
             "exec_permission_approvals": {
               "type": "boolean"
             },
+            "executor_capability_discovery": {
+              "type": "boolean"
+            },
             "experimental_use_unified_exec_tool": {
               "type": "boolean"
             },
             "experimental_windows_sandbox": {
+              "type": "boolean"
+            },
+            "external_agent_memory_import": {
               "type": "boolean"
             },
             "external_migration": {
@@ -650,6 +668,9 @@
             "skill_mcp_dependency_install": {
               "type": "boolean"
             },
+            "skill_search": {
+              "type": "boolean"
+            },
             "sqlite": {
               "type": "boolean"
             },
@@ -724,14 +745,6 @@
             }
           },
           "type": "object"
-        },
-        "harness": {
-          "description": "Optional harness family to emulate for this profile, such as `claude-code`.",
-          "type": "string"
-        },
-        "harness_guidance": {
-          "description": "Whether to include Open Interpreter guidance for the selected harness.",
-          "type": "boolean"
         },
         "include_apps_instructions": {
           "type": "boolean"
@@ -1182,6 +1195,12 @@
       "oneOf": [
         {
           "properties": {
+            "additionalContextLimit": {
+              "description": "Approximate token threshold for spilling this hook's `additionalContext` to disk. Unset uses 2,500 tokens; `0` disables spilling for this hook. The threshold is evaluated against the original context; a spilled preview also includes recovery metadata.",
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
             "async": {
               "default": false,
               "type": "boolean"
@@ -1288,6 +1307,13 @@
           "type": "array"
         },
         "PreToolUse": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MatcherGroup"
+          },
+          "type": "array"
+        },
+        "SessionEnd": {
           "default": [],
           "items": {
             "$ref": "#/definitions/MatcherGroup"
@@ -1742,6 +1768,10 @@
         "enabled": {
           "type": "boolean"
         },
+        "expose_spawn_agent_model_overrides": {
+          "description": "Exposes `model` and `reasoning_effort` on the multi-agent v2 spawn tool and adds corresponding guidance to root and subagent usage hints.",
+          "type": "boolean"
+        },
         "hide_spawn_agent_metadata": {
           "type": "boolean"
         },
@@ -2138,7 +2168,7 @@
       "description": "Determine where Codex should store and read MCP credentials.",
       "oneOf": [
         {
-          "description": "`Keyring` when available; otherwise, `File`. Credentials stored in the keyring will only be readable by Codex unless the user explicitly grants access via OS-level keyring access.",
+          "description": "Prefer `Keyring` and use `File` when keyring storage is unavailable. Once an MCP client loads credentials from one store, that client keeps the resolved store for its lifetime so refreshes cannot switch to a possibly stale credential source. Credentials stored in the keyring will only be readable by Codex unless the user explicitly grants access via OS-level keyring access.",
           "enum": [
             "auto"
           ],
@@ -2641,7 +2671,8 @@
     "RealtimeConversationVersion": {
       "enum": [
         "v1",
-        "v2"
+        "v2",
+        "v3"
       ],
       "type": "string"
     },
@@ -2721,6 +2752,25 @@
           "description": "Option to disable reasoning summaries.",
           "enum": [
             "none"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ResumeCwdMode": {
+      "description": "Working directory to use when resuming or forking a session.",
+      "oneOf": [
+        {
+          "description": "Use the directory where Codex was launched.",
+          "enum": [
+            "current"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Use the latest working directory recorded in the selected session.",
+          "enum": [
+            "session"
           ],
           "type": "string"
         }
@@ -2924,6 +2974,17 @@
     "TokenBudgetConfigToml": {
       "additionalProperties": false,
       "properties": {
+        "auto_compact_fallback_buffer_tokens": {
+          "description": "Additional tokens available after the compaction threshold for fallback note-taking.",
+          "format": "int64",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "auto_compact_fallback_prompt": {
+          "description": "Developer message sampled before an automatic context-window rollover.",
+          "maxLength": 2000,
+          "type": "string"
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -3245,6 +3306,15 @@
           "default": false,
           "description": "Start the TUI in raw scrollback mode for copy-friendly transcript output. Defaults to `false`.",
           "type": "boolean"
+        },
+        "resume_cwd": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ResumeCwdMode"
+            }
+          ],
+          "default": null,
+          "description": "Working directory to use when resuming or forking a session. When unset, prompt if the current and session directories differ."
         },
         "session_picker_view": {
           "allOf": [
@@ -4843,6 +4913,9 @@
         "code_mode": {
           "$ref": "#/definitions/FeatureToml_for_CodeModeConfigToml"
         },
+        "code_mode_buffered_exec": {
+          "type": "boolean"
+        },
         "code_mode_host": {
           "type": "boolean"
         },
@@ -4897,10 +4970,16 @@
         "exec_permission_approvals": {
           "type": "boolean"
         },
+        "executor_capability_discovery": {
+          "type": "boolean"
+        },
         "experimental_use_unified_exec_tool": {
           "type": "boolean"
         },
         "experimental_windows_sandbox": {
+          "type": "boolean"
+        },
+        "external_agent_memory_import": {
           "type": "boolean"
         },
         "external_migration": {
@@ -5042,6 +5121,9 @@
           "type": "boolean"
         },
         "skill_mcp_dependency_install": {
+          "type": "boolean"
+        },
+        "skill_search": {
           "type": "boolean"
         },
         "sqlite": {

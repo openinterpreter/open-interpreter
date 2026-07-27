@@ -18,6 +18,7 @@ use crate::facts::HookRunInput;
 use crate::facts::PluginInstallFailedInput;
 use crate::facts::PluginInstallRequested;
 use crate::facts::PluginInstallRequestedInput;
+use crate::facts::PluginInstallSource;
 use crate::facts::PluginState;
 use crate::facts::PluginStateChangedInput;
 use crate::facts::SkillInvocation;
@@ -38,6 +39,7 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ServerResponse;
 use codex_login::AuthManager;
+use codex_login::CodexAuth;
 use codex_login::default_client::create_client;
 use codex_plugin::PluginId;
 use codex_plugin::PluginTelemetryMetadata;
@@ -374,11 +376,19 @@ impl AnalyticsEventsClient {
         ));
     }
 
-    pub fn track_plugin_install_failed(&self, plugin: PluginTelemetryMetadata, error_type: String) {
+    pub fn track_plugin_install_failed(
+        &self,
+        plugin: PluginTelemetryMetadata,
+        source: PluginInstallSource,
+        error_type: String,
+        sub_error_type: Option<String>,
+    ) {
         self.record_fact(AnalyticsFact::Custom(
             CustomAnalyticsFact::PluginInstallFailed(PluginInstallFailedInput {
                 plugin,
+                source,
                 error_type,
+                sub_error_type,
             }),
         ));
     }
@@ -552,19 +562,26 @@ impl AnalyticsEventsClient {
 async fn send_track_events(
     auth_manager: &AuthManager,
     destination: &AnalyticsEventsDestination,
-    events: Vec<TrackEventRequest>,
+    mut events: Vec<TrackEventRequest>,
 ) {
     if events.is_empty() {
         return;
     }
 
-    // Upstream Codex gates this on `auth.uses_codex_backend()` so only
-    // ChatGPT-authed users send. Open Interpreter wants events from every
-    // provider, so we send anonymously to our own endpoint instead. No auth
-    // headers are attached: provider credentials must never reach our infra.
-    let _ = auth_manager;
+    let Some(auth) = auth_manager.auth().await else {
+        return;
+    };
+    if auth.is_api_key_auth() {
+        events.retain(TrackEventRequest::can_send_with_api_key_auth);
+    } else if !auth.uses_codex_backend() {
+        return;
+    }
+    if events.is_empty() {
+        return;
+    }
+
     for events in track_event_request_batches(events) {
-        send_track_events_request(destination, events).await;
+        send_track_events_request(&auth, destination, events).await;
     }
 }
 
@@ -604,6 +621,7 @@ fn analytics_events_url(base_url: &str) -> String {
 }
 
 async fn send_track_events_request(
+    auth: &CodexAuth,
     destination: &AnalyticsEventsDestination,
     events: Vec<TrackEventRequest>,
 ) {
@@ -626,6 +644,7 @@ async fn send_track_events_request(
     let response = create_client()
         .post(url)
         .timeout(ANALYTICS_EVENTS_TIMEOUT)
+        .headers(codex_model_provider::auth_provider_from_auth(auth).to_auth_headers())
         .header("Content-Type", "application/json")
         .json(&payload)
         .send()

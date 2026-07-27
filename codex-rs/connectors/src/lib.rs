@@ -11,11 +11,14 @@ use serde::Serialize;
 pub mod accessible;
 mod app_info;
 mod app_tool_policy;
+mod connector_runtime;
 mod directory_cache;
 pub mod filter;
 pub mod merge;
 pub mod metadata;
+mod metadata_store;
 mod plugin_config;
+mod runtime_projection;
 mod snapshot;
 
 pub use app_info::AppBranding;
@@ -28,13 +31,31 @@ pub use app_tool_policy::AppToolPolicyEvaluator;
 pub use app_tool_policy::AppToolPolicyInput;
 pub use app_tool_policy::app_is_enabled;
 pub use app_tool_policy::apps_config_from_layer_stack;
+pub use connector_runtime::ConnectorRuntimeContext;
+pub use connector_runtime::ConnectorRuntimeContextKey;
+pub use connector_runtime::ConnectorRuntimeFetchSource;
+pub use connector_runtime::ConnectorRuntimeFetchTicket;
+pub use connector_runtime::ConnectorRuntimeManager;
+pub use connector_runtime::ConnectorRuntimePayload;
+pub use connector_runtime::ConnectorRuntimeSnapshot;
+pub use connector_runtime::connector_runtime_cache_path;
+pub use connector_runtime::connector_runtime_context_key;
 pub use directory_cache::ConnectorDirectoryCacheContext;
+pub use metadata_store::ConnectorMetadata;
+pub use metadata_store::ConnectorMetadataStore;
+pub use metadata_store::ConnectorToolSummary;
 pub use plugin_config::parse_plugin_app_config;
 pub use plugin_config::parse_plugin_app_config_value;
+pub use runtime_projection::ConnectorRuntimeTool;
+pub use runtime_projection::InstalledConnectorRuntime;
+pub use runtime_projection::connector_tool_is_synthetic;
+pub use runtime_projection::installed_connector_runtime;
 pub use snapshot::ConnectorSnapshot;
 pub use snapshot::PluginConnectorSource;
 
 pub const CONNECTORS_CACHE_TTL: Duration = Duration::from_secs(3600);
+/// TTL for app/read metadata; it starts aligned with the connector directory cache.
+pub const CONNECTOR_METADATA_CACHE_TTL: Duration = CONNECTORS_CACHE_TTL;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorDirectoryCacheKey {
@@ -162,10 +183,28 @@ where
         return Ok(cached_connectors);
     }
 
-    let mut apps = list_directory_connectors(&mut fetch_page).await?;
-    if is_workspace_account {
-        apps.extend(list_workspace_connectors(&mut fetch_page).await?);
-    }
+    let apps = if is_workspace_account {
+        // The workspace directory is independent from the paginated public directory.
+        // Start both before awaiting either so workspace accounts do not pay for the
+        // two request chains back-to-back.
+        let workspace_connectors =
+            fetch_page("/connectors/directory/list_workspace?external_logos=true".to_string());
+        let directory_connectors = list_directory_connectors(&mut fetch_page);
+        let (directory_connectors, workspace_connectors) =
+            tokio::join!(directory_connectors, workspace_connectors);
+        let mut apps = directory_connectors?;
+        if let Ok(response) = workspace_connectors {
+            apps.extend(
+                response
+                    .apps
+                    .into_iter()
+                    .filter(|app| !is_hidden_directory_app(app)),
+            );
+        }
+        apps
+    } else {
+        list_directory_connectors(&mut fetch_page).await?
+    };
 
     let mut connectors = merge_directory_apps(apps)
         .into_iter()
@@ -248,23 +287,6 @@ where
         }
     }
     Ok(apps)
-}
-
-async fn list_workspace_connectors<F, Fut>(fetch_page: &mut F) -> anyhow::Result<Vec<DirectoryApp>>
-where
-    F: FnMut(String) -> Fut,
-    Fut: Future<Output = anyhow::Result<DirectoryListResponse>>,
-{
-    let response =
-        fetch_page("/connectors/directory/list_workspace?external_logos=true".to_string()).await;
-    match response {
-        Ok(response) => Ok(response
-            .apps
-            .into_iter()
-            .filter(|app| !is_hidden_directory_app(app))
-            .collect()),
-        Err(_) => Ok(Vec::new()),
-    }
 }
 
 fn merge_directory_apps(apps: Vec<DirectoryApp>) -> Vec<DirectoryApp> {
@@ -508,7 +530,9 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
     use tempfile::TempDir;
+    use tokio::sync::Notify;
 
     static CONNECTOR_DIRECTORY_CACHE_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
         LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -720,6 +744,60 @@ mod tests {
         );
         assert_eq!(connectors[1].id, "beta");
         assert_eq!(connectors[1].name, "Beta");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "test serializes access to the shared connector cache for its full duration"
+    )]
+    async fn list_all_connectors_overlaps_workspace_and_directory_requests() -> anyhow::Result<()> {
+        let _cache_guard = CONNECTOR_DIRECTORY_CACHE_TEST_LOCK.lock().await;
+
+        let codex_home = TempDir::new()?;
+        let cache_context = cache_context(&codex_home, "overlap");
+        let workspace_started = Arc::new(Notify::new());
+
+        // The public directory response waits until the workspace request is polled.
+        // Without overlap this future cannot complete; the timeout only bounds a
+        // regression instead of supplying the ordering.
+        let connectors = tokio::time::timeout(
+            Duration::from_secs(1),
+            list_all_connectors_with_options(
+                cache_context,
+                /*is_workspace_account*/ true,
+                /*force_refetch*/ true,
+                move |path| {
+                    let workspace_started = Arc::clone(&workspace_started);
+                    async move {
+                        if path.starts_with("/connectors/directory/list_workspace") {
+                            workspace_started.notify_one();
+                            Ok(DirectoryListResponse {
+                                apps: vec![app("workspace", "Workspace")],
+                                next_token: None,
+                            })
+                        } else {
+                            workspace_started.notified().await;
+                            Ok(DirectoryListResponse {
+                                apps: vec![app("directory", "Directory")],
+                                next_token: None,
+                            })
+                        }
+                    }
+                },
+            ),
+        )
+        .await
+        .expect("workspace request should start while directory request is pending")?;
+
+        assert_eq!(
+            connectors
+                .into_iter()
+                .map(|connector| connector.id)
+                .collect::<Vec<_>>(),
+            vec!["directory".to_string(), "workspace".to_string()]
+        );
         Ok(())
     }
 

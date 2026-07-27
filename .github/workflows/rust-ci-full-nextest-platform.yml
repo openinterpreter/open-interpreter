@@ -423,17 +423,6 @@ jobs:
           )
           if [[ "${{ inputs.test_threads }}" != "0" ]]; then
             nextest_args+=(--test-threads "${{ inputs.test_threads }}")
-          elif [[ "${{ inputs.remote_env }}" == "true" ]]; then
-            # The remote lane validates the codex-core integration suite, which
-            # is where TestCodex selects the shared exec-server. Do not run
-            # unrelated crate unit tests under CODEX_TEST_ENVIRONMENT=docker:
-            # they neither exercise the remote executor nor expect its global
-            # environment. Serialize this suite because every test process in
-            # a shard shares one exec-server transport and process-id space.
-            nextest_args+=(
-              --test-threads 1
-              --filter-expr 'package(codex-core) & binary(all)'
-            )
           fi
 
           test_command=(cargo nextest "${nextest_args[@]}")

@@ -6,7 +6,10 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codex_core_skills::loader::EnvironmentSkillMetadata;
+use codex_core_skills::loader::load_environment_skills_from_discovery;
 use codex_core_skills::loader::load_environment_skills_from_root;
+use codex_exec_server::CapabilityRootDiscoverRequest;
+use codex_exec_server::CapabilityRootsDiscoverParams;
 use codex_exec_server::CopyOptions;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
@@ -19,6 +22,7 @@ use codex_exec_server::ReadDirectoryEntry;
 use codex_exec_server::RemoveOptions;
 use codex_exec_server::WalkOptions;
 use codex_exec_server::WalkOutcome;
+use codex_exec_server::discover_capability_roots;
 use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use tempfile::tempdir;
@@ -410,4 +414,270 @@ async fn reads_skill_files_while_resolving_plugin_namespaces() {
             policy: None,
         }]
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn host_loading_reuses_walk_inventory_for_symlinked_skill_pack() {
+    use std::os::unix::fs::symlink;
+    use std::sync::Arc;
+
+    use codex_core_skills::SkillMetadata;
+    use codex_core_skills::SkillPolicy;
+    use codex_core_skills::loader::MAX_CONCURRENT_ROOT_SCANS;
+    use codex_core_skills::loader::SkillRoot;
+    use codex_core_skills::loader::load_skills_from_roots;
+    use codex_protocol::protocol::SkillScope;
+    use codex_utils_absolute_path::test_support::PathBufExt;
+
+    let root = tempdir().expect("tempdir");
+    let shared_plugin_root = tempdir().expect("tempdir");
+    let manifest_path = shared_plugin_root.path().join(".codex-plugin/plugin.json");
+    fs::create_dir_all(manifest_path.parent().expect("manifest parent")).expect("manifest dir");
+    fs::write(&manifest_path, r#"{"name":"linked"}"#).expect("manifest");
+
+    let skills_root = shared_plugin_root.path().join("skills");
+    for name in ["first", "second"] {
+        let skill_path = skills_root.join(name).join("SKILL.md");
+        fs::create_dir_all(skill_path.parent().expect("skill parent")).expect("skill dir");
+        fs::write(
+            &skill_path,
+            format!("---\nname: {name}\ndescription: {name} skill.\n---\n"),
+        )
+        .expect("skill");
+    }
+    let metadata_path = skills_root.join("first/agents/openai.yaml");
+    fs::create_dir_all(metadata_path.parent().expect("metadata parent")).expect("metadata dir");
+    fs::write(
+        &metadata_path,
+        "policy:\n  allow_implicit_invocation: false\n",
+    )
+    .expect("metadata");
+
+    let host_root = root.path().join("skills");
+    fs::create_dir_all(&host_root).expect("host skills dir");
+    let linked_root = host_root.join("linked-plugin");
+    symlink(&skills_root, &linked_root).expect("skill pack symlink");
+
+    let recording = Arc::new(RecordingFileSystem::new(
+        LOCAL_FS.as_ref(),
+        ManifestMetadataBehavior::Immediate,
+    ));
+    let file_system: Arc<dyn ExecutorFileSystem> = recording.clone();
+    let future = load_skills_from_roots(
+        [SkillRoot {
+            path: host_root.abs(),
+            scope: SkillScope::User,
+            file_system,
+            plugin_id: None,
+            plugin_namespace: None,
+            plugin_root: None,
+        }],
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    );
+    fn assert_send<T: Send>(_: &T) {}
+    assert_send(&future);
+    let outcome = future.await;
+
+    assert_eq!(outcome.errors, Vec::new());
+    let first_skill_path = dunce::canonicalize(skills_root.join("first/SKILL.md"))
+        .unwrap()
+        .abs();
+    let second_skill_path = dunce::canonicalize(skills_root.join("second/SKILL.md"))
+        .unwrap()
+        .abs();
+    assert_eq!(
+        outcome.skills,
+        vec![
+            SkillMetadata {
+                name: "linked:first".to_string(),
+                description: "first skill.".to_string(),
+                short_description: None,
+                interface: None,
+                dependencies: None,
+                policy: Some(SkillPolicy {
+                    allow_implicit_invocation: Some(false),
+                    products: Vec::new(),
+                }),
+                path_to_skills_md: first_skill_path,
+                scope: SkillScope::User,
+                plugin_id: None,
+            },
+            SkillMetadata {
+                name: "linked:second".to_string(),
+                description: "second skill.".to_string(),
+                short_description: None,
+                interface: None,
+                dependencies: None,
+                policy: None,
+                path_to_skills_md: second_skill_path,
+                scope: SkillScope::User,
+                plugin_id: None,
+            },
+        ]
+    );
+
+    let calls = recording.calls();
+    assert_eq!(calls.walks, 1);
+    let linked_root = PathUri::from_host_native_path(linked_root).unwrap();
+    assert!(
+        calls
+            .read_files
+            .iter()
+            .all(|path| !path.starts_with(&linked_root))
+    );
+    assert!(
+        calls
+            .metadata_files
+            .iter()
+            .all(|path| path.basename().as_deref() != Some("openai.yaml"))
+    );
+    let manifest_uri =
+        PathUri::from_host_native_path(dunce::canonicalize(manifest_path).unwrap()).unwrap();
+    assert_eq!(
+        calls
+            .metadata_files
+            .iter()
+            .filter(|path| **path == manifest_uri)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn executor_bundle_parser_matches_the_existing_environment_loader() {
+    let root = tempdir().expect("tempdir");
+    let plugin_manifest = root.path().join(".codex-plugin/plugin.json");
+    let nested_manifest = root.path().join("nested/.claude-plugin/plugin.json");
+    let deploy_skill = root.path().join("skills/deploy/SKILL.md");
+    let deploy_metadata = root.path().join("skills/deploy/agents/openai.yaml");
+    let audit_skill = root.path().join("nested/skills/audit/SKILL.md");
+    for (path, contents) in [
+        (&plugin_manifest, r#"{"name":"demo"}"#),
+        (&nested_manifest, r#"{"name":"nested"}"#),
+        (
+            &deploy_skill,
+            "---\nname: deploy\ndescription: Deploy the service.\n---\n\nDeploy.\n",
+        ),
+        (
+            &deploy_metadata,
+            "policy:\n  allow_implicit_invocation: false\n",
+        ),
+        (
+            &audit_skill,
+            "---\nname: audit\ndescription: Audit the service.\n---\n\nAudit.\n",
+        ),
+    ] {
+        fs::create_dir_all(path.parent().expect("test file parent")).expect("test directory");
+        fs::write(path, contents).expect("test file");
+    }
+
+    let root_uri = PathUri::from_host_native_path(root.path()).expect("root URI");
+    let existing = load_environment_skills_from_root(
+        LOCAL_FS.as_ref(),
+        &root_uri,
+        /*restriction_product*/ None,
+    )
+    .await;
+    let response = discover_capability_roots(
+        LOCAL_FS.as_ref(),
+        CapabilityRootsDiscoverParams {
+            roots: vec![CapabilityRootDiscoverRequest {
+                id: "demo@1".to_string(),
+                path: root_uri,
+            }],
+        },
+    )
+    .await
+    .expect("capability discovery");
+    let bundled = load_environment_skills_from_discovery(
+        response.roots.first().expect("discovered root"),
+        /*restriction_product*/ None,
+    );
+
+    assert_eq!(bundled.warnings, existing.warnings);
+    assert_eq!(
+        bundled
+            .skills
+            .iter()
+            .map(|skill| skill.metadata.clone())
+            .collect::<Vec<_>>(),
+        existing.skills
+    );
+    assert_eq!(
+        bundled
+            .skills
+            .iter()
+            .map(|skill| skill.instructions.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "---\nname: deploy\ndescription: Deploy the service.\n---\n\nDeploy.\n",
+            "---\nname: audit\ndescription: Audit the service.\n---\n\nAudit.\n",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn executor_bundle_preserves_parent_namespace_and_manifest_precedence() {
+    let plugin = tempdir().expect("tempdir");
+    for (relative_path, name) in [
+        (".codex-plugin/plugin.json", "codex-name"),
+        (".claude-plugin/plugin.json", "claude-name"),
+        (".cursor-plugin/plugin.json", "cursor-name"),
+    ] {
+        let manifest = plugin.path().join(relative_path);
+        fs::create_dir_all(manifest.parent().expect("manifest parent"))
+            .expect("manifest directory");
+        fs::write(&manifest, format!(r#"{{"name":"{name}"}}"#)).expect("manifest");
+    }
+    let skills_root = plugin.path().join("skills");
+    let skill_path = skills_root.join("search/SKILL.md");
+    fs::create_dir_all(skill_path.parent().expect("skill parent")).expect("skill directory");
+    fs::write(
+        &skill_path,
+        "---\nname: search\ndescription: Search the project.\n---\n\nSearch.\n",
+    )
+    .expect("skill");
+
+    let root_uri = PathUri::from_host_native_path(&skills_root).expect("skills root URI");
+    let existing = load_environment_skills_from_root(
+        LOCAL_FS.as_ref(),
+        &root_uri,
+        /*restriction_product*/ None,
+    )
+    .await;
+    let response = discover_capability_roots(
+        LOCAL_FS.as_ref(),
+        CapabilityRootsDiscoverParams {
+            roots: vec![CapabilityRootDiscoverRequest {
+                id: "skills-only".to_string(),
+                path: root_uri,
+            }],
+        },
+    )
+    .await
+    .expect("capability discovery");
+    let discovery = response.roots.first().expect("discovered root");
+    let bundled =
+        load_environment_skills_from_discovery(discovery, /*restriction_product*/ None);
+
+    assert_eq!(discovery.plugin, None);
+    assert_eq!(discovery.namespace_manifests.len(), 1);
+    assert!(
+        discovery.namespace_manifests[0]
+            .path
+            .to_string()
+            .ends_with("/.codex-plugin/plugin.json")
+    );
+    assert_eq!(bundled.warnings, existing.warnings);
+    assert_eq!(
+        bundled
+            .skills
+            .iter()
+            .map(|skill| skill.metadata.clone())
+            .collect::<Vec<_>>(),
+        existing.skills
+    );
+    assert_eq!(bundled.skills[0].metadata.name, "codex-name:search");
 }

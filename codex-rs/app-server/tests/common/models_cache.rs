@@ -7,6 +7,7 @@ use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelVisibility;
+use codex_protocol::openai_models::ReasoningControl;
 use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::openai_models::default_input_modalities;
 use serde_json::json;
@@ -20,7 +21,7 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
         description: Some(preset.description.clone()),
         default_reasoning_level: Some(preset.default_reasoning_effort.clone()),
         supported_reasoning_levels: preset.supported_reasoning_efforts.clone(),
-        reasoning_control: codex_protocol::openai_models::ReasoningControl::None,
+        reasoning_control: ReasoningControl::None,
         shell_type: ConfigShellToolType::ShellCommand,
         visibility: if preset.show_in_picker {
             ModelVisibility::List
@@ -37,6 +38,7 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
         model_messages: None,
         include_skills_usage_instructions: false,
         supports_reasoning_summaries: false,
+        supports_reasoning_summary_parameter: true,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,

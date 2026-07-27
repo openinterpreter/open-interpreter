@@ -155,12 +155,15 @@ fn build_messages(
                 action,
                 ..
             } => {
-                let call_id = call_id.clone().or_else(|| id.clone()).ok_or_else(|| {
-                    serde_json::Error::io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "local_shell history item missing call id",
-                    ))
-                })?;
+                let call_id = call_id
+                    .clone()
+                    .or_else(|| id.as_ref().map(ToString::to_string))
+                    .ok_or_else(|| {
+                        serde_json::Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "local_shell history item missing call id",
+                        ))
+                    })?;
                 let arguments = match action {
                     LocalShellAction::Exec(exec) => json!({
                         "command": exec.command,
@@ -313,6 +316,9 @@ fn convert_message_content(content: &[ContentItem]) -> Option<Value> {
             ContentItem::InputImage { image_url, detail } => {
                 chat_image_content_part(image_url, *detail)
             }
+            ContentItem::InputAudio { .. } => {
+                json!({ "type": "text", "text": "[audio content omitted]" })
+            }
         })
         .collect::<Vec<_>>();
     match parts.as_slice() {
@@ -343,6 +349,10 @@ fn minimal_tool_output_content(output: &FunctionCallOutputPayload) -> Value {
                 FunctionCallOutputContentItem::InputImage { image_url, detail } => {
                     chat_image_content_part(image_url, *detail)
                 }
+                FunctionCallOutputContentItem::InputAudio { .. } => json!({
+                    "type": "text",
+                    "text": "[audio content omitted]",
+                }),
                 FunctionCallOutputContentItem::InputVideo { .. } => json!({
                     "type": "text",
                     "text": "[video content omitted]",
@@ -451,7 +461,9 @@ mod tests {
     fn test_prompt() -> Prompt {
         Prompt {
             input: vec![ResponseItem::Message {
-                id: Some(std::convert::identity("user".to_string())),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "hello".to_string(),
@@ -494,7 +506,9 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
-                    id: Some(std::convert::identity("developer".to_string())),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "developer".to_string(),
+                    )),
                     role: "developer".to_string(),
                     content: vec![ContentItem::InputText {
                         text: "<skills_instructions>\n- imagegen\n</skills_instructions>"
@@ -505,7 +519,9 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
-                    id: Some(std::convert::identity("user".to_string())),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "user".to_string(),
+                    )),
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
                         text: "$imagegen what is this".to_string(),
@@ -541,7 +557,9 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
-                    id: Some(std::convert::identity("user".to_string())),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "user".to_string(),
+                    )),
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
                         text: "run date".to_string(),
@@ -551,7 +569,9 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Reasoning {
-                    id: Some(std::convert::identity("reasoning".to_string())),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "reasoning".to_string(),
+                    )),
                     summary: vec![],
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: "I should inspect the clock.".to_string(),
@@ -577,7 +597,9 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
-                    id: Some(std::convert::identity("user2".to_string())),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "user2".to_string(),
+                    )),
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
                         text: "what did you run?".to_string(),
@@ -614,7 +636,9 @@ mod tests {
     fn image_content_is_preserved_for_vision_models() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
-                id: Some(std::convert::identity("user".to_string())),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![
                     ContentItem::InputText {

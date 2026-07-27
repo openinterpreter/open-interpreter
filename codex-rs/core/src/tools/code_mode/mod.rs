@@ -16,11 +16,14 @@ use codex_code_mode::CodeModeSession;
 use codex_code_mode::CodeModeSessionProvider;
 use codex_code_mode::CodeModeToolKind;
 use codex_code_mode::RuntimeResponse;
+use codex_features::Feature;
+use codex_features::Features;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use serde_json::Value as JsonValue;
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
+use crate::audio_preparation::estimate_audio_token_count;
 use crate::function_tool::FunctionCallError;
 use crate::original_image_detail::can_request_original_image_detail;
 use crate::original_image_detail::sanitize_original_image_detail as sanitize_image_detail_items;
@@ -51,6 +54,13 @@ pub(crate) use wait_handler::CodeModeWaitHandler;
 pub(crate) const PUBLIC_TOOL_NAME: &str = codex_code_mode::PUBLIC_TOOL_NAME;
 pub(crate) const WAIT_TOOL_NAME: &str = codex_code_mode::WAIT_TOOL_NAME;
 pub(crate) const DEFAULT_WAIT_YIELD_TIME_MS: u64 = codex_code_mode::DEFAULT_WAIT_YIELD_TIME_MS;
+const BUFFERED_EXEC_YIELD_TIME_MS: u64 = 30_000;
+
+pub(crate) fn default_exec_yield_time_override_ms(features: &Features) -> Option<u64> {
+    features
+        .enabled(Feature::CodeModeBufferedExec)
+        .then_some(BUFFERED_EXEC_YIELD_TIME_MS)
+}
 
 /// Returns true for the un-namespaced code-mode `exec` tool.
 pub(crate) fn is_exec_tool_name(tool_name: &ToolName) -> bool {
@@ -67,16 +77,21 @@ pub(crate) struct CodeModeService {
     session: OnceCell<Arc<dyn CodeModeSession>>,
     session_provider: Arc<dyn CodeModeSessionProvider>,
     dispatch_broker: Arc<CodeModeDispatchBroker>,
+    default_exec_yield_time_override_ms: Option<u64>,
     shutting_down: AtomicBool,
 }
 
 impl CodeModeService {
-    pub(crate) fn new(session_provider: Arc<dyn CodeModeSessionProvider>) -> Self {
+    pub(crate) fn new(
+        session_provider: Arc<dyn CodeModeSessionProvider>,
+        features: &Features,
+    ) -> Self {
         let dispatch_broker = Arc::new(CodeModeDispatchBroker::new());
         Self {
             session: OnceCell::new(),
             session_provider,
             dispatch_broker,
+            default_exec_yield_time_override_ms: default_exec_yield_time_override_ms(features),
             shutting_down: AtomicBool::new(false),
         }
     }
@@ -87,8 +102,11 @@ impl CodeModeService {
 
     pub(crate) async fn execute(
         &self,
-        request: codex_code_mode::ExecuteRequest,
+        mut request: codex_code_mode::ExecuteRequest,
     ) -> Result<codex_code_mode::StartedCell, String> {
+        if request.yield_time_ms.is_none() {
+            request.yield_time_ms = self.default_exec_yield_time_override_ms;
+        }
         self.session().await?.execute(request).await
     }
 
@@ -269,7 +287,7 @@ fn truncate_code_mode_result(
         return truncated_items;
     }
 
-    truncate_function_output_items_with_policy(&items, policy)
+    truncate_function_output_items_with_policy(&items, policy, estimate_audio_token_count)
 }
 
 async fn call_nested_tool(
@@ -370,6 +388,7 @@ mod tests {
     use codex_code_mode::FunctionCallOutputContentItem as CodeModeOutputContentItem;
     use codex_code_mode::ProcessOwnedCodeModeSessionProvider;
     use codex_code_mode::RuntimeResponse;
+    use codex_features::Features;
     use codex_protocol::models::FunctionCallOutputContentItem;
     use codex_tools::ToolName;
     use serde_json::json;
@@ -427,13 +446,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn over_budget_audio_output_is_omitted() {
+        let items = vec![FunctionCallOutputContentItem::InputAudio {
+            audio_url: format!("data:audio/wav;base64,{}", "A".repeat(100)),
+        }];
+
+        assert_eq!(
+            truncate_code_mode_result(items, Some(5)),
+            vec![FunctionCallOutputContentItem::InputText {
+                text: "[omitted 1 audio items ...]".to_string(),
+            }]
+        );
+    }
+
     #[tokio::test]
     async fn missing_process_host_falls_back_to_in_process_session() {
-        let service = CodeModeService::new(Arc::new(
-            ProcessOwnedCodeModeSessionProvider::with_host_program(
+        let service = CodeModeService::new(
+            Arc::new(ProcessOwnedCodeModeSessionProvider::with_host_program(
                 "codex-code-mode-host-does-not-exist".into(),
-            ),
-        ));
+            )),
+            &Features::with_defaults(),
+        );
 
         let response = service
             .execute(ExecuteRequest {

@@ -3,10 +3,10 @@ use codex_api::ImageEditRequest;
 use codex_api::ImageGenerationRequest;
 use codex_api::ImageQuality;
 use codex_api::ImageUrl;
-use codex_core::context::extension_image_generation_output_hint;
 use codex_extension_api::ToolOutput;
 use codex_extension_api::ToolPayload;
 use codex_extension_api::ToolSpec;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -15,6 +15,7 @@ use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_tools::ResponsesApiNamespaceTool;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 
 use super::GeneratedImageOutput;
@@ -24,8 +25,23 @@ use super::imagegen_tool_spec;
 use super::request_for_call_args;
 use crate::IMAGE_GEN_NAMESPACE;
 use crate::IMAGEGEN_TOOL_NAME;
+use crate::artifact::image_generation_artifact_path;
+use crate::artifact::image_generation_output_hint;
 
 const RESULT: &str = "cG5n";
+
+#[test]
+fn artifact_path_sanitizes_session_and_call_ids() {
+    let save_root = AbsolutePathBuf::current_dir().expect("current directory should be absolute");
+
+    assert_eq!(
+        image_generation_artifact_path(&save_root, "../session", "../call"),
+        save_root
+            .join("generated_images")
+            .join("___session")
+            .join("___call.png")
+    );
+}
 
 #[test]
 fn uses_reserved_image_gen_namespace() {
@@ -109,7 +125,7 @@ async fn recent_image_fallback_selects_newest_images_in_chronological_order() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::ImageGenerationCall {
-            id: Some("generated-call".to_string()),
+            id: Some(ResponseItemId::with_suffix("ig", "generated-call")),
             status: "completed".to_string(),
             revised_prompt: None,
             result: "generated".to_string(),
@@ -223,7 +239,7 @@ async fn recent_image_fallback_requires_requested_count() {
 #[test]
 fn generated_output_returns_image_input_and_output_hint() {
     let output_hint =
-        extension_image_generation_output_hint("/tmp", "/tmp/call-1.png").expect("hint should fit");
+        image_generation_output_hint("/tmp", "/tmp/call-1.png").expect("hint should fit");
     let output = GeneratedImageOutput {
         result: RESULT.to_string(),
         output_hint: Some(output_hint.clone()),
@@ -272,7 +288,7 @@ fn generated_output_omits_oversized_output_hint() {
     let long_path = "x".repeat(1024);
     let output = GeneratedImageOutput {
         result: RESULT.to_string(),
-        output_hint: extension_image_generation_output_hint("/tmp", long_path),
+        output_hint: image_generation_output_hint("/tmp", long_path),
     };
 
     let ResponseInputItem::FunctionCallOutput {

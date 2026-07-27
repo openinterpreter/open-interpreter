@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -44,6 +45,18 @@ const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 #[tokio::test]
 async fn standalone_web_search_round_trips_output() -> Result<()> {
     let call_id = "web-run-1";
+    let expected_model_id = "model-id-from-search-context";
+    let search_context = json!({
+        "telemetry_attributes": {
+            "model_id": expected_model_id,
+            "model_slug": "mock-model",
+        }
+    })
+    .to_string();
+    let client_metadata = HashMap::from([(
+        "mcp_request_meta".to_string(),
+        json!({ "openai/search_context": search_context }).to_string(),
+    )]);
     let server = responses::start_mock_server().await;
     mount_search_response(&server).await;
 
@@ -87,7 +100,10 @@ async fn standalone_web_search_round_trips_output() -> Result<()> {
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
-        .send_thread_start_request_with_auto_env(ThreadStartParams::default())
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            service_name: Some("chatgpt_cca".to_string()),
+            ..Default::default()
+        })
         .await?;
     let thread_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
@@ -105,6 +121,7 @@ async fn standalone_web_search_round_trips_output() -> Result<()> {
                 text: "Search the web".to_string(),
                 text_elements: Vec::new(),
             }],
+            responsesapi_client_metadata: Some(client_metadata.clone()),
             ..Default::default()
         })
         .await?;
@@ -144,7 +161,23 @@ async fn standalone_web_search_round_trips_output() -> Result<()> {
         "standalone web search should replace hosted web search"
     );
 
-    let search_body = search_request_body(&server).await?;
+    let search_request = search_request(&server).await?;
+    assert_eq!(
+        search_request
+            .headers
+            .get("originator")
+            .context("standalone search should include the thread originator")?
+            .to_str()
+            .context("standalone search originator should be valid ASCII")?,
+        "chatgpt_cca"
+    );
+    let search_body = search_request
+        .body_json::<Value>()
+        .context("search request body should be JSON")?;
+    assert!(
+        search_body.get("result_fields").is_none(),
+        "standalone search should use the endpoint's default result projection"
+    );
     assert_eq!(search_body["model"], json!("mock-model"));
     assert_eq!(
         search_body["commands"],
@@ -169,6 +202,30 @@ async fn standalone_web_search_round_trips_output() -> Result<()> {
             "content": [{"type": "input_text", "text": "Search the web"}],
         }))
     );
+    let turn_metadata_header = search_request
+        .headers
+        .get("x-codex-turn-metadata")
+        .context("standalone search should include x-codex-turn-metadata")?
+        .to_str()
+        .context("x-codex-turn-metadata should be valid ASCII")?;
+    let turn_metadata: Value = serde_json::from_str(turn_metadata_header)
+        .context("x-codex-turn-metadata should be valid JSON")?;
+    let mcp_request_meta = turn_metadata["mcp_request_meta"]
+        .as_str()
+        .context("mcp_request_meta should be a JSON string")?;
+    let mcp_request_meta: Value = serde_json::from_str(mcp_request_meta)
+        .context("mcp_request_meta should contain valid JSON")?;
+    let search_context = mcp_request_meta["openai/search_context"]
+        .as_str()
+        .context("openai/search_context should be a JSON string")?;
+    let search_context: Value = serde_json::from_str(search_context)
+        .context("openai/search_context should contain valid JSON")?;
+    assert_eq!(
+        search_context
+            .pointer("/telemetry_attributes/model_id")
+            .and_then(Value::as_str),
+        Some(expected_model_id)
+    );
 
     assert_eq!(
         responses::strip_metadata_from_json(requests[1].function_call_output(call_id)),
@@ -187,6 +244,7 @@ async fn standalone_web_search_round_trips_output() -> Result<()> {
             id: call_id.to_string(),
             query: String::new(),
             action: None,
+            results: None,
         })
     );
     let expected_completed_item = ThreadItem::WebSearch(WebSearchItem {
@@ -196,6 +254,14 @@ async fn standalone_web_search_round_trips_output() -> Result<()> {
             query: Some("standalone web search".to_string()),
             queries: None,
         }),
+        results: Some(vec![json!({
+            "type": "text_result",
+            "ref_id": "turn0search0",
+            "url": "https://example.com/search-result",
+            "title": "Search Result",
+            "snippet": "A result snippet",
+            "future_field": {"preserved": true},
+        })]),
     });
     assert_eq!(completed.item, expected_completed_item);
 
@@ -269,6 +335,14 @@ async fn mount_search_response(server: &MockServer) {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "encrypted_output": "ciphertext",
             "output": "Search result",
+            "results": [{
+                "type": "text_result",
+                "ref_id": "turn0search0",
+                "url": "https://example.com/search-result",
+                "title": "Search Result",
+                "snippet": "A result snippet",
+                "future_field": {"preserved": true},
+            }],
         })))
         .expect(1)
         .mount(server)
@@ -285,16 +359,15 @@ fn has_hosted_web_search(body: &Value) -> bool {
         })
 }
 
-async fn search_request_body(server: &MockServer) -> Result<Value> {
-    server
+async fn search_request(server: &MockServer) -> Result<wiremock::Request> {
+    let requests = server
         .received_requests()
         .await
-        .context("failed to fetch received requests")?
+        .context("failed to fetch received requests")?;
+    requests
         .into_iter()
         .find(|request| request.url.path() == "/api/codex/alpha/search")
-        .context("expected standalone search request")?
-        .body_json()
-        .context("search request body should be JSON")
+        .context("expected standalone search request")
 }
 
 fn create_config_toml(codex_home: &Path, server_uri: &str) -> std::io::Result<()> {

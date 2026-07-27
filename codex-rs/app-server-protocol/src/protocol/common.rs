@@ -630,6 +630,13 @@ client_request_definitions! {
         serialization: None,
         response: v2::ThreadSearchResponse,
     },
+    #[experimental("thread/searchOccurrences")]
+    ThreadSearchOccurrences => "thread/searchOccurrences" {
+        params: v2::ThreadSearchOccurrencesParams,
+        // Explicitly concurrent: this reads persisted paginated history.
+        serialization: None,
+        response: v2::ThreadSearchOccurrencesResponse,
+    },
     ThreadLoadedList => "thread/loaded/list" {
         params: v2::ThreadLoadedListParams,
         serialization: None,
@@ -735,10 +742,20 @@ client_request_definitions! {
         serialization: global("config"),
         response: v2::PluginShareDeleteResponse,
     },
+    AppsRead => "app/read" {
+        params: v2::AppsReadParams,
+        serialization: None,
+        response: v2::AppsReadResponse,
+    },
     AppsList => "app/list" {
         params: v2::AppsListParams,
         serialization: None,
         response: v2::AppsListResponse,
+    },
+    AppsInstalled => "app/installed" {
+        params: v2::AppsInstalledParams,
+        serialization: None,
+        response: v2::AppsInstalledResponse,
     },
     // File system requests are intentionally concurrent. Desktop already treats local
     // file system operations as concurrent, and app-server remote fs mirrors that model.
@@ -985,6 +1002,13 @@ client_request_definitions! {
         params: v2::EnvironmentInfoParams,
         serialization: global_shared_read("environment"),
         response: v2::EnvironmentInfoResponse,
+    },
+    #[experimental("environment/status")]
+    /// Reads the current status of a configured execution environment.
+    EnvironmentStatus => "environment/status" {
+        params: v2::EnvironmentStatusParams,
+        serialization: global_shared_read("environment"),
+        response: v2::EnvironmentStatusResponse,
     },
 
     McpServerOauthLogin => "mcpServer/oauth/login" {
@@ -1653,6 +1677,10 @@ server_notification_definitions! {
     ThreadNameUpdated => "thread/name/updated" (v2::ThreadNameUpdatedNotification),
     ThreadGoalUpdated => "thread/goal/updated" (v2::ThreadGoalUpdatedNotification),
     ThreadGoalCleared => "thread/goal/cleared" (v2::ThreadGoalClearedNotification),
+    #[experimental("thread/environment/connected")]
+    EnvironmentConnected => "thread/environment/connected" (v2::EnvironmentConnectionNotification),
+    #[experimental("thread/environment/disconnected")]
+    EnvironmentDisconnected => "thread/environment/disconnected" (v2::EnvironmentConnectionNotification),
     #[experimental("thread/settings/updated")]
     ThreadSettingsUpdated => "thread/settings/updated" (v2::ThreadSettingsUpdatedNotification),
     ThreadTokenUsageUpdated => "thread/tokenUsage/updated" (v2::ThreadTokenUsageUpdatedNotification),
@@ -1668,6 +1696,8 @@ server_notification_definitions! {
     ItemCompleted => "item/completed" (v2::ItemCompletedNotification),
     /// This event is internal-only. Used by Codex Cloud.
     RawResponseItemCompleted => "rawResponseItem/completed" (v2::RawResponseItemCompletedNotification),
+    /// This event is internal-only. Used by clients that need exact upstream usage.
+    RawResponseCompleted => "rawResponse/completed" (v2::RawResponseCompletedNotification),
     AgentMessageDelta => "item/agentMessage/delta" (v2::AgentMessageDeltaNotification),
     /// EXPERIMENTAL - proposed plan streaming deltas for plan items.
     PlanDelta => "item/plan/delta" (v2::PlanDeltaNotification),
@@ -1739,6 +1769,25 @@ server_notification_definitions! {
 
 }
 
+/// Server notification envelope sent over app-server transports.
+///
+/// `emitted_at_ms` records when app-server emitted the notification, before it
+/// is fanned out to individual connections.
+#[derive(Serialize, Deserialize, Debug, Clone, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerNotificationEnvelope {
+    #[serde(flatten)]
+    pub notification: ServerNotification,
+    /// Unix timestamp (in milliseconds) when app-server emitted this notification.
+    ///
+    /// Optional so clients can decode notifications from older app-server
+    /// versions. Current app-server versions always populate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub emitted_at_ms: Option<i64>,
+}
+
 client_notification_definitions! {
     Initialized,
 }
@@ -1748,11 +1797,12 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use codex_protocol::ThreadId;
-    use codex_protocol::account::AmazonBedrockCredentialSource;
     use codex_protocol::account::PlanType;
     use codex_protocol::config_types::MultiAgentMode;
     use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
     use codex_protocol::parse_command::ParsedCommand;
+    use codex_protocol::protocol::CodexResponseHandoffMode;
+    use codex_protocol::protocol::ConversationTextRole;
     use codex_protocol::protocol::RealtimeConversationVersion;
     use codex_protocol::protocol::RealtimeOutputModality;
     use codex_protocol::protocol::RealtimeVoice;
@@ -2633,6 +2683,7 @@ mod tests {
                     cwd: cwd.clone(),
                     cli_version: "0.0.0".to_string(),
                     source: v2::SessionSource::Exec,
+                    can_accept_direct_input: None,
                     thread_source: None,
                     agent_nickname: None,
                     agent_role: None,
@@ -2686,6 +2737,7 @@ mod tests {
                         "cwd": absolute_path_string("tmp"),
                         "cliVersion": "0.0.0",
                         "source": "exec",
+                        "canAcceptDirectInput": null,
                         "threadSource": null,
                         "agentNickname": null,
                         "agentRole": null,
@@ -2748,6 +2800,34 @@ mod tests {
                 }
             }),
             serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_account_login_amazon_bedrock() -> Result<()> {
+        let request = ClientRequest::LoginAccount {
+            request_id: RequestId::Integer(2),
+            params: v2::LoginAccountParams::AmazonBedrock {
+                api_key: "secret".to_string(),
+                region: "us-west-2".to_string(),
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "account/login/start",
+                "id": 2,
+                "params": {
+                    "type": "amazonBedrock",
+                    "apiKey": "secret",
+                    "region": "us-west-2"
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        assert_eq!(
+            json!({"type": "amazonBedrock"}),
+            serde_json::to_value(v2::LoginAccountResponse::AmazonBedrock {})?,
         );
         Ok(())
     }
@@ -2960,35 +3040,35 @@ mod tests {
         );
 
         let codex_managed_bedrock = v2::Account::AmazonBedrock {
-            credential_source: AmazonBedrockCredentialSource::CodexManaged,
+            uses_codex_managed_credentials: true,
         };
         assert_eq!(
             json!({
                 "type": "amazonBedrock",
-                "credentialSource": "codexManaged",
+                "usesCodexManagedCredentials": true,
             }),
             serde_json::to_value(&codex_managed_bedrock)?,
         );
 
-        let aws_managed_bedrock = v2::Account::AmazonBedrock {
-            credential_source: AmazonBedrockCredentialSource::AwsManaged,
+        let externally_managed_bedrock = v2::Account::AmazonBedrock {
+            uses_codex_managed_credentials: false,
         };
         assert_eq!(
             json!({
                 "type": "amazonBedrock",
-                "credentialSource": "awsManaged",
+                "usesCodexManagedCredentials": false,
             }),
-            serde_json::to_value(&aws_managed_bedrock)?,
+            serde_json::to_value(&externally_managed_bedrock)?,
         );
 
         Ok(())
     }
 
     #[test]
-    fn account_defaults_legacy_bedrock_credential_source() -> Result<()> {
+    fn account_defaults_legacy_bedrock_managed_credentials_flag() -> Result<()> {
         assert_eq!(
             v2::Account::AmazonBedrock {
-                credential_source: AmazonBedrockCredentialSource::AwsManaged,
+                uses_codex_managed_credentials: false,
             },
             serde_json::from_value(json!({
                 "type": "amazonBedrock",
@@ -3068,6 +3148,89 @@ mod tests {
                     "limit": null,
                     "threadId": null
                 }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_installed_apps() -> Result<()> {
+        let request = ClientRequest::AppsInstalled {
+            request_id: RequestId::Integer(9),
+            params: v2::AppsInstalledParams::default(),
+        };
+        assert_eq!(
+            json!({
+                "method": "app/installed",
+                "id": 9,
+                "params": {
+                    "threadId": null
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+
+        let force_refresh_request = ClientRequest::AppsInstalled {
+            request_id: RequestId::Integer(10),
+            params: v2::AppsInstalledParams {
+                thread_id: Some("thread-1".to_string()),
+                force_refresh: true,
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "app/installed",
+                "id": 10,
+                "params": {
+                    "threadId": "thread-1",
+                    "forceRefresh": true
+                }
+            }),
+            serde_json::to_value(&force_refresh_request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_installed_apps_response() -> Result<()> {
+        let response = v2::AppsInstalledResponse {
+            apps: vec![v2::InstalledApp {
+                id: "demo-app".to_string(),
+                runtime_name: Some("Demo App".to_string()),
+                enabled: false,
+                callable: false,
+            }],
+        };
+
+        assert_eq!(
+            json!({
+                "apps": [{
+                    "id": "demo-app",
+                    "runtimeName": "Demo App",
+                    "enabled": false,
+                    "callable": false
+                }]
+            }),
+            serde_json::to_value(response)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_read_apps() -> Result<()> {
+        let request = ClientRequest::AppsRead {
+            request_id: RequestId::Integer(9),
+            params: v2::AppsReadParams {
+                app_ids: vec!["app-a".to_string(), "app-b".to_string()],
+                include_tools: true,
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "app/read",
+                "id": 9,
+                "params": { "appIds": ["app-a", "app-b"], "includeTools": true }
             }),
             serde_json::to_value(&request)?,
         );
@@ -3267,15 +3430,25 @@ mod tests {
                 flush_transcript_tail_on_session_end: Some(true),
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
-                codex_response_handoff_prefix: Some("silent context".to_string()),
+                codex_response_handoff_mode: Some(CodexResponseHandoffMode::BemTags),
                 thread_id: "thr_123".to_string(),
                 model: Some("realtime-treatment-model".to_string()),
                 output_modality: RealtimeOutputModality::Audio,
                 include_startup_context: Some(false),
+                initial_items: Some(vec![
+                    v2::ThreadRealtimeInitialItem {
+                        role: ConversationTextRole::Developer,
+                        text: "Remember this.".to_string(),
+                    },
+                    v2::ThreadRealtimeInitialItem {
+                        role: ConversationTextRole::Assistant,
+                        text: "Understood.".to_string(),
+                    },
+                ]),
                 prompt: Some(Some("You are on a call".to_string())),
                 realtime_session_id: Some("sess_456".to_string()),
                 transport: None,
-                version: Some(RealtimeConversationVersion::V1),
+                version: Some(RealtimeConversationVersion::V3),
                 voice: Some(RealtimeVoice::Marin),
             },
         };
@@ -3289,14 +3462,24 @@ mod tests {
                     "flushTranscriptTailOnSessionEnd": true,
                     "codexResponsesAsItems": null,
                     "codexResponseItemPrefix": null,
-                    "codexResponseHandoffPrefix": "silent context",
+                    "codexResponseHandoffMode": "bemTags",
                     "model": "realtime-treatment-model",
                     "outputModality": "audio",
                     "includeStartupContext": false,
+                    "initialItems": [
+                        {
+                            "role": "developer",
+                            "text": "Remember this."
+                        },
+                        {
+                            "role": "assistant",
+                            "text": "Understood."
+                        }
+                    ],
                     "prompt": "You are on a call",
                     "realtimeSessionId": "sess_456",
                     "transport": null,
-                    "version": "v1",
+                    "version": "v3",
                     "voice": "marin"
                 }
             }),
@@ -3314,11 +3497,12 @@ mod tests {
                 flush_transcript_tail_on_session_end: None,
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
-                codex_response_handoff_prefix: None,
+                codex_response_handoff_mode: None,
                 thread_id: "thr_123".to_string(),
                 model: None,
                 output_modality: RealtimeOutputModality::Audio,
                 include_startup_context: None,
+                initial_items: None,
                 prompt: None,
                 realtime_session_id: None,
                 transport: None,
@@ -3336,10 +3520,11 @@ mod tests {
                     "flushTranscriptTailOnSessionEnd": null,
                     "codexResponsesAsItems": null,
                     "codexResponseItemPrefix": null,
-                    "codexResponseHandoffPrefix": null,
+                    "codexResponseHandoffMode": null,
                     "model": null,
                     "outputModality": "audio",
                     "includeStartupContext": null,
+                    "initialItems": null,
                     "realtimeSessionId": null,
                     "transport": null,
                     "version": null,
@@ -3356,11 +3541,12 @@ mod tests {
                 flush_transcript_tail_on_session_end: None,
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
-                codex_response_handoff_prefix: None,
+                codex_response_handoff_mode: None,
                 thread_id: "thr_123".to_string(),
                 model: None,
                 output_modality: RealtimeOutputModality::Audio,
                 include_startup_context: None,
+                initial_items: None,
                 prompt: Some(None),
                 realtime_session_id: None,
                 transport: None,
@@ -3378,10 +3564,11 @@ mod tests {
                     "flushTranscriptTailOnSessionEnd": null,
                     "codexResponsesAsItems": null,
                     "codexResponseItemPrefix": null,
-                    "codexResponseHandoffPrefix": null,
+                    "codexResponseHandoffMode": null,
                     "model": null,
                     "outputModality": "audio",
                     "includeStartupContext": null,
+                    "initialItems": null,
                     "prompt": null,
                     "realtimeSessionId": null,
                     "transport": null,
@@ -3397,6 +3584,8 @@ mod tests {
             "id": 9,
             "params": {
                 "threadId": "thr_123",
+                // Retain runtime compatibility with clients that have not yet removed this field.
+                "codexResponseHandoffPrefix": "",
                 "outputModality": "audio",
                 "realtimeSessionId": null,
                 "transport": null,
@@ -3596,11 +3785,12 @@ mod tests {
                 flush_transcript_tail_on_session_end: None,
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
-                codex_response_handoff_prefix: None,
+                codex_response_handoff_mode: None,
                 thread_id: "thr_123".to_string(),
                 model: None,
                 output_modality: RealtimeOutputModality::Audio,
                 include_startup_context: None,
+                initial_items: None,
                 prompt: Some(Some("You are on a call".to_string())),
                 realtime_session_id: None,
                 transport: None,

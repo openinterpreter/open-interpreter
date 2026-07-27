@@ -370,7 +370,7 @@ fn first_non_contextual_user_text(prompt: &Prompt) -> Option<&str> {
                 ContentItem::InputText { text } | ContentItem::OutputText { text } => {
                     Some(text.as_str())
                 }
-                ContentItem::InputImage { .. } => None,
+                ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
             })
         }
         _ => None,
@@ -967,6 +967,10 @@ fn map_message_content_item(item: &ContentItem) -> Option<AnthropicContentBlock>
             text: "[image omitted by claude-code harness]".to_string(),
             cache_control: None,
         }),
+        ContentItem::InputAudio { .. } => Some(AnthropicContentBlock::Text {
+            text: "[audio omitted by claude-code harness]".to_string(),
+            cache_control: None,
+        }),
     }
 }
 
@@ -990,6 +994,10 @@ fn map_tool_result_content_item(
         }
         FunctionCallOutputContentItem::InputVideo { .. } => Some(AnthropicToolResultBlock::Text {
             text: "[video omitted by claude-code harness]".to_string(),
+            cache_control: None,
+        }),
+        FunctionCallOutputContentItem::InputAudio { .. } => Some(AnthropicToolResultBlock::Text {
+            text: "[audio omitted by claude-code harness]".to_string(),
             cache_control: None,
         }),
         FunctionCallOutputContentItem::EncryptedContent { .. } => None,

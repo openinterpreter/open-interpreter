@@ -27,6 +27,7 @@ use crate::LoadThreadHistoryParams;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
+use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::ThreadMetadataPatch;
@@ -38,7 +39,6 @@ use crate::ThreadStoreFuture;
 use crate::ThreadStoreResult;
 use crate::UpdateThreadMetadataParams;
 use crate::error::reject_paginated_history_mode;
-use crate::types::canonical_history_mode_from_rollout_items;
 
 static IN_MEMORY_THREAD_STORES: OnceLock<Mutex<HashMap<String, Arc<InMemoryThreadStore>>>> =
     OnceLock::new();
@@ -132,6 +132,7 @@ mod tests {
                     selected_capability_roots: Vec::new(),
                     multi_agent_version: None,
                     history_mode: ThreadHistoryMode::Legacy,
+                    subagent_history_start_ordinal: None,
                     initial_window_id: uuid::Uuid::now_v7().to_string(),
                     metadata: ThreadPersistenceMetadata {
                         cwd: None,
@@ -199,7 +200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paginated_threads_allow_metadata_reads_and_reject_legacy_history_paths() {
+    async fn paginated_threads_allow_metadata_reads_and_resume_but_reject_legacy_history_paths() {
         let store = InMemoryThreadStore::default();
         let thread_id = ThreadId::default();
         let rollout_path = PathBuf::from("/tmp/paginated-thread.jsonl");
@@ -286,18 +287,16 @@ mod tests {
                 .await
                 .expect_err("history load should fail"),
         );
-        assert_paginated_threads_unsupported(
-            store
-                .resume_thread(ResumeThreadParams {
-                    thread_id,
-                    rollout_path: None,
-                    history: None,
-                    include_archived: false,
-                    metadata: thread_metadata(),
-                })
-                .await
-                .expect_err("resume should fail"),
-        );
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: None,
+                history: None,
+                include_archived: false,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume should succeed");
         assert_paginated_threads_unsupported(
             store
                 .create_thread(create_thread_params(
@@ -327,6 +326,7 @@ mod tests {
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             history_mode,
+            subagent_history_start_ordinal: None,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
             metadata: thread_metadata(),
         }
@@ -368,6 +368,7 @@ pub struct InMemoryThreadStoreCalls {
     pub shutdown_thread: usize,
     pub discard_thread: usize,
     pub load_history: usize,
+    pub load_latest_model_context: usize,
     pub read_thread: usize,
     pub read_thread_with_history: usize,
     pub read_thread_by_rollout_path: usize,
@@ -442,6 +443,8 @@ impl InMemoryThreadStore {
             memory_mode: matches!(params.metadata.memory_mode, ThreadMemoryMode::Disabled)
                 .then_some("disabled".to_string()),
             history_mode: params.history_mode,
+            history_base: None,
+            subagent_history_start_ordinal: params.subagent_history_start_ordinal,
             multi_agent_version: params.multi_agent_version,
             context_window: Some(SessionContextWindow::new(params.initial_window_id.clone())),
             ..SessionMeta::default()
@@ -461,13 +464,6 @@ impl InMemoryThreadStore {
     async fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreResult<()> {
         let mut state = self.state.lock().await;
         state.calls.resume_thread += 1;
-        let history_mode = params
-            .history
-            .as_deref()
-            .map(Vec::as_slice)
-            .map(canonical_history_mode_from_rollout_items)
-            .unwrap_or_else(|| history_mode_from_state(&state, params.thread_id));
-        reject_paginated_history_mode(history_mode)?;
         if let Some(history) = params.history {
             state
                 .histories
@@ -516,6 +512,25 @@ impl InMemoryThreadStore {
         let history_mode = history_mode_from_state(&state, params.thread_id);
         reject_paginated_history_mode(history_mode)?;
         Ok(StoredThreadHistory {
+            thread_id: params.thread_id,
+            items: items.clone(),
+        })
+    }
+
+    async fn load_latest_model_context(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreResult<StoredModelContext> {
+        let mut state = self.state.lock().await;
+        state.calls.load_latest_model_context += 1;
+        let items =
+            state
+                .histories
+                .get(&params.thread_id)
+                .ok_or(ThreadStoreError::ThreadNotFound {
+                    thread_id: params.thread_id,
+                })?;
+        Ok(StoredModelContext {
             thread_id: params.thread_id,
             items: items.clone(),
         })
@@ -657,6 +672,13 @@ impl ThreadStore for InMemoryThreadStore {
         params: LoadThreadHistoryParams,
     ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
         Box::pin(InMemoryThreadStore::load_history(self, params))
+    }
+
+    fn load_latest_model_context(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreFuture<'_, StoredModelContext> {
+        Box::pin(InMemoryThreadStore::load_latest_model_context(self, params))
     }
 
     fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {

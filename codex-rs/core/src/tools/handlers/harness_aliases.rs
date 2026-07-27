@@ -4050,6 +4050,7 @@ mod tests {
     use tokio::sync::Mutex;
     use tokio_util::sync::CancellationToken;
 
+    use crate::environment_selection::TurnEnvironmentState;
     use crate::session::tests::make_session_and_context;
     use crate::session::turn_context::TurnEnvironment;
     use crate::tools::context::ToolCallSource;
@@ -4083,13 +4084,19 @@ mod tests {
         {
             turn.cwd = workspace_root.clone();
         }
-        let current = turn.environments.turn_environments[0].clone();
-        turn.environments.turn_environments[0] = TurnEnvironment::new(
+        let current = turn
+            .environments
+            .primary()
+            .expect("primary environment")
+            .clone();
+        let workspace_root_uri: codex_utils_path_uri::PathUri = workspace_root.clone().into();
+        turn.environments.environments[0] = TurnEnvironmentState::Ready(TurnEnvironment::new(
             current.environment_id,
             current.environment,
-            workspace_root.clone().into(),
+            workspace_root_uri.clone(),
+            vec![workspace_root_uri],
             current.shell,
-        );
+        ));
         let file_system_sandbox_policy =
             FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
                 path: FileSystemPath::Path {
@@ -5043,9 +5050,11 @@ mod tests {
                 codex_protocol::protocol::TurnCompleteEvent {
                     turn_id: "turn-1".to_string(),
                     last_agent_message: Some("done".to_string()),
+                    started_at: None,
                     completed_at: None,
                     duration_ms: Some(12_345),
                     time_to_first_token_ms: None,
+                    error: None,
                 },
             )),
         ];

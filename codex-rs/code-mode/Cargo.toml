@@ -32,3 +32,4 @@ v8-runtime = ["dep:v8", "dep:deno_core_icudata"]
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

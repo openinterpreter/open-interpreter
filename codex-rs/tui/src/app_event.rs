@@ -9,12 +9,17 @@
 //! quits without reaching into the app loop or coupling to shutdown/exit sequencing.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
+use crate::inline_visualization::InlineVisualizationContext;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountTokenUsageResponse;
+use codex_app_server_protocol::InterpreterHarness;
+use codex_app_server_protocol::InterpreterProvider;
 use codex_app_server_protocol::MarketplaceAddResponse;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
@@ -30,6 +35,7 @@ use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_connectors::AppInfo;
 use codex_file_search::FileMatch;
+use codex_message_history::HistoryBatchCursor;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelPreset;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -63,13 +69,6 @@ pub(crate) enum ThreadGoalSetMode {
     },
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct HistoryLookupResponse {
-    pub(crate) offset: usize,
-    pub(crate) log_id: u64,
-    pub(crate) entry: Option<String>,
-}
-
 /// How the Kimi Code OAuth device login flow finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KimiCodeLoginOutcome {
@@ -77,6 +76,39 @@ pub(crate) enum KimiCodeLoginOutcome {
     AlreadyAuthenticated,
     /// The browser device flow completed and credentials were stored.
     SignedIn,
+}
+
+/// One absolute history offset returned by a batch lookup.
+///
+/// Malformed rows retain their offset with `entry` set to `None` so the composer can cache the gap
+/// without shifting every older record.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HistoryBatchEntryResponse {
+    pub(crate) offset: usize,
+    pub(crate) entry: Option<String>,
+}
+
+/// Persistent-history data routed back to the thread that requested it.
+///
+/// Batch responses preserve absolute offsets and malformed-row gaps so the composer can cache the
+/// data independently of whichever search query is active when the response arrives.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum HistoryLookupResponse {
+    Entry {
+        offset: usize,
+        log_id: u64,
+        entry: Option<String>,
+    },
+    Batch {
+        cursor: HistoryBatchCursor,
+        log_id: u64,
+        entries: Vec<HistoryBatchEntryResponse>,
+        next_older_cursor: Option<HistoryBatchCursor>,
+    },
+    BatchError {
+        cursor: HistoryBatchCursor,
+        log_id: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,12 +205,13 @@ pub(crate) enum AppEvent {
         op: AppCommand,
     },
 
-    /// Interrupt, roll back, and retry a safety-buffered turn with the server-selected model.
+    /// Interrupt, fork, and retry a safety-buffered turn with the server-selected model.
     RetrySafetyBufferedTurn {
         thread_id: ThreadId,
         turn_id: String,
         model: String,
         turn: AppCommand,
+        prompt: UserMessage,
     },
 
     /// Deliver a synthetic history lookup response to a specific thread channel.
@@ -203,6 +236,13 @@ pub(crate) enum AppEvent {
     LookupMessageHistoryEntry {
         thread_id: ThreadId,
         offset: usize,
+        log_id: u64,
+    },
+
+    /// Fetch a bounded batch of persistent history entries for reverse search.
+    LookupMessageHistoryBatch {
+        thread_id: ThreadId,
+        cursor: HistoryBatchCursor,
         log_id: u64,
     },
 
@@ -249,6 +289,13 @@ pub(crate) enum AppEvent {
     /// Fork the current session into a new thread.
     ForkCurrentSession,
 
+    /// Branch before a selected prompt and reopen it in the new thread's composer.
+    ForkSessionForPromptEdit {
+        thread_id: ThreadId,
+        nth_user_message: usize,
+        prompt: UserMessage,
+    },
+
     /// Request to exit the application.
     ///
     /// Use `ShutdownFirst` for user-initiated quits so core cleanup runs and the
@@ -267,9 +314,6 @@ pub(crate) enum AppEvent {
     /// Forward a command to the Agent. Using an `AppEvent` for this avoids
     /// bubbling channels through layers of widgets.
     CodexOp(AppCommand),
-
-    /// Restore an output-free interrupted turn into the composer and roll it back.
-    RestoreCancelledTurn(UserMessage),
 
     /// Approve one retry of a recent auto-review denial selected in the TUI.
     ApproveRecentAutoReviewDenial {
@@ -326,6 +370,7 @@ pub(crate) enum AppEvent {
     /// Result of refreshing rate limits.
     RateLimitsLoaded {
         origin: RateLimitRefreshOrigin,
+        hard_stop_generation: u64,
         result: Result<GetAccountRateLimitsResponse, String>,
     },
 
@@ -334,6 +379,16 @@ pub(crate) enum AppEvent {
 
     /// Open the reset-credit flow selected from the `/usage` menu.
     OpenRateLimitResetCredits,
+
+    /// Confirm the reset credit selected from the reset-credit picker.
+    OpenRateLimitResetConfirmation {
+        picker_request_id: u64,
+        confirmation_gate: Arc<AtomicBool>,
+        credit_id: Option<String>,
+        reset_title: String,
+        reset_detail: Option<String>,
+        reset_description: String,
+    },
 
     /// Consume one reset credit using a stable idempotency key.
     ConsumeRateLimitResetCredit {
@@ -691,6 +746,7 @@ pub(crate) enum AppEvent {
     ConsolidateAgentMessage {
         source: String,
         cwd: PathBuf,
+        inline_visualization_context: Option<InlineVisualizationContext>,
         scrollback_reflow: ConsolidationScrollbackReflow,
         deferred_history_cell: Option<Box<dyn HistoryCell>>,
     },
@@ -701,15 +757,6 @@ pub(crate) enum AppEvent {
     /// Emitted by `ChatWidget::on_plan_item_completed` after plan stream
     /// finalization.
     ConsolidateProposedPlan(String),
-
-    /// Apply rollback semantics to local transcript cells.
-    ///
-    /// This is emitted when rollback was not initiated by the current
-    /// backtrack flow so trimming occurs in AppEvent queue order relative to
-    /// inserted history cells.
-    ApplyThreadRollback {
-        num_turns: u32,
-    },
 
     StartCommitAnimation,
     StopCommitAnimation,
@@ -735,20 +782,27 @@ pub(crate) enum AppEvent {
         effort: Option<ReasoningEffort>,
     },
 
+    /// Load the providers shown at the start of `/model`.
+    LoadProviderCatalog,
+
+    /// Result of loading the provider catalog for `/model`.
+    ProviderCatalogLoaded {
+        result: Result<Vec<InterpreterProvider>, String>,
+    },
+
     /// Load the model catalog for a provider selected in `/model`.
     LoadProviderModels {
         provider_id: String,
         provider_name: String,
     },
 
-    /// Ensure Kimi Code OAuth credentials exist (running the device login flow
-    /// when needed) before loading its models in `/model`.
+    /// Ensure Kimi Code OAuth credentials exist before loading its models.
     StartKimiCodeLogin {
         provider_id: String,
         provider_name: String,
     },
 
-    /// Show the Kimi Code device-login verification details to the user.
+    /// Show the Kimi Code device-login verification details.
     KimiCodeLoginVerification {
         verification_url: String,
         user_code: String,
@@ -782,18 +836,21 @@ pub(crate) enum AppEvent {
         model: ModelPreset,
     },
 
-    /// Open the harness picker for the current provider/model selection.
-    OpenHarnessPopup {
-        model: String,
-        effort: Option<ReasoningEffort>,
-    },
-
-    /// Open the harness picker for a provider/model selection.
-    OpenHarnessPopupForProvider {
+    /// Load compatible harnesses for a provider/model selection.
+    LoadHarnesses {
         provider_id: String,
         provider_name: String,
         model: String,
         effort: Option<ReasoningEffort>,
+    },
+
+    /// Result of loading compatible harnesses.
+    HarnessesLoaded {
+        provider_id: String,
+        provider_name: String,
+        model: String,
+        effort: Option<ReasoningEffort>,
+        result: Result<Vec<InterpreterHarness>, String>,
     },
 
     /// Persist provider, model, reasoning, and harness, then start a fresh thread.
@@ -802,12 +859,6 @@ pub(crate) enum AppEvent {
         provider_name: String,
         model: String,
         effort: Option<ReasoningEffort>,
-        harness: Option<String>,
-    },
-
-    /// Persist the selected harness for the current provider/model.
-    #[allow(dead_code)]
-    PersistHarnessSelection {
         harness: Option<String>,
     },
 
@@ -950,9 +1001,6 @@ pub(crate) enum AppEvent {
     /// Clear all persisted local memory artifacts via the app-server.
     ResetMemories,
 
-    /// Update whether the full access warning prompt has been acknowledged.
-    UpdateFullAccessWarningAcknowledged(bool),
-
     /// Update whether the world-writable directories warning has been acknowledged.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     UpdateWorldWritableWarningAcknowledged(bool),
@@ -962,9 +1010,6 @@ pub(crate) enum AppEvent {
 
     /// Update the Plan-mode-specific reasoning effort in memory.
     UpdatePlanModeReasoningEffort(Option<ReasoningEffort>),
-
-    /// Persist the acknowledgement flag for the full access warning prompt.
-    PersistFullAccessWarningAcknowledged,
 
     /// Persist the acknowledgement flag for the world-writable directories warning.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]

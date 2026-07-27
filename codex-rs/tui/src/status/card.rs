@@ -708,16 +708,12 @@ fn status_approval_label(
 impl HistoryCell for StatusHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
-        let product = codex_product_info::Product::current();
-        let mut title_spans = vec![
+        lines.push(Line::from(vec![
             Span::from(format!("{}>_ ", FieldFormatter::INDENT)).dim(),
-            Span::from(product.display_name()).bold(),
-        ];
-        if product == codex_product_info::Product::Codex || CODEX_CLI_VERSION.trim() != "0.0.0" {
-            title_spans.push(Span::from(" ").dim());
-            title_spans.push(Span::from(format!("(v{CODEX_CLI_VERSION})")).dim());
-        }
-        lines.push(Line::from(title_spans));
+            Span::from("OpenAI Codex").bold(),
+            Span::from(" ").dim(),
+            Span::from(format!("(v{CODEX_CLI_VERSION})")).dim(),
+        ]));
 
         let available_inner_width = usize::from(width.saturating_sub(4));
         if available_inner_width == 0 {
@@ -897,10 +893,10 @@ impl HistoryCell for StatusHistoryCell {
             if let Some(start_byte) = visible.find(CHATGPT_USAGE_URL) {
                 let start = visible[..start_byte].width();
                 line.hyperlinks
-                    .push(crate::terminal_hyperlinks::TerminalHyperlink {
-                        columns: start..start + CHATGPT_USAGE_URL.width(),
-                        destination: CHATGPT_USAGE_URL.to_string(),
-                    });
+                    .push(crate::terminal_hyperlinks::TerminalHyperlink::web(
+                        start..start + CHATGPT_USAGE_URL.width(),
+                        CHATGPT_USAGE_URL.to_string(),
+                    ));
             }
         }
         lines

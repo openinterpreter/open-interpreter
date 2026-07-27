@@ -387,21 +387,63 @@ async fn record_blocked_request_sets_policy_outcome_for_owner_call() {
 }
 
 #[tokio::test]
-async fn blocked_request_policy_does_not_override_user_denial_outcome() {
+async fn blocked_request_does_not_override_recorded_approval_outcome() {
     let service = NetworkApprovalService::default();
     register_call_with_default_shell_trigger(&service, "registration-1").await;
+    let rejection = "approval client unavailable";
 
     service
-        .record_call_outcome("registration-1", NetworkApprovalOutcome::DeniedByUser)
+        .record_call_outcome(
+            "registration-1",
+            NetworkApprovalOutcome::DeniedByApproval(rejection.to_string()),
+        )
         .await;
     service
         .record_blocked_request(denied_blocked_request("example.com"))
         .await;
 
-    assert_eq!(
-        service.take_call_outcome("registration-1").await,
-        Some(NetworkApprovalOutcome::DeniedByUser)
-    );
+    let error =
+        network_approval_outcome_to_result(service.take_call_outcome("registration-1").await)
+            .expect_err("approval denial should remain an error");
+    assert!(matches!(error, ToolError::Rejected(message) if message == rejection));
+}
+
+#[tokio::test]
+async fn specific_approval_outcome_replaces_earlier_blocked_request() {
+    let service = NetworkApprovalService::default();
+    register_call_with_default_shell_trigger(&service, "registration-1").await;
+    let rejection = "specific approval rejection";
+
+    service
+        .record_blocked_request(denied_blocked_request("example.com"))
+        .await;
+    service
+        .record_call_outcome(
+            "registration-1",
+            NetworkApprovalOutcome::DeniedByApproval(rejection.to_string()),
+        )
+        .await;
+
+    let error =
+        network_approval_outcome_to_result(service.take_call_outcome("registration-1").await)
+            .expect_err("specific approval denial should replace blocked policy denial");
+    assert!(matches!(error, ToolError::Rejected(message) if message == rejection));
+}
+
+#[test]
+fn approval_denial_messages_are_bounded_for_model_context() {
+    let rejection = "x".repeat(40_000);
+
+    let error = network_approval_outcome_to_result(Some(NetworkApprovalOutcome::DeniedByApproval(
+        rejection,
+    )))
+    .expect_err("approval denial should remain an error");
+    let ToolError::Rejected(message) = error else {
+        panic!("approval denial should produce a rejected tool error");
+    };
+
+    assert!(codex_utils_string::approx_token_count(&message) < 1_000);
+    assert!(message.contains("tokens truncated"));
 }
 
 #[tokio::test]

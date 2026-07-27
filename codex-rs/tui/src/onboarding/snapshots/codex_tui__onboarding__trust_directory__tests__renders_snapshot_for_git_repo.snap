@@ -9,7 +9,7 @@ expression: terminal.backend()
   directory allows project-local config, hooks, and exec policies to
   load.
 
-› 1. Yes, continue
+› 1. Yes, continue                                                    
   2. No, quit
 
   Press enter to continue

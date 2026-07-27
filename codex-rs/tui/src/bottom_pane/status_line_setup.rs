@@ -10,7 +10,6 @@
 //! # Available Status Line Items
 //!
 //! - Model information (name, reasoning level)
-//! - Harness information
 //! - Directory paths (current dir, project root)
 //! - Git information (branch name)
 //! - Permissions profile
@@ -60,9 +59,6 @@ pub(crate) enum StatusLineItem {
 
     /// Model name with reasoning level suffix.
     ModelWithReasoning,
-
-    /// Current harness family.
-    Harness,
 
     /// Current reasoning level.
     Reasoning,
@@ -154,7 +150,6 @@ impl StatusLineItem {
         match self {
             StatusLineItem::ModelName => "Current model name",
             StatusLineItem::ModelWithReasoning => "Current model name with reasoning level",
-            StatusLineItem::Harness => "Current harness family",
             StatusLineItem::Reasoning => "Current reasoning level",
             StatusLineItem::CurrentDir => "Current working directory",
             StatusLineItem::ProjectRoot => "Project name (omitted when unavailable)",
@@ -165,9 +160,7 @@ impl StatusLineItem {
             StatusLineItem::BranchChanges => {
                 "Committed branch changes against the default branch (omitted when unavailable)"
             }
-            StatusLineItem::Status => {
-                "Compact session run-state text (Ready, Interpreting, Thinking)"
-            }
+            StatusLineItem::Status => "Compact session run-state text (Ready, Working, Thinking)",
             StatusLineItem::Permissions => "Active permission profile or sandbox mode",
             StatusLineItem::ApprovalMode => "Active command approval mode",
             StatusLineItem::ContextRemaining => {
@@ -208,7 +201,6 @@ impl StatusLineItem {
         match self {
             StatusLineItem::ModelName => StatusSurfacePreviewItem::Model,
             StatusLineItem::ModelWithReasoning => StatusSurfacePreviewItem::ModelWithReasoning,
-            StatusLineItem::Harness => StatusSurfacePreviewItem::Harness,
             StatusLineItem::Reasoning => StatusSurfacePreviewItem::Reasoning,
             StatusLineItem::CurrentDir => StatusSurfacePreviewItem::CurrentDir,
             StatusLineItem::ProjectRoot => StatusSurfacePreviewItem::ProjectRoot,

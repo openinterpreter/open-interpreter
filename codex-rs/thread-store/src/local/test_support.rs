@@ -89,7 +89,7 @@ pub(super) fn write_session_file_with_fork(
     fs::create_dir_all(&day_dir)?;
     let path = day_dir.join(format!("rollout-{ts}-{uuid}.jsonl"));
     let mut file = fs::File::create(&path)?;
-    let meta = serde_json::json!({
+    let mut meta = serde_json::json!({
         "timestamp": ts,
         "type": "session_meta",
         "payload": {
@@ -110,16 +110,21 @@ pub(super) fn write_session_file_with_fork(
             }
         },
     });
+    if matches!(history_mode, ThreadHistoryMode::Paginated) {
+        meta["ordinal"] = serde_json::json!(0);
+    }
     writeln!(file, "{meta}")?;
-    let user_event = serde_json::json!({
-        "timestamp": ts,
-        "type": "event_msg",
-        "payload": {
-            "type": "user_message",
-            "message": first_user_message,
-            "kind": "plain",
-        },
-    });
-    writeln!(file, "{user_event}")?;
+    if matches!(history_mode, ThreadHistoryMode::Legacy) {
+        let user_event = serde_json::json!({
+            "timestamp": ts,
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": first_user_message,
+                "kind": "plain",
+            },
+        });
+        writeln!(file, "{user_event}")?;
+    }
     Ok(path)
 }

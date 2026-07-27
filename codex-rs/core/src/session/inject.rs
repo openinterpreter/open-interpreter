@@ -24,7 +24,7 @@ impl Session {
         match active.as_mut() {
             Some(active_turn) => {
                 self.input_queue
-                    .extend_pending_input_for_turn_state(
+                    .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
                         active_turn.turn_state.as_ref(),
                         input.into_iter().map(TurnInput::ResponseItem).collect(),
                     )
@@ -86,7 +86,7 @@ impl Session {
         let turn_context = self
             .new_default_turn_with_sub_id(uuid::Uuid::new_v4().to_string())
             .await;
-        if turn_context.collaboration_mode.mode == ModeKind::Plan {
+        if turn_context.mode == ModeKind::Plan {
             self.clear_reserved_idle_turn(&turn_state).await;
             self.maybe_start_turn_for_pending_work().await;
             return Err(TryStartTurnIfIdleError::new(

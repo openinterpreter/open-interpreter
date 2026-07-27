@@ -7,28 +7,14 @@ use super::*;
 pub(crate) struct UpdateAvailableHistoryCell {
     latest_version: String,
     update_action: Option<UpdateAction>,
-    update_source: crate::update_action::ProductUpdateSource,
 }
 
 #[cfg_attr(debug_assertions, allow(dead_code))]
 impl UpdateAvailableHistoryCell {
     pub(crate) fn new(latest_version: String, update_action: Option<UpdateAction>) -> Self {
-        Self::new_with_source(
-            latest_version,
-            update_action,
-            crate::update_action::ProductUpdateSource::current(),
-        )
-    }
-
-    pub(crate) fn new_with_source(
-        latest_version: String,
-        update_action: Option<UpdateAction>,
-        update_source: crate::update_action::ProductUpdateSource,
-    ) -> Self {
         Self {
             latest_version,
             update_action,
-            update_source,
         }
     }
 }
@@ -38,25 +24,18 @@ impl HistoryCell for UpdateAvailableHistoryCell {
         use ratatui_macros::line;
         use ratatui_macros::text;
         let update_instruction = if let Some(update_action) = self.update_action {
-            line![
-                "Run ",
-                update_action
-                    .command_str_for_source(self.update_source)
-                    .cyan(),
-                " to update."
-            ]
+            line!["Run ", update_action.command_str().cyan(), " to update."]
         } else {
             line![
                 "See ",
-                self.update_source.release_notes_url().cyan().underlined(),
+                "https://github.com/openai/codex".cyan().underlined(),
                 " for installation options."
             ]
         };
-        let release_notes_url = self.update_source.release_notes_url().to_string();
 
         let content = text![
             line![
-                padded_emoji("✨").bold().cyan(),
+                "✨\u{200A}".bold().cyan(),
                 "Update available!".bold().cyan(),
                 " ",
                 format!("{CODEX_CLI_VERSION} -> {}", self.latest_version).bold(),
@@ -64,7 +43,9 @@ impl HistoryCell for UpdateAvailableHistoryCell {
             update_instruction,
             "",
             "See full release notes:",
-            release_notes_url.cyan().underlined(),
+            "https://github.com/openai/codex/releases/latest"
+                .cyan()
+                .underlined(),
         ];
 
         let inner_width = content
@@ -77,15 +58,9 @@ impl HistoryCell for UpdateAvailableHistoryCell {
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
         let update_instruction = if let Some(update_action) = self.update_action {
-            format!(
-                "Run {} to update.",
-                update_action.command_str_for_source(self.update_source)
-            )
+            format!("Run {} to update.", update_action.command_str())
         } else {
-            format!(
-                "See {} for installation options.",
-                self.update_source.release_notes_url()
-            )
+            "See https://github.com/openai/codex for installation options.".to_string()
         };
         vec![
             Line::from("Update available!"),
@@ -93,7 +68,7 @@ impl HistoryCell for UpdateAvailableHistoryCell {
             Line::from(update_instruction),
             Line::from(""),
             Line::from("See full release notes:"),
-            Line::from(self.update_source.release_notes_url()),
+            Line::from("https://github.com/openai/codex/releases/latest"),
         ]
     }
 
