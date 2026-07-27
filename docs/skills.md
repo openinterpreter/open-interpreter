@@ -47,6 +47,16 @@ The `description` controls when the skill is selected, so make it specific.
 
 Local skills take priority over personal and bundled skills when names collide.
 
+Use the `.agents/skills` locations for new skills. They are shared,
+tool-neutral directories, so another compatible agent can use the same skill
+without an Open Interpreter import or copy.
+
+Open Interpreter also reads `~/.openinterpreter/skills/` as a legacy
+compatibility fallback. Do not use that product-specific directory for new
+user-authored skills. Bundled internal skills may still be cached under the
+Open Interpreter home because they are product assets rather than portable
+user data.
+
 ## What to Put in a Skill
 
 Use skills for repeatable procedures:

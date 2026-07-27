@@ -4,9 +4,8 @@ use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSpecialPath;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileSystemContext {
@@ -33,14 +32,18 @@ enum ManagedFileSystemContext {
 impl FileSystemContext {
     pub(super) fn from_permission_profile(
         permission_profile: &PermissionProfile,
-        workspace_roots: &[AbsolutePathBuf],
+        workspace_roots: &[PathUri],
     ) -> Self {
+        let materialized_workspace_roots = workspace_roots
+            .iter()
+            .filter_map(|workspace_root| workspace_root.to_abs_path().ok())
+            .collect::<Vec<_>>();
         let permission_profile = permission_profile
             .clone()
-            .materialize_project_roots_with_workspace_roots(workspace_roots);
+            .materialize_project_roots_with_workspace_roots(&materialized_workspace_roots);
         let workspace_roots = workspace_roots
             .iter()
-            .map(|root| root.to_string_lossy().into_owned())
+            .map(PathUri::inferred_native_path_string)
             .collect();
         let permission_profile = match permission_profile {
             PermissionProfile::Managed { file_system, .. } => {
@@ -179,9 +182,9 @@ fn render_special_path(value: &FileSystemSpecialPath) -> String {
     }
 }
 
-fn render_special_path_with_subpath(base: &str, subpath: &Option<PathBuf>) -> String {
+fn render_special_path_with_subpath(base: &str, subpath: &Option<String>) -> String {
     match subpath {
-        Some(subpath) => format!("{base}/{}", subpath.display()),
+        Some(subpath) => format!("{base}/{subpath}"),
         None => base.to_string(),
     }
 }

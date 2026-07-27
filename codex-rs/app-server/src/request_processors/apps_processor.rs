@@ -1,5 +1,8 @@
 use super::*;
 use crate::app_info::app_info_to_api;
+use crate::app_info::connector_metadata_to_api;
+
+mod installed;
 
 pub(crate) struct AppsRequestProcessor {
     auth_manager: Arc<AuthManager>,
@@ -30,6 +33,80 @@ impl AppsRequestProcessor {
             shutdown_token,
             _shutdown_drop_guard: shutdown_drop_guard,
         }
+    }
+
+    pub(crate) async fn apps_read(
+        &self,
+        params: AppsReadParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let AppsReadParams {
+            app_ids,
+            include_tools,
+        } = params;
+        if app_ids.len() > APP_READ_MAX_IDS {
+            return Err(invalid_params(format!(
+                "app/read accepts at most {APP_READ_MAX_IDS} appIds"
+            )));
+        }
+
+        let mut seen_app_ids = HashSet::new();
+        let app_ids = app_ids
+            .into_iter()
+            .filter(|app_id| seen_app_ids.insert(app_id.clone()))
+            .collect::<Vec<_>>();
+        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+        let auth = self.auth_manager.auth().await;
+        if !config
+            .features
+            .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::uses_codex_backend))
+            || !self
+                .workspace_codex_plugins_enabled(&config, auth.as_ref())
+                .await
+        {
+            return Ok(Some(
+                AppsReadResponse {
+                    apps: Vec::new(),
+                    missing_app_ids: app_ids,
+                }
+                .into(),
+            ));
+        }
+        let auth = auth
+            .as_ref()
+            .ok_or_else(|| internal_error("app/read requires ChatGPT auth".to_string()))?;
+
+        let connectors::ConnectorMetadataReadResult {
+            apps,
+            missing_app_ids,
+        } = connectors::read_connector_metadata(&config, auth, &app_ids, include_tools)
+            .await
+            .map_err(|err| internal_error(format!("failed to read app metadata: {err}")))?;
+        let loaded_plugins = self
+            .thread_manager
+            .plugins_manager()
+            .plugins_for_config(&config.plugins_config_input())
+            .await;
+        let connector_snapshot =
+            codex_connectors::ConnectorSnapshot::from_plugin_capability_summaries(
+                loaded_plugins.capability_summaries(),
+            );
+        let apps = apps
+            .into_iter()
+            .map(|metadata| {
+                let mut app = connector_metadata_to_api(metadata);
+                app.plugin_display_names = connector_snapshot
+                    .plugin_display_names_for_connector_id(app.id.as_str())
+                    .to_vec();
+                app
+            })
+            .collect();
+        Ok(Some(
+            AppsReadResponse {
+                apps,
+                missing_app_ids,
+            }
+            .into(),
+        ))
     }
 
     pub(crate) async fn apps_list(
@@ -244,19 +321,23 @@ impl AppsRequestProcessor {
         let mut all_loaded = false;
         let mut codex_apps_ready = true;
         let mut last_notified_apps = None;
+        let mut sent_app_list_update = false;
 
         if accessible_connectors.is_some() || all_connectors.is_some() {
             let merged = connectors::with_app_enabled_state(
                 merge_loaded_apps(all_connectors.as_deref(), accessible_connectors.as_deref()),
                 &config,
             );
-            if should_send_app_list_updated_notification(
+            if !force_refetch {
+                last_notified_apps = Some(merged);
+            } else if should_send_app_list_updated_notification(
                 merged.as_slice(),
                 accessible_loaded,
                 all_loaded,
             ) {
                 send_app_list_updated_notification(outgoing, merged.clone()).await;
                 last_notified_apps = Some(merged);
+                sent_app_list_update = true;
             }
         }
 
@@ -313,10 +394,16 @@ impl AppsRequestProcessor {
                 merged.as_slice(),
                 accessible_loaded,
                 all_loaded,
-            ) && last_notified_apps.as_ref() != Some(&merged)
+            ) && (last_notified_apps.as_ref() != Some(&merged)
+                || (!force_refetch
+                    && start == 0
+                    && accessible_loaded
+                    && all_loaded
+                    && !sent_app_list_update))
             {
                 send_app_list_updated_notification(outgoing, merged.clone()).await;
                 last_notified_apps = Some(merged.clone());
+                sent_app_list_update = true;
             }
 
             if accessible_loaded && all_loaded {
@@ -376,7 +463,7 @@ impl AppsRequestProcessor {
 }
 
 const APP_LIST_LOAD_TIMEOUT: Duration = Duration::from_secs(90);
-// `app/list` is the legacy request-path baseline for the future `app/installed` endpoint;
+// `app/list` is the legacy request-path baseline for the `app/installed` endpoint;
 // `path=legacy` keeps it separate from the new snapshot-backed implementation in dashboards.
 const APPS_INSTALLED_DURATION_METRIC: &str = "codex.apps.installed.duration_ms";
 
@@ -390,6 +477,7 @@ fn record_legacy_apps_installed_duration(started_at: Instant, reload: bool) {
         );
     }
 }
+const APP_READ_MAX_IDS: usize = 100;
 
 enum AppListLoadResult {
     Accessible(Result<AccessibleConnectorsStatus, String>),

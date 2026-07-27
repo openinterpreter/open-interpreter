@@ -1,13 +1,12 @@
 use crate::guardian::GuardianApprovalRequest;
 use crate::guardian::GuardianNetworkAccessTrigger;
-use crate::guardian::guardian_rejection_message;
-use crate::guardian::guardian_timeout_message;
 use crate::guardian::new_guardian_review_id;
 use crate::guardian::review_approval_request;
 use crate::guardian::routes_approval_to_guardian;
 use crate::hook_runtime::run_permission_request_hooks;
 use crate::network_policy_decision::denied_network_policy_message;
 use crate::session::session::Session;
+use crate::tools::events::truncate_rejection_message;
 use crate::tools::sandboxing::PermissionRequestPayload;
 use crate::tools::sandboxing::ToolError;
 use codex_hooks::PermissionRequestDecision;
@@ -27,7 +26,6 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::WarningEvent;
-use codex_sandboxing::SandboxType;
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -170,7 +168,7 @@ enum PendingApprovalDecision {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NetworkApprovalOutcome {
-    DeniedByUser,
+    DeniedByApproval(String),
     DeniedByPolicy(String),
 }
 
@@ -178,10 +176,12 @@ fn network_approval_outcome_to_result(
     outcome: Option<NetworkApprovalOutcome>,
 ) -> Result<(), ToolError> {
     match outcome {
-        Some(NetworkApprovalOutcome::DeniedByUser) => {
-            Err(ToolError::Rejected("rejected by user".to_string()))
+        Some(NetworkApprovalOutcome::DeniedByApproval(rejection)) => {
+            Err(ToolError::Rejected(truncate_rejection_message(&rejection)))
         }
-        Some(NetworkApprovalOutcome::DeniedByPolicy(message)) => Err(ToolError::Rejected(message)),
+        Some(NetworkApprovalOutcome::DeniedByPolicy(message)) => {
+            Err(ToolError::Rejected(truncate_rejection_message(&message)))
+        }
         None => Ok(()),
     }
 }
@@ -415,14 +415,6 @@ impl NetworkApprovalService {
         (created, true)
     }
 
-    async fn record_outcome_for_single_active_call(&self, outcome: NetworkApprovalOutcome) {
-        let Some(owner_call) = self.resolve_single_active_call().await else {
-            return;
-        };
-        self.record_call_outcome(&owner_call.registration_id, outcome)
-            .await;
-    }
-
     #[cfg(test)]
     async fn take_call_outcome(&self, registration_id: &str) -> Option<NetworkApprovalOutcome> {
         let mut calls = self.calls.lock().await;
@@ -436,7 +428,7 @@ impl NetworkApprovalService {
         };
         if matches!(
             calls.call_outcomes.get(registration_id),
-            Some(NetworkApprovalOutcome::DeniedByUser)
+            Some(NetworkApprovalOutcome::DeniedByApproval(_))
         ) {
             return;
         }
@@ -467,12 +459,29 @@ impl NetworkApprovalService {
             return;
         };
 
-        let outcome = NetworkApprovalOutcome::DeniedByPolicy(message);
-        if let Some(execution_id) = blocked.execution_id.as_deref() {
-            self.record_call_outcome(execution_id, outcome).await;
+        let owner_call = if let Some(execution_id) = blocked.execution_id.as_deref() {
+            self.resolve_active_call_by_execution_id(execution_id).await
         } else {
-            self.record_outcome_for_single_active_call(outcome).await;
+            self.resolve_single_active_call().await
+        };
+        let Some(owner_call) = owner_call else {
+            return;
+        };
+
+        let mut calls = self.calls.lock().await;
+        if calls
+            .call_outcomes
+            .contains_key(&owner_call.registration_id)
+        {
+            return;
         }
+        calls.call_outcomes.insert(
+            owner_call.registration_id.clone(),
+            NetworkApprovalOutcome::DeniedByPolicy(message),
+        );
+
+        drop(calls);
+        owner_call.cancellation_token.cancel();
     }
 
     async fn active_turn_context(
@@ -657,8 +666,7 @@ impl NetworkApprovalService {
             } else {
                 turn_context
                     .environments
-                    .turn_environments
-                    .iter()
+                    .turn_environments()
                     .find(|environment| environment.environment_id == environment_id)
                     .and_then(|environment| environment.cwd().to_abs_path().ok())
                     .unwrap_or_else(|| {
@@ -753,7 +761,9 @@ impl NetworkApprovalService {
                     if let Some(owner_call) = owner_call.as_ref() {
                         self.record_call_outcome(
                             &owner_call.registration_id,
-                            NetworkApprovalOutcome::DeniedByUser,
+                            NetworkApprovalOutcome::DeniedByApproval(
+                                "rejected by user".to_string(),
+                            ),
                         )
                         .await;
                     }
@@ -761,22 +771,15 @@ impl NetworkApprovalService {
                     PendingApprovalDecision::Deny
                 }
             },
-            ReviewDecision::Denied | ReviewDecision::Abort => {
-                if let Some(review_id) = guardian_review_id.as_deref() {
-                    if let Some(owner_call) = owner_call.as_ref() {
-                        let message = guardian_rejection_message(session.as_ref(), review_id).await;
-                        self.record_call_outcome(
-                            &owner_call.registration_id,
-                            NetworkApprovalOutcome::DeniedByPolicy(message),
-                        )
+            ReviewDecision::Denied { rejection } => {
+                if let Some(owner_call) = owner_call.as_ref() {
+                    let outcome = if use_guardian {
+                        NetworkApprovalOutcome::DeniedByPolicy(rejection)
+                    } else {
+                        NetworkApprovalOutcome::DeniedByApproval(rejection)
+                    };
+                    self.record_call_outcome(&owner_call.registration_id, outcome)
                         .await;
-                    }
-                } else if let Some(owner_call) = owner_call.as_ref() {
-                    self.record_call_outcome(
-                        &owner_call.registration_id,
-                        NetworkApprovalOutcome::DeniedByUser,
-                    )
-                    .await;
                 }
                 PendingApprovalDecision::Deny
             }
@@ -784,7 +787,29 @@ impl NetworkApprovalService {
                 if let Some(owner_call) = owner_call.as_ref() {
                     self.record_call_outcome(
                         &owner_call.registration_id,
-                        NetworkApprovalOutcome::DeniedByPolicy(guardian_timeout_message()),
+                        NetworkApprovalOutcome::DeniedByPolicy(
+                            crate::guardian::guardian_timeout_message(),
+                        ),
+                    )
+                    .await;
+                }
+                PendingApprovalDecision::Deny
+            }
+            ReviewDecision::Abort => {
+                if use_guardian {
+                    if let Some(owner_call) = owner_call.as_ref() {
+                        self.record_call_outcome(
+                            &owner_call.registration_id,
+                            NetworkApprovalOutcome::DeniedByPolicy(
+                                "automatic approval review was cancelled".to_string(),
+                            ),
+                        )
+                        .await;
+                    }
+                } else if let Some(owner_call) = owner_call.as_ref() {
+                    self.record_call_outcome(
+                        &owner_call.registration_id,
+                        NetworkApprovalOutcome::DeniedByApproval("rejected by user".to_string()),
                     )
                     .await;
                 }
@@ -851,7 +876,6 @@ pub(crate) async fn begin_network_approval(
     session: &Session,
     turn_id: &str,
     managed_network_active: bool,
-    selected_sandbox: SandboxType,
     spec: Option<NetworkApprovalSpec>,
 ) -> Result<Option<ActiveNetworkApproval>, ToolError> {
     let NetworkApprovalSpec {
@@ -872,18 +896,14 @@ pub(crate) async fn begin_network_approval(
     }
 
     let registration_id = Uuid::new_v4().to_string();
-    let execution_proxy = if selected_sandbox == SandboxType::LinuxSeccomp {
-        let attribution_token = Uuid::new_v4().to_string();
-        network
-            .for_execution(&environment_id, &registration_id, attribution_token)
-            .map_err(|err| {
-                ToolError::Codex(codex_protocol::error::CodexErr::Io(io::Error::other(
-                    format!("failed to create execution-scoped network proxy: {err}"),
-                )))
-            })?
-    } else {
-        network.clone()
-    };
+    let attribution_token = Uuid::new_v4().to_string();
+    let execution_proxy = network
+        .for_execution(&environment_id, &registration_id, attribution_token)
+        .map_err(|err| {
+            ToolError::Codex(codex_protocol::error::CodexErr::Io(io::Error::other(
+                format!("failed to create execution-scoped network proxy: {err}"),
+            )))
+        })?;
     let cancellation_token = CancellationToken::new();
     session
         .services

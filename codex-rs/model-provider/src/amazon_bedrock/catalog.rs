@@ -5,6 +5,7 @@ use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_TERRA_MODEL_ID;
 use codex_models_manager::bundled_models_response;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
@@ -20,18 +21,18 @@ pub(crate) fn static_model_catalog() -> ModelsResponse {
                 GPT_5_5_OPENAI_MODEL_ID,
                 AMAZON_BEDROCK_GPT_5_5_MODEL_ID,
                 "GPT-5.5",
-                /*priority*/ 0,
+                /*priority*/ 1,
             ),
             gpt_5_bedrock_model(
                 GPT_5_4_OPENAI_MODEL_ID,
                 AMAZON_BEDROCK_GPT_5_4_MODEL_ID,
                 "GPT-5.4",
-                /*priority*/ 1,
+                /*priority*/ 2,
             ),
             gpt_5_6_bedrock_model(
                 AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID,
                 "GPT-5.6 Sol",
-                /*priority*/ 2,
+                /*priority*/ 0,
             ),
             gpt_5_6_bedrock_model(
                 AMAZON_BEDROCK_GPT_5_6_TERRA_MODEL_ID,
@@ -69,6 +70,7 @@ fn gpt_5_bedrock_model(
     model.priority = priority;
     model.context_window = Some(GPT_5_BEDROCK_CONTEXT_WINDOW);
     model.max_context_window = Some(GPT_5_BEDROCK_CONTEXT_WINDOW);
+    model.visibility = ModelVisibility::List;
     model.availability_nux = None;
     model.upgrade = None;
     model
@@ -151,7 +153,16 @@ mod tests {
     }
 
     #[test]
-    fn gpt_5_6_bedrock_models_clone_gpt_5_5_config_with_max_reasoning_effort() {
+    fn gpt_5_bedrock_models_are_visible() {
+        let catalog = static_model_catalog();
+
+        for model in catalog.models {
+            assert_eq!(model.visibility, ModelVisibility::List);
+        }
+    }
+
+    #[test]
+    fn gpt_5_6_bedrock_models_use_variant_metadata_and_max_reasoning_effort() {
         let catalog = static_model_catalog();
         let gpt_5_5 = catalog
             .models
@@ -160,7 +171,7 @@ mod tests {
             .expect("Bedrock catalog should include GPT-5.5");
 
         for (slug, display_name, priority) in [
-            (AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID, "GPT-5.6 Sol", 2),
+            (AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID, "GPT-5.6 Sol", 0),
             (AMAZON_BEDROCK_GPT_5_6_TERRA_MODEL_ID, "GPT-5.6 Terra", 3),
             (AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID, "GPT-5.6 Luna", 4),
         ] {

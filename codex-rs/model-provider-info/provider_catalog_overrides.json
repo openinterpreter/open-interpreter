@@ -6,17 +6,21 @@
     "@openrouter/ai-sdk-provider",
     "@ai-sdk/groq"
   ],
-  "include_provider_ids": [],
+  "include_provider_ids": [
+    "google"
+  ],
   "exclude_provider_ids": [
     "cloudflare-workers-ai",
     "lmstudio",
     "privatemode-ai"
   ],
   "api_base_url_overrides": {
+    "google": "https://generativelanguage.googleapis.com/v1beta/openai",
     "groq": "https://api.groq.com/openai/v1",
     "anthropic": "https://api.anthropic.com"
   },
   "env_key_overrides": {
+    "google": "GEMINI_API_KEY",
     "zai": "ZAI_API_KEY",
     "zai-coding-plan": "ZAI_API_KEY"
   },
@@ -79,6 +83,7 @@
   },
   "sort_priorities": {
     "anthropic": 2,
+    "google": 3,
     "openrouter": 20,
     "groq": 21,
     "github-models": 24,

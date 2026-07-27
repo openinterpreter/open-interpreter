@@ -80,7 +80,6 @@ members = [
     "process-hardening",
     "product-info",
     "protocol",
-    "realtime-webrtc",
     "prompts",
     "rollout",
     "rollout-trace",
@@ -133,7 +132,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.0.34"
+version = "0.145.0"
 # Track the edition for all workspace crates in one place. Individual
 # crates can still override this value, but keeping it here means new
 # crates created with `cargo new -w ...` automatically inherit the 2024
@@ -176,6 +175,7 @@ codex-http-client = { path = "http-client" }
 codex-websocket-client = { path = "websocket-client" }
 codex-config = { path = "config" }
 codex-connectors = { path = "connectors" }
+codex-agent-extension = { path = "ext/agent" }
 codex-connectors-extension = { path = "ext/connectors" }
 codex-context-fragments = { path = "context-fragments" }
 codex-core = { path = "core" }
@@ -193,7 +193,6 @@ codex-goal-extension = { path = "ext/goal" }
 codex-guardian = { path = "ext/guardian" }
 codex-image-generation-extension = { path = "ext/image-generation" }
 codex-external-agent-migration = { path = "external-agent-migration" }
-codex-external-agent-sessions = { path = "external-agent-sessions" }
 codex-experimental-api-macros = { path = "codex-experimental-api-macros" }
 codex-features = { path = "features" }
 codex-feedback = { path = "feedback" }
@@ -309,7 +308,6 @@ constant_time_eq = "0.3.1"
 crossbeam-channel = "0.5.15"
 crypto_box = { version = "0.9.1", features = ["seal"] }
 crossterm = "0.28.1"
-csv = "1.3.1"
 ctor = "0.6.3"
 deno_core_icudata = "0.77.0"
 derive_more = "2"
@@ -374,7 +372,7 @@ pathdiff = "0.2"
 portable-pty = "0.9.0"
 predicates = "3"
 pretty_assertions = "1.4.1"
-pulldown-cmark = "0.10"
+pulldown-cmark = { version = "0.10", default-features = false }
 quick-xml = "0.41.0"
 rand = "0.9"
 ratatui = "0.29.0"
@@ -406,9 +404,17 @@ serde_with = "3.17"
 serde_yaml = "0.9"
 serial_test = "3.2.0"
 sha1 = "0.10.6"
+scopeguard = "1.2.0"
 sha2 = "0.10"
 shlex = "1.3.0"
 similar = "2.7.0"
+symphonia = { version = "0.6.0", default-features = false, features = [
+    "isomp4",
+    "mkv",
+    "mp3",
+    "ogg",
+    "wav",
+] }
 socket2 = "0.6.1"
 sqlx = { version = "0.9.0", default-features = false, features = [
     "chrono",

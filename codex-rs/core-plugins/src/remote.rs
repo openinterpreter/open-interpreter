@@ -8,6 +8,7 @@ use codex_app_server_protocol::PluginAvailability;
 use codex_app_server_protocol::PluginInstallPolicy;
 use codex_app_server_protocol::PluginInstallPolicySource;
 use codex_app_server_protocol::PluginInterface;
+use codex_app_server_protocol::ScheduledTaskSummary;
 use codex_app_server_protocol::SkillInterface;
 use codex_login::CodexAuth;
 use codex_login::default_client::build_reqwest_client;
@@ -44,6 +45,7 @@ mod tests;
 pub use remote_installed_plugin_sync::RemoteInstalledPluginBundleSyncError;
 pub use remote_installed_plugin_sync::RemoteInstalledPluginBundleSyncOutcome;
 pub use remote_installed_plugin_sync::RemotePluginCacheMutationGuard;
+pub use remote_installed_plugin_sync::RemotePluginMaterialization;
 pub use remote_installed_plugin_sync::mark_remote_plugin_cache_mutation_in_flight;
 pub(crate) use remote_installed_plugin_sync::maybe_start_remote_installed_plugin_bundle_sync;
 pub use remote_installed_plugin_sync::sync_remote_installed_plugin_bundles_once;
@@ -154,6 +156,7 @@ pub struct RemoteInstalledPlugin {
     pub enabled: bool,
     pub install_policy: PluginInstallPolicy,
     pub install_policy_source: Option<PluginInstallPolicySource>,
+    pub must_show_installation_interstitial: Option<bool>,
     pub auth_policy: PluginAuthPolicy,
     pub availability: PluginAvailability,
     pub interface: Option<PluginInterface>,
@@ -172,6 +175,7 @@ pub struct RemotePluginSummary {
     pub enabled: bool,
     pub install_policy: PluginInstallPolicy,
     pub install_policy_source: Option<PluginInstallPolicySource>,
+    pub must_show_installation_interstitial: Option<bool>,
     pub auth_policy: PluginAuthPolicy,
     pub availability: PluginAvailability,
     pub interface: Option<PluginInterface>,
@@ -209,6 +213,7 @@ pub struct RemotePluginDetail {
     pub app_ids: Vec<String>,
     pub app_templates: Vec<RemoteAppTemplate>,
     pub mcp_servers: Vec<String>,
+    pub scheduled_tasks: Option<Vec<ScheduledTaskSummary>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -504,6 +509,7 @@ struct RemotePluginReleaseResponse {
     skills: Vec<RemotePluginSkillResponse>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     mcp_servers: Vec<RemotePluginMcpServerResponse>,
+    scheduled_tasks: Option<Vec<ScheduledTaskSummary>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -568,6 +574,8 @@ struct RemotePluginDirectoryItem {
     share_principals: Option<Vec<RemotePluginDirectorySharePrincipal>>,
     installation_policy: PluginInstallPolicy,
     installation_policy_source: Option<RemotePluginInstallPolicySource>,
+    #[serde(default)]
+    must_show_installation_interstitial: Option<bool>,
     authentication_policy: PluginAuthPolicy,
     #[serde(rename = "status", default)]
     availability: PluginAvailability,
@@ -1075,6 +1083,7 @@ pub fn group_remote_installed_plugins_by_marketplaces(
             enabled: plugin.enabled,
             install_policy: plugin.install_policy,
             install_policy_source: plugin.install_policy_source,
+            must_show_installation_interstitial: plugin.must_show_installation_interstitial,
             auth_policy: plugin.auth_policy,
             availability: plugin.availability,
             interface: plugin.interface.clone(),
@@ -1290,6 +1299,7 @@ async fn build_remote_plugin_detail(
             })
             .collect(),
         mcp_servers,
+        scheduled_tasks: plugin.release.scheduled_tasks,
     })
 }
 
@@ -1511,6 +1521,7 @@ fn build_remote_plugin_summary(
         install_policy_source: plugin
             .installation_policy_source
             .and_then(RemotePluginInstallPolicySource::into_protocol),
+        must_show_installation_interstitial: plugin.must_show_installation_interstitial,
         auth_policy: plugin.authentication_policy,
         availability: plugin.availability,
         interface: remote_plugin_interface_to_info(plugin),
@@ -1593,6 +1604,7 @@ fn remote_installed_plugin_to_cache_entry(
         install_policy_source: plugin
             .installation_policy_source
             .and_then(RemotePluginInstallPolicySource::into_protocol),
+        must_show_installation_interstitial: plugin.must_show_installation_interstitial,
         auth_policy: plugin.authentication_policy,
         availability: plugin.availability,
         interface: remote_plugin_interface_to_info(plugin),

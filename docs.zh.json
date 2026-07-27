@@ -33,6 +33,7 @@
           "docs/zh/quickstart",
           "docs/zh/use-cases",
           "docs/zh/migrate",
+          "docs/zh/portability",
           {
             "group": "核心概念",
             "pages": [

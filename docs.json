@@ -33,6 +33,7 @@
           "docs/quickstart",
           "docs/use-cases",
           "docs/migrate",
+          "docs/portability",
           {
             "group": "Concepts",
             "pages": [

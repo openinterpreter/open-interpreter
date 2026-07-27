@@ -8,8 +8,6 @@ use codex_api::ImageEditRequest;
 use codex_api::ImageGenerationRequest;
 use codex_api::ImageQuality;
 use codex_api::ImageUrl;
-use codex_core::context::extension_image_generation_output_hint;
-use codex_core::image_generation_artifact_path;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::LOCAL_FS;
@@ -52,6 +50,8 @@ use serde_json::Value;
 
 use crate::IMAGE_GEN_NAMESPACE;
 use crate::IMAGEGEN_TOOL_NAME;
+use crate::artifact::image_generation_artifact_path;
+use crate::artifact::image_generation_output_hint;
 use crate::backend::CodexImagesBackend;
 
 const IMAGE_MODEL: &str = "gpt-image-2";
@@ -217,7 +217,7 @@ impl ImageGenerationTool {
             .await;
         let output_hint = saved_path.as_ref().and_then(|output_path| {
             let output_dir = output_path.parent()?;
-            extension_image_generation_output_hint(output_dir.display(), output_path.display())
+            image_generation_output_hint(output_dir.display(), output_path.display())
         });
         Ok(Box::new(GeneratedImageOutput {
             result,
@@ -363,7 +363,9 @@ fn recent_images(history: &[ResponseItem], count: usize) -> Vec<ImageUrl> {
             ResponseItem::Message { content, .. } => {
                 image_urls.extend(content.iter().rev().filter_map(|item| match item {
                     ContentItem::InputImage { image_url, .. } => Some(image_url.clone()),
-                    ContentItem::InputText { .. } | ContentItem::OutputText { .. } => None,
+                    ContentItem::InputText { .. }
+                    | ContentItem::InputAudio { .. }
+                    | ContentItem::OutputText { .. } => None,
                 }));
             }
             ResponseItem::FunctionCallOutput {
@@ -417,6 +419,7 @@ fn output_image_urls(output: &FunctionCallOutputPayload) -> impl Iterator<Item =
         .filter_map(|item| match item {
             FunctionCallOutputContentItem::InputImage { image_url, .. } => Some(image_url.clone()),
             FunctionCallOutputContentItem::InputText { .. }
+            | FunctionCallOutputContentItem::InputAudio { .. }
             | FunctionCallOutputContentItem::InputVideo { .. }
             | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
         })

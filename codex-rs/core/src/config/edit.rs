@@ -3,6 +3,7 @@ use crate::path_utils::write_atomically;
 use anyhow::Context;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::types::McpServerConfig;
+use codex_config::types::ResumeCwdMode;
 use codex_config::types::SessionPickerViewMode;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_features::FEATURES;
@@ -738,16 +739,6 @@ fn apply_blocking_to_resolved_file(
     Ok(())
 }
 
-/// Persist edits asynchronously by offloading the blocking writer.
-///
-pub async fn apply(codex_home: &Path, edits: Vec<ConfigEdit>) -> anyhow::Result<()> {
-    let codex_home = codex_home.to_path_buf();
-    let config_path = codex_home.join(CONFIG_TOML_FILE);
-    task::spawn_blocking(move || apply_blocking_to_resolved_file(&config_path, &edits))
-        .await
-        .context("config persistence task panicked")?
-}
-
 /// Fluent builder to batch config edits and apply them atomically.
 #[derive(Default)]
 pub struct ConfigEditsBuilder {
@@ -789,12 +780,6 @@ impl ConfigEditsBuilder {
         self
     }
 
-    pub fn set_personality(mut self, personality: Option<Personality>) -> Self {
-        self.edits
-            .push(ConfigEdit::SetModelPersonality { personality });
-        self
-    }
-
     pub fn set_hide_full_access_warning(mut self, acknowledged: bool) -> Self {
         self.edits
             .push(ConfigEdit::SetNoticeHideFullAccessWarning(acknowledged));
@@ -810,37 +795,6 @@ impl ConfigEditsBuilder {
     pub fn set_hide_rate_limit_model_nudge(mut self, acknowledged: bool) -> Self {
         self.edits
             .push(ConfigEdit::SetNoticeHideRateLimitModelNudge(acknowledged));
-        self
-    }
-
-    pub fn set_hide_model_migration_prompt(mut self, model: &str, acknowledged: bool) -> Self {
-        self.edits
-            .push(ConfigEdit::SetNoticeHideModelMigrationPrompt(
-                model.to_string(),
-                acknowledged,
-            ));
-        self
-    }
-
-    pub fn set_hide_external_config_migration_prompt_home(mut self, acknowledged: bool) -> Self {
-        self.edits
-            .push(ConfigEdit::SetNoticeHideExternalConfigMigrationPromptHome(
-                acknowledged,
-            ));
-        self
-    }
-
-    pub fn set_hide_external_config_migration_prompt_project(
-        mut self,
-        project: &str,
-        acknowledged: bool,
-    ) -> Self {
-        self.edits.push(
-            ConfigEdit::SetNoticeHideExternalConfigMigrationPromptProject(
-                project.to_string(),
-                acknowledged,
-            ),
-        );
         self
     }
 
@@ -958,6 +912,14 @@ impl ConfigEditsBuilder {
         self.edits.push(ConfigEdit::SetPath {
             segments: vec!["tui".to_string(), "session_picker_view".to_string()],
             value: value(mode.to_string()),
+        });
+        self
+    }
+
+    pub fn set_resume_cwd(mut self, mode: ResumeCwdMode) -> Self {
+        self.edits.push(ConfigEdit::SetPath {
+            segments: vec!["tui".to_string(), "resume_cwd".to_string()],
+            value: value(mode.as_str()),
         });
         self
     }

@@ -10,27 +10,30 @@ The patterns here are starting points. Adapt them to your product surface, tools
 
 GPT-5.5's default style is efficient, direct, and task-oriented. This is useful for production systems: responses stay focused, behavior is easier to steer, and the model avoids unnecessary conversational padding.
 
-For customer-facing assistants, support workflows, coaching experiences, and other conversational products, define both personality and collaboration style.
+GPT-5.6 works best when prompts define the outcome, important constraints, available evidence, and completion bar, then leave room for the model to choose an efficient path.
 
-- **Personality** controls how the assistant sounds: tone, warmth, directness, formality, humor, empathy, and level of polish.
-- **Collaboration style** controls how the assistant works: when it asks questions, when it makes assumptions, how proactive it should be, how much context it gives, when it checks work, and how it handles uncertainty or risk.
-
-Keep both short. Personality instructions should shape the user experience. Collaboration instructions should shape task behavior. Neither should replace clear goals, success criteria, tool rules, or stopping conditions.
+Removing repeated instructions and examples and simplifying tool descriptions can improve task performance and token efficiency. In a sample of internal coding-agent eval runs, configurations with leaner system prompts improved evaluation scores by roughly 10–15% while reducing total tokens by 41–66% and cost by 33–67%. Results will vary by workload, so treat these ranges as directional and validate changes on representative tasks from your own application.
 
 Example personality block for a steady task-focused assistant:
 
-```text
-# Personality
-You are a capable collaborator: approachable, steady, and direct. Assume the user is competent and acting in good faith, and respond with patience, respect, and practical helpfulness.
+Start with a prompt and tool set that already works. Remove one group of instructions, examples, or tools at a time, then rerun the same evals.
 
 Prefer making progress over stopping for clarification when the request is already clear enough to attempt. Use context and reasonable assumptions to move forward. Ask for clarification only when the missing information would materially change the answer or create meaningful risk, and keep any question narrow.
 
-Stay concise without becoming curt. Give enough context for the user to understand and trust the answer, then stop. Use examples, comparisons, or simple analogies when they make the point easier to grasp. When correcting the user or disagreeing, be candid but constructive. When an error is pointed out, acknowledge it plainly and focus on fixing it.
+- repeated statements of the same rule;
+- repeated style or process instructions that do not change behavior;
+- examples that do not change behavior;
+- process instructions for behavior the model already performs reliably;
+- tools and tool descriptions unrelated to the task.
 
 Match the user's tone within professional bounds. Avoid emojis and profanity by default, unless the user explicitly asks for that style or has clearly established it as appropriate for the conversation.
 ```
 
-Example personality block for an expressive collaborative assistant:
+- the user-visible outcome;
+- success criteria and stopping conditions;
+- safety, business, evidence, and permission constraints;
+- tool-routing rules when the route depends on context;
+- required output shape and validation requirements.
 
 ```text
 # Personality
@@ -94,8 +97,11 @@ Add explicit stopping conditions:
 ```text
 Resolve the user query in the fewest useful tool loops, but do not let loop minimization outrank correctness, accessible fallback evidence, calculations, or required citation tags for factual claims.
 
-After each result, ask: "Can I answer the user's core request now with useful evidence and citations for the factual claims?" If yes, answer.
-```
+GPT-5.6 tends to be more concise by default than GPT-5.5. When migrating, check whether broad brevity instructions such as “Be concise” or “Keep it short” are still useful. They may be unnecessary for some tasks and can sometimes make responses too brief. Keep them when they reliably produce the output your application needs.
+
+For more consistent control across requests, use `text.verbosity` to set the default level of detail, then use the prompt for task-specific requirements. Choose `low`, `medium`, or `high` as the default level of detail for a request. In the prompt, specify any task-specific length, structure, or required content. See [Set up `text.verbosity`](https://developers.openai.com/api/docs/guides/deployment-checklist#set-up-textverbosity) for an API example.
+
+For customer-facing assistants and collaborative products, define both personality and collaboration style.
 
 Define missing-evidence behavior:
 
@@ -103,16 +109,21 @@ Define missing-evidence behavior:
 Use the minimum evidence sufficient to answer correctly, cite it precisely, then stop.
 ```
 
-## Formatting
+When a task calls for a shorter answer, identify the information the model must preserve and the detail it can omit. For example:
 
-GPT-5.5 is highly steerable on output format and structure. Use that control when it improves comprehension or product fit.
+    Lead with the conclusion. Include the evidence needed to support it, any material
+    caveat, and the next action. Omit secondary detail and repetition.
 
-Set `text.verbosity`, describe the expected output shape, and reserve heavier structure for cases where it improves comprehension or your product UI needs a stable artifact. The API default for `text.verbosity` is `medium`; use `low` when you prefer shorter, more concise responses.
+    Keep all required facts, decisions, caveats, and next steps. Trim introductions,
+    repetition, generic reassurance, and optional background first.
 
-Plain conversational formatting:
+This gives the model a clear priority order: preserve the content needed to complete the task, then remove lower-value detail.
 
-```text
-Let formatting serve comprehension. Use plain paragraphs as the default format for normal conversation, explanations, reports, documentation, and technical writeups. Keep the presentation clean and readable without making the structure feel heavier than the content.
+Broad labels such as “friendly” or “empathetic” can be ambiguous. Describe the writing choices that define your product's tone, such as how directly to state the answer, when to acknowledge a problem, and whether reassurance or a sign-off is appropriate.
+
+    State the answer directly. If the user reports a problem, acknowledge the
+    specific issue before giving the next step. Use reassurance only when it is
+    relevant. Omit generic praise and unnecessary sign-offs.
 
 Use headers, bold text, bullets, and numbered lists sparingly. Reach for them when the user requests them, when the answer needs clear comparison or ranking, or when the information would be harder to scan as prose. Otherwise, favor short paragraphs and natural transitions.
 
@@ -121,15 +132,75 @@ Respect formatting preferences from the user. If they ask for a terse answer, mi
 
 Add explicit audience and length guidance:
 
-```text
-Write for a senior business audience. Keep the answer under 400 words. Use short paragraphs and only include bullets when they improve scannability. Prioritize the conclusion first, then the reasoning, then caveats.
-```
+## Define autonomy and approval boundaries
 
-For editing, rewriting, summaries, or customer-facing messages, tell the model what to preserve before asking it to improve style. This pattern is useful when you want polish without expansion.
+GPT-5.6 can be proactive and persistent when carrying out multi-step tasks. Define what level of action each request authorizes so the model can continue safe, in-scope work without unnecessary pauses while stopping before external, destructive, costly, or scope-expanding actions.
 
-```text
-Preserve the requested artifact, length, structure, and genre first. Quietly improve clarity, flow, and correctness. Do not add new claims, extra sections, or a more promotional tone unless explicitly requested.
-```
+A compact policy is usually sufficient:
+
+    For requests to answer, explain, review, diagnose, or plan, inspect the
+    relevant materials and report the result. Do not implement changes unless
+    the request also asks for them.
+
+    For requests to change, build, or fix, make the requested in-scope local
+    changes and run relevant non-destructive validation without asking first.
+
+    Require confirmation for external writes, destructive actions, purchases,
+    or a material expansion of scope.
+
+Name safe local actions explicitly, such as reading files, inspecting logs, editing in-scope code, and running tests. Keep the policy in one place and state each rule once. Repeating instructions such as “ask first,” “do not mutate,” or “wait for approval” can cause unnecessary approval requests for safe, expected actions.
+
+For long-running work, define the current layer of work. Distinguish research, design, implementation, review, and external coordination so the model does not silently move from one layer to another.
+
+## Tool routing
+
+Expose only task-relevant tools. Tool descriptions should state what the tool does, when to use it, important return fields, and error behavior.
+
+When correctness depends on prerequisite retrieval or lookup, say so:
+
+    Before taking an action, resolve required discovery, retrieval, and
+    validation steps. Do not skip a prerequisite because the intended final
+    state seems obvious.
+
+When several reads are independent, parallelize them. When one result determines the next action, keep the work sequential. After parallel retrieval, synthesize before acting.
+
+If a tool returns empty, partial, or suspiciously narrow results, try one or two meaningful fallbacks before concluding that no result exists.
+
+## Programmatic Tool Calling
+
+Programmatic Tool Calling (PTC) works best for bounded workflows where code can process several tool results or large intermediate outputs and return a much smaller structured result.
+
+Multiple, parallel, or dependent calls alone do not justify Programmatic Tool Calling.
+
+Use it for:
+
+- filtering, joining, sorting, ranking, deduplication, and aggregation;
+- batching across many similar records;
+- repeated deterministic validation;
+- large structured results that can be reduced to a compact schema.
+
+Prefer direct tool calls when:
+
+- one call is sufficient;
+- intermediate outputs are already small;
+- each result may change the next decision;
+- an action requires approval;
+- the final answer must preserve citations or native artifacts;
+- the workflow requires semantic judgment between calls.
+
+Do not rely on generic instructions such as “use Programmatic Tool Calling efficiently.” State the bounded stage, eligible tools, output schema, retry limit, stop condition, and handoff back to direct model judgment.
+
+    Use Programmatic Tool Calling only for the bounded record-reduction stage.
+    Call only the documented read-only tools. Filter and deduplicate the
+    intermediate results, then emit exactly the required compact schema with
+    evidence fields. Retry transient failures at most twice. Use direct tool
+    calls for approval, semantic judgment, citations, and final validation.
+
+If both routes are needed, define one clear handoff and tell the model not to switch routes or repeat completed work.
+
+The `program_output` item and final assistant `message` are separate outputs; make sure to test both. In theory, a program can return the correct records while the message omits a required field, citation, or caveat.
+
+Compare direct and programmatic calling on the same representative tasks. Check whether the final response is correct, complete, and includes the required evidence. Then compare total tokens, latency, cost, calls, turns, and retries. Count lower resource use as an improvement only when the response still passes your existing evals.
 
 ## Grounding, citations, and retrieval budgets
 
@@ -174,12 +245,7 @@ Give GPT-5.5 access to tools that let it check outputs when validation is possib
 
 For coding agents, ask for concrete validation commands:
 
-```text
-After making changes, run the most relevant validation available:
-- targeted unit tests for changed behavior
-- type checks or lint checks when applicable
-- build checks for affected packages
-- a minimal smoke test when full validation is too expensive
+Establish a baseline with the current reasoning effort before changing it.
 
 If validation cannot be run, explain why and describe the next best check.
 ```

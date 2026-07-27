@@ -84,6 +84,7 @@ async fn models_client_hits_models_endpoint() {
             model_messages: None,
             include_skills_usage_instructions: false,
             supports_reasoning_summaries: false,
+            supports_reasoning_summary_parameter: true,
             default_reasoning_summary: ReasoningSummary::Auto,
             support_verbosity: false,
             default_verbosity: None,

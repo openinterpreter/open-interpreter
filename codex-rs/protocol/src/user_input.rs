@@ -29,7 +29,6 @@ pub enum UserInput {
         #[ts(optional)]
         detail: Option<ImageDetail>,
     },
-
     /// Local image path provided by the user.  This will be converted to an
     /// `Image` variant (base64 data URL) during request serialization.
     LocalImage {
@@ -38,6 +37,10 @@ pub enum UserInput {
         #[ts(optional)]
         detail: Option<ImageDetail>,
     },
+    /// Pre-encoded audio data URI forwarded to the Responses API.
+    Audio { audio_url: String },
+    /// Local audio path converted to an `Audio` data URI during request serialization.
+    LocalAudio { path: std::path::PathBuf },
 
     /// Skill selected by the user (name + path to SKILL.md).
     Skill {

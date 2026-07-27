@@ -2,6 +2,7 @@ use super::*;
 use crate::session::tests::build_world_state_from_turn_context;
 use crate::session::tests::make_session_and_context;
 use codex_protocol::AgentPath;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -82,7 +83,9 @@ fn turn_started(turn_id: &str) -> RolloutItem {
 fn turn_completed(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
         turn_id: turn_id.to_string(),
+        started_at: None,
         last_agent_message: None,
+        error: None,
         completed_at: None,
         duration_ms: None,
         time_to_first_token_ms: None,
@@ -106,6 +109,45 @@ fn truncates_rollout_after_terminal_canonical_turn_id() {
     assert_eq!(
         serde_json::to_value(&truncated).unwrap(),
         serde_json::to_value(&rollout[..4]).unwrap()
+    );
+}
+
+#[test]
+fn truncates_rollout_before_terminal_canonical_turn_id() {
+    let rollout = vec![
+        turn_started("turn-1"),
+        turn_completed("turn-1"),
+        turn_started("turn-2"),
+        turn_completed("turn-2"),
+    ];
+
+    let truncated =
+        truncate_rollout_before_turn_id(&rollout, "turn-2").expect("truncate before turn-2");
+    assert_eq!(
+        serde_json::to_value(&truncated).unwrap(),
+        serde_json::to_value(&rollout[..2]).unwrap()
+    );
+    assert!(
+        truncate_rollout_before_turn_id(&rollout, "turn-1")
+            .expect("truncate before turn-1")
+            .is_empty()
+    );
+}
+
+#[test]
+fn truncates_rollout_before_in_progress_canonical_turn_id() {
+    let rollout = vec![
+        turn_started("turn-1"),
+        turn_completed("turn-1"),
+        turn_started("turn-2"),
+    ];
+
+    let truncated = truncate_rollout_before_turn_id(&rollout, "turn-2")
+        .expect("truncate before in-progress turn-2");
+
+    assert_eq!(
+        serde_json::to_value(&truncated).unwrap(),
+        serde_json::to_value(&rollout[..2]).unwrap()
     );
 }
 
@@ -176,7 +218,7 @@ fn truncates_rollout_from_start_before_nth_user_only() {
         user_msg("u2"),
         assistant_msg("a3"),
         ResponseItem::Reasoning {
-            id: Some("r1".to_string()),
+            id: Some(ResponseItemId::with_suffix("rs", "1")),
             summary: vec![ReasoningItemReasoningSummary::SummaryText {
                 text: "s".to_string(),
             }],

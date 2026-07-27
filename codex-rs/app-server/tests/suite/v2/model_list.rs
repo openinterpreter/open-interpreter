@@ -7,7 +7,6 @@ use app_test_support::TestAppServer;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
 use app_test_support::write_models_cache;
-use app_test_support::write_models_cache_with_models;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::Model;
@@ -170,123 +169,6 @@ async fn list_models_includes_hidden_models() -> Result<()> {
 }
 
 #[tokio::test]
-async fn list_models_for_provider_does_not_reuse_another_providers_cache() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    let stale_model: ModelInfo = serde_json::from_value(json!({
-        "slug": "stale-current-provider-model",
-        "display_name": "Stale Current Provider Model",
-        "description": "Must not leak into another provider's picker",
-        "supported_reasoning_levels": [],
-        "shell_type": "default",
-        "visibility": "list",
-        "supported_in_api": true,
-        "priority": 0,
-        "upgrade": null,
-        "base_instructions": "",
-        "supports_reasoning_summaries": false,
-        "support_verbosity": false,
-        "default_verbosity": null,
-        "apply_patch_tool_type": null,
-        "truncation_policy": {"mode": "bytes", "limit": 10_000},
-        "supports_parallel_tool_calls": false,
-        "supports_image_detail_original": false,
-        "context_window": 128_000,
-        "max_context_window": 128_000,
-        "experimental_supported_tools": []
-    }))?;
-    write_models_cache_with_models(codex_home.path(), vec![stale_model])?;
-
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_auto_env()
-        .build()
-        .await?;
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
-
-    let request_id = mcp
-        .send_list_models_request(ModelListParams {
-            limit: None,
-            cursor: None,
-            include_hidden: Some(true),
-            model_provider: Some("openai".to_string()),
-        })
-        .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    let ModelListResponse { data, .. } = to_response::<ModelListResponse>(response)?;
-
-    assert!(data.iter().any(|model| model.model == "gpt-5.6-sol"));
-    assert!(
-        data.iter()
-            .all(|model| model.model != "stale-current-provider-model")
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn list_models_for_provider_merges_provider_cache_with_bundled_catalog() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    let provider_cache_dir = codex_home.path().join("models-cache").join("moonshotai");
-    std::fs::create_dir_all(&provider_cache_dir)?;
-    let cached_kimi_k3: ModelInfo = serde_json::from_value(json!({
-        "slug": "kimi-k3",
-        "display_name": "kimi-k3",
-        "description": "Cached remote model",
-        "supported_reasoning_levels": [],
-        "shell_type": "default",
-        "visibility": "hide",
-        "supported_in_api": true,
-        "priority": 0,
-        "upgrade": null,
-        "base_instructions": "",
-        "supports_reasoning_summaries": false,
-        "support_verbosity": false,
-        "default_verbosity": null,
-        "apply_patch_tool_type": null,
-        "truncation_policy": {"mode": "bytes", "limit": 10_000},
-        "supports_parallel_tool_calls": false,
-        "supports_image_detail_original": false,
-        "context_window": 1_048_576,
-        "max_context_window": 1_048_576,
-        "experimental_supported_tools": []
-    }))?;
-    write_models_cache_with_models(&provider_cache_dir, vec![cached_kimi_k3])?;
-
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_auto_env()
-        .build()
-        .await?;
-    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
-
-    let request_id = mcp
-        .send_list_models_request(ModelListParams {
-            limit: Some(100),
-            cursor: None,
-            include_hidden: None,
-            model_provider: Some("moonshotai".to_string()),
-        })
-        .await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    let ModelListResponse { data, .. } = to_response::<ModelListResponse>(response)?;
-    let models: Vec<&str> = data.iter().map(|model| model.model.as_str()).collect();
-
-    assert!(models.contains(&"kimi-k3"));
-    assert!(models.contains(&"kimi-k2.7-code"));
-    assert!(models.contains(&"kimi-k2.7-code-highspeed"));
-    assert!(models.contains(&"kimi-k2.5"));
-    assert!(models.contains(&"moonshot-v1-auto"));
-    Ok(())
-}
-
-#[tokio::test]
 async fn list_models_uses_chatgpt_remote_catalog_as_source_of_truth() -> Result<()> {
     let server = MockServer::start().await;
     let remote_model: ModelInfo = serde_json::from_value(json!({
@@ -306,7 +188,6 @@ async fn list_models_uses_chatgpt_remote_catalog_as_source_of_truth() -> Result<
         "priority": 0,
         "upgrade": null,
         "base_instructions": "base instructions",
-        "supports_reasoning_summaries": false,
         "support_verbosity": false,
         "default_verbosity": null,
         "apply_patch_tool_type": null,

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use codex_prompts::render_review_exit_interrupted;
 use codex_prompts::render_review_exit_success;
+use codex_protocol::ResponseItemId;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::items::ExitedReviewModeItem;
 use codex_protocol::items::TurnItem;
@@ -109,7 +110,6 @@ async fn start_review_conversation(
     {
         panic!("by construction Constrained<WebSearchMode> must always support Disabled: {err}");
     }
-    let _ = sub_agent_config.features.disable(Feature::SpawnCsv);
     let _ = sub_agent_config.features.disable(Feature::Collab);
     let _ = sub_agent_config.features.disable(Feature::MultiAgentV2);
 
@@ -136,7 +136,7 @@ async fn start_review_conversation(
     )
     .await)
         .ok()
-        .map(|io| io.rx_event)
+        .map(|(_session, io)| io.rx_event)
 }
 
 async fn process_review_events(
@@ -217,8 +217,6 @@ pub(crate) async fn exit_review_mode(
     review_output: Option<ReviewOutputEvent>,
     ctx: Arc<TurnContext>,
 ) {
-    const REVIEW_USER_MESSAGE_ID: &str = "review_rollout_user";
-    const REVIEW_ASSISTANT_MESSAGE_ID: &str = "review_rollout_assistant";
     let (user_message, assistant_message) = if let Some(out) = review_output.clone() {
         let mut findings_str = String::new();
         let text = out.overall_explanation.trim();
@@ -244,7 +242,7 @@ pub(crate) async fn exit_review_mode(
         .record_conversation_items(
             &ctx,
             &[ResponseItem::Message {
-                id: Some(REVIEW_USER_MESSAGE_ID.to_string()),
+                id: Some(ResponseItemId::new("msg")),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText { text: user_message }],
                 phase: None,
@@ -263,7 +261,7 @@ pub(crate) async fn exit_review_mode(
         .record_response_item_and_emit_turn_item(
             ctx.as_ref(),
             ResponseItem::Message {
-                id: Some(REVIEW_ASSISTANT_MESSAGE_ID.to_string()),
+                id: Some(ResponseItemId::new("msg")),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: assistant_message,

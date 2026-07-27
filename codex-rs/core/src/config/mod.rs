@@ -43,6 +43,7 @@ use codex_config::types::MemoriesConfig;
 use codex_config::types::ModelAvailabilityNuxConfig;
 use codex_config::types::Notice;
 use codex_config::types::OAuthCredentialsStoreMode;
+use codex_config::types::ResumeCwdMode;
 use codex_config::types::SessionPickerViewMode;
 use codex_config::types::ToolSuggestConfig;
 use codex_config::types::ToolSuggestDisabledTool;
@@ -174,8 +175,6 @@ use permission_profile_catalog::permission_profile_catalog_from_permissions;
 use permission_profile_catalog::permission_profile_is_allowed;
 use permission_profile_catalog::validate_permission_profile_for_deny_read;
 pub(crate) use permissions::is_builtin_permission_profile_name;
-pub(crate) use permissions::reject_unknown_builtin_permission_profile;
-pub(crate) use permissions::resolve_permission_profile;
 pub use resolved_permission_profile::PermissionProfileSnapshot;
 pub(crate) use resolved_permission_profile::PermissionProfileState;
 
@@ -249,6 +248,7 @@ Payload:
 ```
 You may also see them addressed as to=/root/..., which indicates your identity is /root/...
 "#;
+const DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT: &str = "Full-history forks (`fork_turns` omitted or `\"all\"`) inherit the parent model and reasoning effort and do not accept overrides. Only set `model` or `reasoning_effort` when explicitly requested by the user, applicable `AGENTS.md` instructions, or skill instructions; when doing so, set `fork_turns` to `\"none\"` or a positive integer string.";
 const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "collaboration";
 const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.collaboration.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
 
@@ -267,7 +267,6 @@ pub(crate) const HARD_MIN_MULTI_AGENT_V2_TIMEOUT_MS: i64 = 0;
 pub(crate) const HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS: i64 =
     DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS;
 pub(crate) const DEFAULT_AGENT_MAX_DEPTH: i32 = 1;
-pub(crate) const DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS: Option<u64> = None;
 const LOCAL_DEV_BUILD_VERSION: &str = "0.0.0";
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
@@ -637,6 +636,9 @@ pub struct Config {
     /// Token usage threshold triggering auto-compaction of conversation history.
     pub model_auto_compact_token_limit: Option<i64>,
 
+    /// Optional override for whether the selected model supports reasoning summaries.
+    pub model_supports_reasoning_summaries: Option<bool>,
+
     /// Controls whether `model_auto_compact_token_limit` applies to the full
     /// active context or only tokens after the carried compaction-window prefix.
     pub model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope,
@@ -797,6 +799,10 @@ pub struct Config {
     /// Preferred layout for resume/fork session picker results.
     pub tui_session_picker_view: SessionPickerViewMode,
 
+    /// Working directory to use when resuming or forking a session.
+    /// When unset, prompt if the current and session directories differ.
+    pub tui_resume_cwd: Option<ResumeCwdMode>,
+
     /// Terminal resize-reflow tuning knobs.
     pub terminal_resize_reflow: TerminalResizeReflowConfig,
 
@@ -865,15 +871,22 @@ pub struct Config {
     /// Token budget applied when storing tool/function outputs in the context manager.
     pub tool_output_token_limit: Option<usize>,
 
-    /// User-configured maximum number of agent threads that can be open concurrently.
+    /// Whether multi-agent tools are enabled through `[agents]`.
+    pub agents_enabled: bool,
+
+    /// User-configured maximum number of spawned agent threads per session.
     pub agent_max_threads: Option<usize>,
-    /// Maximum runtime in seconds for agent job workers before they are failed.
-    pub agent_job_max_runtime_seconds: Option<u64>,
+
+    /// Default model for spawned subagents when the spawn call does not select one.
+    pub agent_default_subagent_model: Option<String>,
+
+    /// Default reasoning effort for spawned subagents when the spawn call does not select one.
+    pub agent_default_subagent_reasoning_effort: Option<ReasoningEffort>,
 
     /// Whether to record a model-visible message when an agent turn is interrupted.
     pub agent_interrupt_message_enabled: bool,
 
-    /// Maximum nesting depth allowed for spawned agent threads.
+    /// Maximum nesting depth for V1 agent threads. Ignored by V2.
     pub agent_max_depth: i32,
 
     /// User-defined role declarations keyed by role name.
@@ -958,9 +971,6 @@ pub struct Config {
     /// Optional value to use for `reasoning.summary` when making a request
     /// using the Responses API. When unset, the model catalog default is used.
     pub model_reasoning_summary: Option<ReasoningSummary>,
-
-    /// Optional override to force-enable reasoning summaries for the configured model.
-    pub model_supports_reasoning_summaries: Option<bool>,
 
     /// Optional full model catalog loaded from `model_catalog_json`.
     /// When set, this replaces the bundled catalog for the current process.
@@ -1102,12 +1112,25 @@ pub(crate) const DEFAULT_TOKEN_BUDGET_REMINDER_MESSAGE_TEMPLATE: &str = concat!(
 );
 const TOKEN_BUDGET_REMINDER_MESSAGE_TEMPLATE_MAX_BYTES: usize = 2000;
 const TOKEN_BUDGET_GUIDANCE_MESSAGE_MAX_BYTES: usize = 2000;
+const AUTO_COMPACT_FALLBACK_PROMPT_MAX_BYTES: usize = 2000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TokenBudgetConfig {
     pub reminder_threshold_tokens: Option<i64>,
     pub reminder_message_template: String,
     pub guidance_message: Option<String>,
+    pub auto_compact_fallback_prompt: Option<String>,
+    pub auto_compact_fallback_buffer_tokens: Option<i64>,
+}
+
+impl TokenBudgetConfig {
+    pub(crate) fn fallback_buffer_tokens(&self) -> i64 {
+        if self.auto_compact_fallback_prompt.is_some() {
+            self.auto_compact_fallback_buffer_tokens.unwrap_or(0)
+        } else {
+            0
+        }
+    }
 }
 
 impl Default for TokenBudgetConfig {
@@ -1116,6 +1139,8 @@ impl Default for TokenBudgetConfig {
             reminder_threshold_tokens: None,
             reminder_message_template: DEFAULT_TOKEN_BUDGET_REMINDER_MESSAGE_TEMPLATE.to_string(),
             guidance_message: None,
+            auto_compact_fallback_prompt: None,
+            auto_compact_fallback_buffer_tokens: None,
         }
     }
 }
@@ -1160,6 +1185,7 @@ pub struct MultiAgentV2Config {
     pub multi_agent_mode_hint_text: Option<String>,
     pub tool_namespace: Option<String>,
     pub hide_spawn_agent_metadata: bool,
+    pub expose_spawn_agent_model_overrides: bool,
     pub non_code_mode_only: bool,
 }
 
@@ -1182,6 +1208,7 @@ impl MultiAgentV2Config {
             multi_agent_mode_hint_text: None,
             tool_namespace: Some(DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE.to_string()),
             hide_spawn_agent_metadata: true,
+            expose_spawn_agent_model_overrides: true,
             non_code_mode_only: true,
         }
     }
@@ -1414,25 +1441,33 @@ impl ConfigBuilder {
 }
 
 impl Config {
-    pub(crate) fn multi_agent_version_from_features(&self) -> MultiAgentVersion {
+    pub(crate) fn multi_agent_version_override(&self) -> Option<MultiAgentVersion> {
         if self.features.enabled(Feature::MultiAgentV2) {
-            MultiAgentVersion::V2
-        } else if self.features.enabled(Feature::Collab) {
-            MultiAgentVersion::V1
+            Some(MultiAgentVersion::V2)
+        } else if !self.agents_enabled {
+            Some(MultiAgentVersion::Disabled)
         } else {
-            MultiAgentVersion::Disabled
+            None
         }
     }
 
-    pub(crate) fn validate_multi_agent_v2_config(&self) -> std::io::Result<()> {
-        if self.features.enabled(Feature::MultiAgentV2) && self.agent_max_threads.is_some() {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "agents.max_threads cannot be set when features.multi_agent_v2 is enabled",
-            ))
-        } else {
-            Ok(())
-        }
+    pub(crate) fn multi_agent_version_from_features(&self) -> MultiAgentVersion {
+        self.multi_agent_version_override().unwrap_or_else(|| {
+            if self.features.enabled(Feature::Collab) {
+                MultiAgentVersion::V1
+            } else {
+                MultiAgentVersion::Disabled
+            }
+        })
+    }
+
+    pub(crate) fn multi_agent_version_for_model(
+        &self,
+        model_multi_agent_version: Option<MultiAgentVersion>,
+    ) -> MultiAgentVersion {
+        self.multi_agent_version_override()
+            .or(model_multi_agent_version)
+            .unwrap_or_else(|| self.multi_agent_version_from_features())
     }
 
     pub(crate) fn effective_agent_max_threads(
@@ -1483,6 +1518,7 @@ impl Config {
             tool_output_token_limit: self.tool_output_token_limit,
             base_instructions: self.base_instructions.clone(),
             personality_enabled: self.features.enabled(Feature::Personality),
+            personality: self.personality,
             model_supports_reasoning_summaries: self.model_supports_reasoning_summaries,
             model_catalog: self.model_catalog.clone(),
         }
@@ -2510,6 +2546,13 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
     let base = multi_agent_v2_toml_config(config_toml.features.as_ref());
     let max_concurrent_threads_per_session = base
         .and_then(|config| config.max_concurrent_threads_per_session)
+        .or_else(|| {
+            config_toml
+                .agents
+                .as_ref()
+                .and_then(|agents| agents.max_concurrent_threads_per_session)
+                .map(|max_threads| max_threads.saturating_add(1))
+        })
         .unwrap_or(DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION);
     let default =
         MultiAgentV2Config::defaults_for_max_concurrency(max_concurrent_threads_per_session);
@@ -2526,13 +2569,31 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
         .and_then(|config| config.usage_hint_text.as_ref())
         .cloned()
         .or(default.usage_hint_text);
+    let hide_spawn_agent_metadata = base
+        .and_then(|config| config.hide_spawn_agent_metadata)
+        .unwrap_or(default.hide_spawn_agent_metadata);
+    let expose_spawn_agent_model_overrides = base
+        .and_then(|config| config.expose_spawn_agent_model_overrides)
+        .unwrap_or(default.expose_spawn_agent_model_overrides);
+    let mut default_root_agent_usage_hint_text = default.root_agent_usage_hint_text;
+    let mut default_subagent_usage_hint_text = default.subagent_usage_hint_text;
+    if expose_spawn_agent_model_overrides {
+        default_root_agent_usage_hint_text = Some(append_usage_hint_text(
+            default_root_agent_usage_hint_text.as_deref(),
+            DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT,
+        ));
+        default_subagent_usage_hint_text = Some(append_usage_hint_text(
+            default_subagent_usage_hint_text.as_deref(),
+            DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT,
+        ));
+    }
     let root_agent_usage_hint_text = resolve_optional_prompt_text(
         base.map(|config| &config.root_agent_usage_hint_text),
-        default.root_agent_usage_hint_text,
+        default_root_agent_usage_hint_text,
     );
     let subagent_usage_hint_text = resolve_optional_prompt_text(
         base.map(|config| &config.subagent_usage_hint_text),
-        default.subagent_usage_hint_text,
+        default_subagent_usage_hint_text,
     );
     let multi_agent_mode_hint_text = base
         .and_then(|config| config.multi_agent_mode_hint_text.as_ref())
@@ -2542,9 +2603,6 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
         .and_then(|config| config.tool_namespace.as_ref())
         .cloned()
         .or(default.tool_namespace);
-    let hide_spawn_agent_metadata = base
-        .and_then(|config| config.hide_spawn_agent_metadata)
-        .unwrap_or(default.hide_spawn_agent_metadata);
     let non_code_mode_only = base
         .and_then(|config| config.non_code_mode_only)
         .unwrap_or(default.non_code_mode_only);
@@ -2560,6 +2618,7 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
         multi_agent_mode_hint_text,
         tool_namespace,
         hide_spawn_agent_metadata,
+        expose_spawn_agent_model_overrides,
         non_code_mode_only,
     }
 }
@@ -2615,10 +2674,44 @@ fn resolve_token_budget_config(
         ));
     }
 
+    let auto_compact_fallback_prompt = token_budget_config
+        .and_then(|config| config.auto_compact_fallback_prompt.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if auto_compact_fallback_prompt
+        .as_ref()
+        .is_some_and(|prompt| prompt.len() > AUTO_COMPACT_FALLBACK_PROMPT_MAX_BYTES)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "features.token_budget.auto_compact_fallback_prompt must not exceed {AUTO_COMPACT_FALLBACK_PROMPT_MAX_BYTES} bytes"
+            ),
+        ));
+    }
+
+    let auto_compact_fallback_buffer_tokens =
+        token_budget_config.and_then(|config| config.auto_compact_fallback_buffer_tokens);
+    if auto_compact_fallback_prompt.is_some() && auto_compact_fallback_buffer_tokens.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "features.token_budget.auto_compact_fallback_buffer_tokens is required when auto_compact_fallback_prompt is set",
+        ));
+    }
+    if auto_compact_fallback_buffer_tokens.is_some_and(|tokens| tokens <= 0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "features.token_budget.auto_compact_fallback_buffer_tokens must be positive",
+        ));
+    }
+
     Ok(Some(TokenBudgetConfig {
         reminder_threshold_tokens,
         reminder_message_template,
         guidance_message,
+        auto_compact_fallback_prompt,
+        auto_compact_fallback_buffer_tokens,
     }))
 }
 
@@ -2741,6 +2834,13 @@ fn resolve_optional_prompt_text(
         Some(Some(value)) if value.is_empty() => None,
         Some(Some(value)) => Some(value.clone()),
         Some(None) | None => default,
+    }
+}
+
+fn append_usage_hint_text(usage_hint_text: Option<&str>, additional_text: &str) -> String {
+    match usage_hint_text {
+        Some(usage_hint_text) => format!("{usage_hint_text}\n\n{additional_text}"),
+        None => additional_text.to_string(),
     }
 }
 
@@ -3375,7 +3475,7 @@ impl Config {
                     network_proxy,
                 );
             }
-            configured_network_proxy_config.network.enabled = true;
+            configured_network_proxy_config.enabled = true;
         }
         let approval_policy_was_explicit =
             approval_policy_override.is_some() || cfg.approval_policy.is_some();
@@ -3495,11 +3595,19 @@ impl Config {
             ));
         }
         validate_multi_agent_v2_tool_namespace(multi_agent_v2.tool_namespace.as_deref())?;
-        let agent_max_threads = cfg.agents.as_ref().and_then(|agents| agents.max_threads);
+        let agents_enabled = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.enabled)
+            .unwrap_or(true);
+        let agent_max_threads = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.max_concurrent_threads_per_session);
         if agent_max_threads == Some(0) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "agents.max_threads must be at least 1",
+                "agents.max_concurrent_threads_per_session must be at least 1",
             ));
         }
         let agent_max_depth = cfg
@@ -3507,31 +3615,14 @@ impl Config {
             .as_ref()
             .and_then(|agents| agents.max_depth)
             .unwrap_or(DEFAULT_AGENT_MAX_DEPTH);
-        if agent_max_depth < 1 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "agents.max_depth must be at least 1",
-            ));
-        }
-        let agent_job_max_runtime_seconds = cfg
+        let agent_default_subagent_model = cfg
             .agents
             .as_ref()
-            .and_then(|agents| agents.job_max_runtime_seconds)
-            .or(DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS);
-        if agent_job_max_runtime_seconds == Some(0) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "agents.job_max_runtime_seconds must be at least 1",
-            ));
-        }
-        if let Some(max_runtime_seconds) = agent_job_max_runtime_seconds
-            && max_runtime_seconds > i64::MAX as u64
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "agents.job_max_runtime_seconds must fit within a 64-bit signed integer",
-            ));
-        }
+            .and_then(|agents| agents.default_subagent_model.clone());
+        let agent_default_subagent_reasoning_effort = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.default_subagent_reasoning_effort.clone());
         let agent_interrupt_message_enabled = cfg
             .agents
             .as_ref()
@@ -3795,19 +3886,13 @@ impl Config {
         )
         .map_err(std::io::Error::from)?;
         let otel = otel::resolve_config(cfg.otel.unwrap_or_default(), &mut startup_warnings);
-        let tool_output_token_limit = cfg.tool_output_token_limit.or_else(|| {
-            harness
-                .as_deref()
-                .is_some_and(|harness| harness == "kimi-code")
-                .then_some(50_000)
-        });
-
         let config = Self {
             model,
             service_tier,
             review_model,
             model_context_window: cfg.model_context_window,
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
+            model_supports_reasoning_summaries: cfg.model_supports_reasoning_summaries,
             model_auto_compact_token_limit_scope: cfg
                 .model_auto_compact_token_limit_scope
                 .unwrap_or_default(),
@@ -3875,12 +3960,14 @@ impl Config {
                     }
                 })
                 .collect(),
-            tool_output_token_limit,
+            tool_output_token_limit: cfg.tool_output_token_limit,
+            agents_enabled,
             agent_max_threads,
+            agent_default_subagent_model,
+            agent_default_subagent_reasoning_effort,
             agent_max_depth,
             agent_roles,
             memories: memories_config,
-            agent_job_max_runtime_seconds,
             agent_interrupt_message_enabled,
             codex_home,
             sqlite_home,
@@ -3923,7 +4010,6 @@ impl Config {
             model_reasoning_effort: cfg.model_reasoning_effort,
             plan_mode_reasoning_effort: cfg.plan_mode_reasoning_effort,
             model_reasoning_summary: cfg.model_reasoning_summary,
-            model_supports_reasoning_summaries: cfg.model_supports_reasoning_summaries,
             model_catalog,
             model_verbosity: cfg.model_verbosity,
             chatgpt_base_url: cfg
@@ -4031,6 +4117,7 @@ impl Config {
                 .as_ref()
                 .and_then(|t| t.session_picker_view)
                 .unwrap_or_default(),
+            tui_resume_cwd: cfg.tui.as_ref().and_then(|t| t.resume_cwd),
             terminal_resize_reflow,
             tui_keymap: cfg
                 .tui
@@ -4135,8 +4222,12 @@ impl Config {
                         ),
                     )
                 })?;
-            let mut configured_network_proxy_config = network_proxy_config_for_profile_selection(
+            let permissions = merge_managed_permission_profiles(
                 cfg.permissions.as_ref(),
+                self.config_layer_stack.requirements_toml(),
+            )?;
+            let mut configured_network_proxy_config = network_proxy_config_for_profile_selection(
+                permissions.as_ref(),
                 active_permission_profile.id.as_str(),
             )?;
             if self.features.enabled(Feature::NetworkProxy)
@@ -4148,7 +4239,7 @@ impl Config {
                         network_proxy,
                     );
                 }
-                configured_network_proxy_config.network.enabled = true;
+                configured_network_proxy_config.enabled = true;
             }
             configured_network_proxy_config
         } else {

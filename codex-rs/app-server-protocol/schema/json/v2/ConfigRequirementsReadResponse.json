@@ -187,6 +187,15 @@
       "oneOf": [
         {
           "properties": {
+            "additionalContextLimit": {
+              "description": "Approximate token threshold for spilling this hook's `additionalContext` to disk. `null` uses 2,500 tokens; `0` disables spilling for this hook. The threshold is evaluated against the original context; a spilled preview also includes recovery metadata.",
+              "format": "uint",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "async": {
               "type": "boolean"
             },
@@ -310,6 +319,13 @@
           "type": "array"
         },
         "PreToolUse": {
+          "items": {
+            "$ref": "#/definitions/ConfiguredHookMatcherGroup"
+          },
+          "type": "array"
+        },
+        "SessionEnd": {
+          "default": [],
           "items": {
             "$ref": "#/definitions/ConfiguredHookMatcherGroup"
           },

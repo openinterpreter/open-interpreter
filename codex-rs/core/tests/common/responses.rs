@@ -216,6 +216,22 @@ impl ResponsesRequest {
             .collect()
     }
 
+    /// Returns all `input_audio` `audio_url` spans from `message` inputs for the provided role.
+    pub fn message_input_audio_urls(&self, role: &str) -> Vec<String> {
+        self.inputs_of_type("message")
+            .into_iter()
+            .filter(|item| item.get("role").and_then(Value::as_str) == Some(role))
+            .filter_map(|item| item.get("content").and_then(Value::as_array).cloned())
+            .flatten()
+            .filter(|span| span.get("type").and_then(Value::as_str) == Some("input_audio"))
+            .filter_map(|span| {
+                span.get("audio_url")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
     pub fn input(&self) -> Vec<Value> {
         self.body_json()["input"]
             .as_array()
@@ -913,21 +929,6 @@ pub fn ev_custom_tool_call_with_namespace(
     })
 }
 
-pub fn ev_local_shell_call(call_id: &str, status: &str, command: Vec<&str>) -> Value {
-    serde_json::json!({
-        "type": "response.output_item.done",
-        "item": {
-            "type": "local_shell_call",
-            "call_id": call_id,
-            "status": status,
-            "action": {
-                "type": "exec",
-                "command": command,
-            }
-        }
-    })
-}
-
 /// Convenience: SSE event for an `apply_patch` custom tool call with raw patch
 /// text. This mirrors the payload produced by the Responses API when the model
 /// invokes `apply_patch` directly.
@@ -1042,27 +1043,6 @@ where
 pub async fn mount_sse_once(server: &MockServer, body: String) -> ResponseMock {
     let (mock, response_mock) = base_mock();
     mock.respond_with(sse_response(body))
-        .up_to_n_times(1)
-        .mount(server)
-        .await;
-    response_mock
-}
-
-pub async fn mount_compact_json_once_match<M>(
-    server: &MockServer,
-    matcher: M,
-    body: serde_json::Value,
-) -> ResponseMock
-where
-    M: wiremock::Match + Send + Sync + 'static,
-{
-    let (mock, response_mock) = compact_mock();
-    mock.and(matcher)
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/json")
-                .set_body_json(body.clone()),
-        )
         .up_to_n_times(1)
         .mount(server)
         .await;

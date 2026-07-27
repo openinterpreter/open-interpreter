@@ -79,6 +79,23 @@ binary override:
 
 Open Interpreter speaks the same Codex exec protocol. See the [SDK guide](https://www.openinterpreter.com/docs/terminal/sdk) and run `scripts/test-codex-sdk-compat.sh` for a local, provider-free compatibility check.
 
+## Portable by default
+
+Open Interpreter should fit into your existing agent setup instead of trapping
+it in an Open Interpreter-only format. The product goal is to prefer shared,
+tool-neutral standards and directories, keep user-authored data in readable
+files, and make moving to or from another compatible agent straightforward.
+
+Today that includes repository `AGENTS.md`, shared `.agents/skills` directories,
+MCP, ACP, and the Codex exec protocol. Product-specific storage under
+`~/.openinterpreter` is reserved for configuration and runtime state that does
+not yet have a practical shared standard. Legacy product-specific skill
+directories remain readable for compatibility, but new skills belong in
+`.agents/skills` or `~/.agents/skills`.
+
+See the [portability guide](docs/portability.md) for the current boundary and
+the rules for evolving it.
+
 ## Computer Use
 
 Open Interpreter ships with a QA skill that lets any model operate and test interfaces. It can drive web apps in a real browser with [agent-browser](https://github.com/vercel-labs/agent-browser), or operate and test native apps with [trycua](https://github.com/trycua/cua).
@@ -90,7 +107,8 @@ Open Interpreter ships with a QA skill that lets any model operate and test inte
 - Inspects or switches Rust-native model harnesses with `/harness`.
 - Tests web and native apps through the built-in QA skill.
 - Runs as an [Agent Client Protocol](https://agentclientprotocol.com/) agent for editors with `interpreter acp`.
-- Keeps config and session state local under `~/.openinterpreter`.
+- Reuses shared `AGENTS.md` instructions and `.agents/skills` directories.
+- Keeps product-only config and session state local under `~/.openinterpreter`.
 - Supports `exec`, MCP, skills, hooks, permissions, and `AGENTS.md`.
 
 ## Documentation
@@ -107,6 +125,7 @@ Open Interpreter ships with a QA skill that lets any model operate and test inte
   - [Z.AI, GLM, and ZCode](https://www.openinterpreter.com/docs/terminal/zai-glm?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=zai_glm_docs)
 - [Agent Client Protocol](https://www.openinterpreter.com/docs/terminal/acp)
 - [Codex SDK](https://www.openinterpreter.com/docs/terminal/sdk)
+- [Portability](https://www.openinterpreter.com/docs/terminal/portability)
 - [Sandbox & approvals](https://www.openinterpreter.com/docs/terminal/sandbox?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=sandbox_approvals)
 
 Provider and model membership is generated, not maintained as Rust lists. From

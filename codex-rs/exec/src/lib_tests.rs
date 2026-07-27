@@ -23,11 +23,6 @@ fn test_tracing_subscriber() -> impl tracing::Subscriber + Send + Sync {
     tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer))
 }
 
-#[test]
-fn exec_defaults_analytics_to_enabled() {
-    assert_eq!(DEFAULT_ANALYTICS_ENABLED, true);
-}
-
 #[derive(Clone)]
 struct TestLogWriter {
     buffer: Arc<Mutex<Vec<u8>>>,
@@ -350,6 +345,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
         cwd: test_path_buf("/tmp/project").abs(),
         cli_version: "0.0.0-test".to_string(),
         source: codex_app_server_protocol::SessionSource::Exec,
+        can_accept_direct_input: None,
         thread_source: None,
         agent_nickname: None,
         agent_role: None,
@@ -812,6 +808,7 @@ fn sample_thread_start_response() -> ThreadStartResponse {
             cwd: test_path_buf("/tmp").abs(),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Cli,
+            can_accept_direct_input: None,
             thread_source: Some(codex_app_server_protocol::ThreadSource::User),
             agent_nickname: None,
             agent_role: None,

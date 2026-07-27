@@ -14,12 +14,14 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_login::default_client::originator;
+use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
 use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
@@ -41,6 +43,7 @@ use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::WebSearchAction;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -303,6 +306,119 @@ async fn non_openai_responses_requests_omit_item_passthrough_metadata() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sends_audio_urls_to_responses() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+    let codex = test_codex()
+        .with_model_info_override("gpt-5.5", |model_info| {
+            model_info.input_modalities.push(InputModality::Audio);
+        })
+        .build(&server)
+        .await
+        .unwrap()
+        .codex;
+    let audio_url = "data:audio/wav;base64,AAAA";
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Audio {
+                audio_url: audio_url.to_string(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let user_message = response_mock
+        .single_request()
+        .input()
+        .into_iter()
+        .rev()
+        .find(|item| item.get("role").and_then(serde_json::Value::as_str) == Some("user"))
+        .expect("request should include a user message");
+    assert_eq!(
+        user_message["content"],
+        json!([{
+            "type": "input_audio",
+            "audio_url": audio_url,
+        }])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sends_local_audio_to_responses() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+    let codex = test_codex()
+        .with_model_info_override("gpt-5.5", |model_info| {
+            model_info.input_modalities.push(InputModality::Audio);
+        })
+        .build(&server)
+        .await?
+        .codex;
+    let temp_dir = tempfile::tempdir()?;
+    let audio_path = temp_dir.path().join("recording.wav");
+    std::fs::write(&audio_path, b"audio")?;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::LocalAudio {
+                path: audio_path.clone(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let user_message = response_mock
+        .single_request()
+        .input()
+        .into_iter()
+        .rev()
+        .find(|item| item.get("role").and_then(serde_json::Value::as_str) == Some("user"))
+        .expect("request should include a user message");
+    let audio_path = audio_path.display();
+    assert_eq!(
+        user_message["content"],
+        json!([
+            {
+                "type": "input_text",
+                "text": format!(r#"<audio name=[Audio #1] path="{audio_path}">"#),
+            },
+            {
+                "type": "input_audio",
+                "audio_url": "data:audio/wav;base64,YXVkaW8=",
+            },
+            {
+                "type": "input_text",
+                "text": "</audio>",
+            },
+        ])
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn response_item_ids_persist_across_resume_and_preserve_server_ids() -> anyhow::Result<()> {
     let server = MockServer::start().await;
     let response_mock = mount_sse_sequence(
@@ -370,6 +486,7 @@ async fn synthetic_call_output_id_is_stable_across_resumes() -> anyhow::Result<(
     let rollout = vec![
         RolloutLine {
             timestamp: "2024-01-01T00:00:00.000Z".to_string(),
+            ordinal: None,
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: SessionMeta {
                     session_id: thread_id.into(),
@@ -387,8 +504,9 @@ async fn synthetic_call_output_id_is_stable_across_resumes() -> anyhow::Result<(
         },
         RolloutLine {
             timestamp: "2024-01-01T00:00:01.000Z".to_string(),
+            ordinal: None,
             item: RolloutItem::ResponseItem(ResponseItem::FunctionCall {
-                id: Some("fc_existing".to_string()),
+                id: Some(ResponseItemId::with_suffix("fc", "existing")),
                 name: "do_it".to_string(),
                 namespace: None,
                 arguments: "{}".to_string(),
@@ -895,6 +1013,7 @@ async fn resume_replays_legacy_js_repl_image_rollout_shapes() {
     let rollout = vec![
         RolloutLine {
             timestamp: "2024-01-01T00:00:00.000Z".to_string(),
+            ordinal: None,
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: SessionMeta {
                     session_id: thread_id.into(),
@@ -912,10 +1031,12 @@ async fn resume_replays_legacy_js_repl_image_rollout_shapes() {
         },
         RolloutLine {
             timestamp: "2024-01-01T00:00:01.000Z".to_string(),
+            ordinal: None,
             item: RolloutItem::ResponseItem(legacy_custom_tool_call),
         },
         RolloutLine {
             timestamp: "2024-01-01T00:00:02.000Z".to_string(),
+            ordinal: None,
             item: RolloutItem::ResponseItem(ResponseItem::CustomToolCallOutput {
                 id: None,
                 call_id: "legacy-js-call".to_string(),
@@ -926,6 +1047,7 @@ async fn resume_replays_legacy_js_repl_image_rollout_shapes() {
         },
         RolloutLine {
             timestamp: "2024-01-01T00:00:03.000Z".to_string(),
+            ordinal: None,
             item: RolloutItem::ResponseItem(ResponseItem::Message {
                 id: None,
                 role: "user".to_string(),
@@ -1031,6 +1153,7 @@ async fn resume_replays_image_tool_outputs_with_detail() {
     let rollout = vec![
         RolloutLine {
             timestamp: "2024-01-01T00:00:00.000Z".to_string(),
+            ordinal: None,
             item: RolloutItem::SessionMeta(SessionMetaLine {
                 meta: SessionMeta {
                     session_id: thread_id.into(),
@@ -1048,6 +1171,7 @@ async fn resume_replays_image_tool_outputs_with_detail() {
         },
         RolloutLine {
             timestamp: "2024-01-01T00:00:01.000Z".to_string(),
+            ordinal: None,
             item: RolloutItem::ResponseItem(ResponseItem::FunctionCall {
                 id: None,
                 name: "view_image".to_string(),
@@ -1059,6 +1183,7 @@ async fn resume_replays_image_tool_outputs_with_detail() {
         },
         RolloutLine {
             timestamp: "2024-01-01T00:00:01.500Z".to_string(),
+            ordinal: None,
             item: RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput {
                 id: None,
                 call_id: function_call_id.to_string(),
@@ -1073,6 +1198,7 @@ async fn resume_replays_image_tool_outputs_with_detail() {
         },
         RolloutLine {
             timestamp: "2024-01-01T00:00:02.000Z".to_string(),
+            ordinal: None,
             item: RolloutItem::ResponseItem(ResponseItem::CustomToolCall {
                 id: None,
                 status: Some("completed".to_string()),
@@ -1085,6 +1211,7 @@ async fn resume_replays_image_tool_outputs_with_detail() {
         },
         RolloutLine {
             timestamp: "2024-01-01T00:00:02.500Z".to_string(),
+            ordinal: None,
             item: RolloutItem::ResponseItem(ResponseItem::CustomToolCallOutput {
                 id: None,
                 call_id: custom_call_id.to_string(),
@@ -1212,7 +1339,7 @@ async fn includes_session_id_thread_id_and_model_headers_in_request() {
     assert_eq!(request_authorization, "Bearer Test API Key");
     assert_eq!(
         request_body["prompt_cache_key"].as_str(),
-        Some(thread_id_string.as_str())
+        Some(session_id_string.as_str())
     );
     assert_codex_client_metadata(
         &request_body,
@@ -1270,11 +1397,49 @@ async fn provider_auth_command_refreshes_after_401() {
     send_provider_auth_request(&server, auth_fixture.auth()).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn amazon_bedrock_proxy_uses_command_auth_and_custom_headers() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+    let auth_fixture = ProviderAuthCommandFixture::new(&["command-token"]).unwrap();
+    let mut provider = built_in_model_providers(/*openai_base_url*/ None)
+        .remove(AMAZON_BEDROCK_PROVIDER_ID)
+        .expect("Amazon Bedrock provider should be built in");
+    provider.base_url = Some(format!("{}/v1", server.uri()));
+    provider.auth = Some(auth_fixture.auth());
+    provider.aws = None;
+    provider
+        .http_headers
+        .get_or_insert_default()
+        .insert("x-some-header".to_string(), "foo".to_string());
+
+    send_request_with_provider(provider).await;
+
+    let request = response.single_request();
+    assert_eq!(request.path(), "/v1/responses");
+    assert_eq!(
+        request.header("authorization"),
+        Some("Bearer command-token".to_string())
+    );
+    assert_eq!(request.header("x-amz-date"), None);
+    assert_eq!(request.header("x-some-header"), Some("foo".to_string()));
+    assert_eq!(
+        request.header("x-amzn-mantle-client-agent"),
+        Some("codex".to_string())
+    );
+    assert_eq!(request.body_json()["store"], false);
+}
+
 /// Issues one streamed Responses request through a provider configured with command-backed auth.
 ///
 /// The caller owns the server-side assertions, so this helper only validates that the request
 /// reaches `Completed` without surfacing an auth or transport error to the client.
-#[expect(clippy::unwrap_used)]
 async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuthInfo) {
     let provider = ModelProviderInfo {
         name: "corp".into(),
@@ -1296,6 +1461,11 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         supports_websockets: false,
     };
 
+    send_request_with_provider(provider).await;
+}
+
+#[expect(clippy::unwrap_used)]
+async fn send_request_with_provider(provider: ModelProviderInfo) {
     let codex_home = TempDir::new().unwrap();
     let mut config = load_default_config_for_test(&codex_home).await;
     config.model_provider_id = provider.name.clone();
@@ -1333,8 +1503,8 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
-        codex_tools::Harness::Native,
-        /*harness_guidance*/ true,
+        /*harness*/ codex_tools::Harness::Native,
+        /*harness_guidance*/ false,
         /*item_ids_enabled*/ config.features.enabled(Feature::ItemIds),
         /*concurrent_reasoning_summaries_enabled*/
         config
@@ -1569,7 +1739,9 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
         .expect("resolve installation id");
     let thread_manager = ThreadManager::new(
         &config,
-        auth_manager,
+        auth_manager.clone(),
+        codex_core::build_models_manager(&config, auth_manager),
+        codex_core::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
         empty_extension_registry(),
@@ -1651,12 +1823,18 @@ async fn includes_user_instructions_message_in_request() {
             .contains("be nice")
     );
     assert_message_role(&request_body["input"][0], "developer");
-    let permissions_text = request_body["input"][0]["content"][0]["text"]
-        .as_str()
-        .expect("invalid permissions message content");
+    let developer_texts = request_body["input"]
+        .as_array()
+        .expect("input array")
+        .iter()
+        .filter(|item| item.get("role").and_then(|role| role.as_str()) == Some("developer"))
+        .flat_map(message_input_texts)
+        .collect::<Vec<_>>();
     assert!(
-        permissions_text.contains("`sandbox_mode`"),
-        "expected permissions message to mention sandbox_mode, got {permissions_text:?}"
+        developer_texts
+            .iter()
+            .any(|text| text.contains("`sandbox_mode`")),
+        "expected permissions message to mention sandbox_mode, got {developer_texts:?}"
     );
 
     assert_message_role(&request_body["input"][1], "user");
@@ -2434,6 +2612,64 @@ async fn configured_reasoning_summary_is_sent() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_without_summary_parameter_support_omits_configured_summary() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+
+    let resp_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+    let mut model_catalog = bundled_models_response().expect("bundled models.json should parse");
+    let model = model_catalog
+        .models
+        .iter_mut()
+        .find(|model| model.slug == "gpt-5.4")
+        .expect("gpt-5.4 exists in bundled models.json");
+    model.supports_reasoning_summary_parameter = false;
+
+    let TestCodex { codex, .. } = test_codex()
+        .with_model("gpt-5.4")
+        .with_config(move |config| {
+            config.model_catalog = Some(model_catalog);
+            config.model_reasoning_effort = Some(ReasoningEffort::High);
+            config.model_reasoning_summary = Some(ReasoningSummary::Detailed);
+            config
+                .features
+                .enable(Feature::ConcurrentReasoningSummaries)
+                .expect("test config should allow feature update");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let request_body = resp_mock.single_request().body_json();
+    pretty_assertions::assert_eq!(request_body["reasoning"], json!({"effort": "high"}));
+    pretty_assertions::assert_eq!(
+        request_body["include"],
+        json!(["reasoning.encrypted_content"])
+    );
+    pretty_assertions::assert_eq!(request_body.get("stream_options"), None);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sequential_cutoff_is_omitted_for_non_openai_provider() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     let server = MockServer::start().await;
@@ -2541,7 +2777,6 @@ async fn user_turn_explicit_reasoning_summary_overrides_model_catalog_default() 
         .iter_mut()
         .find(|model| model.slug == "gpt-5.4")
         .expect("gpt-5.4 exists in bundled models.json");
-    model.supports_reasoning_summaries = true;
     model.default_reasoning_summary = ReasoningSummary::Detailed;
 
     let TestCodex {
@@ -2664,7 +2899,6 @@ async fn reasoning_summary_none_overrides_model_catalog_default() -> anyhow::Res
         .iter_mut()
         .find(|model| model.slug == "gpt-5.4")
         .expect("gpt-5.4 exists in bundled models.json");
-    model.supports_reasoning_summaries = true;
     model.default_reasoning_summary = ReasoningSummary::Detailed;
 
     let TestCodex { codex, .. } = test_codex()
@@ -2883,10 +3117,6 @@ async fn includes_developer_instructions_message_in_request() {
     let request = resp_mock.single_request();
     let request_body = request.body_json();
 
-    let permissions_text = request_body["input"][0]["content"][0]["text"]
-        .as_str()
-        .expect("invalid permissions message content");
-
     assert!(
         !request_body["instructions"]
             .as_str()
@@ -2894,23 +3124,22 @@ async fn includes_developer_instructions_message_in_request() {
             .contains("be nice")
     );
     assert_message_role(&request_body["input"][0], "developer");
-    assert!(
-        permissions_text.contains("`sandbox_mode`"),
-        "expected permissions message to mention sandbox_mode, got {permissions_text:?}"
-    );
-
-    let developer_messages: Vec<&serde_json::Value> = request_body["input"]
+    let developer_texts = request_body["input"]
         .as_array()
         .expect("input array")
         .iter()
         .filter(|item| item.get("role").and_then(|role| role.as_str()) == Some("developer"))
-        .collect();
+        .flat_map(message_input_texts)
+        .collect::<Vec<_>>();
     assert!(
-        developer_messages
+        developer_texts
             .iter()
-            .any(|item| message_input_texts(item).contains(&"be useful")),
-        "expected developer instructions in a developer message, got {:?}",
-        request_body["input"]
+            .any(|text| text.contains("`sandbox_mode`")),
+        "expected permissions message to mention sandbox_mode, got {developer_texts:?}"
+    );
+    assert!(
+        developer_texts.contains(&"be useful"),
+        "expected developer instructions in a developer message, got {developer_texts:?}"
     );
 
     assert_message_role(&request_body["input"][1], "user");
@@ -2938,7 +3167,7 @@ async fn includes_developer_instructions_message_in_request() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn azure_responses_request_includes_store_and_reasoning_ids() {
+async fn azure_responses_request_includes_store_and_prefixed_item_ids() {
     skip_if_no_network!();
 
     let server = MockServer::start().await;
@@ -3007,8 +3236,8 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
-        codex_tools::Harness::Native,
-        /*harness_guidance*/ true,
+        /*harness*/ codex_tools::Harness::Native,
+        /*harness_guidance*/ false,
         /*item_ids_enabled*/ false,
         /*concurrent_reasoning_summaries_enabled*/ false,
         /*attestation_provider*/ None,
@@ -3019,7 +3248,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
 
     let mut prompt = Prompt::default();
     prompt.input.push(ResponseItem::Reasoning {
-        id: Some("reasoning-id".into()),
+        id: Some(ResponseItemId::with_suffix("rs", "reasoning-id")),
         summary: vec![ReasoningItemReasoningSummary::SummaryText {
             text: "summary".into(),
         }],
@@ -3030,7 +3259,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         internal_chat_message_metadata_passthrough: None,
     });
     prompt.input.push(ResponseItem::Message {
-        id: Some("message-id".into()),
+        id: Some(ResponseItemId::with_suffix("msg", "message-id")),
         role: "assistant".into(),
         content: vec![ContentItem::OutputText {
             text: "message".into(),
@@ -3039,7 +3268,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         internal_chat_message_metadata_passthrough: None,
     });
     prompt.input.push(ResponseItem::WebSearchCall {
-        id: Some("web-search-id".into()),
+        id: Some(ResponseItemId::with_suffix("ws", "web-search-id")),
         status: Some("completed".into()),
         action: Some(WebSearchAction::Search {
             query: Some("weather".into()),
@@ -3048,7 +3277,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         internal_chat_message_metadata_passthrough: None,
     });
     prompt.input.push(ResponseItem::FunctionCall {
-        id: Some("function-id".into()),
+        id: Some(ResponseItemId::with_suffix("fc", "function-id")),
         name: "do_thing".into(),
         namespace: None,
         arguments: "{}".into(),
@@ -3062,7 +3291,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         internal_chat_message_metadata_passthrough: None,
     });
     prompt.input.push(ResponseItem::LocalShellCall {
-        id: Some("local-shell-id".into()),
+        id: Some(ResponseItemId::with_suffix("lsh", "local-shell-id")),
         call_id: Some("local-shell-call-id".into()),
         status: LocalShellStatus::Completed,
         action: LocalShellAction::Exec(LocalShellExecAction {
@@ -3075,7 +3304,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         internal_chat_message_metadata_passthrough: None,
     });
     prompt.input.push(ResponseItem::CustomToolCall {
-        id: Some("custom-tool-id".into()),
+        id: Some(ResponseItemId::with_suffix("ctc", "custom-tool-id")),
         status: Some("completed".into()),
         call_id: "custom-tool-call-id".into(),
         name: "custom_tool".into(),
@@ -3090,6 +3319,24 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         output: FunctionCallOutputPayload::from_text("ok".into()),
         internal_chat_message_metadata_passthrough: None,
     });
+    prompt.input.push(
+        serde_json::from_value(json!({
+            "type": "message",
+            "id": "018f9e15-7a6a-7000-8000-000000000001",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "legacy message"}],
+        }))
+        .expect("legacy response item should deserialize"),
+    );
+    prompt.input.push(
+        serde_json::from_value(json!({
+            "type": "message",
+            "id": "",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "empty-id message"}],
+        }))
+        .expect("response item with an empty id should deserialize"),
+    );
 
     let mut stream = client_session
         .stream(
@@ -3117,21 +3364,23 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
 
     assert_eq!(body["store"], serde_json::Value::Bool(true));
     assert_eq!(body["stream"], serde_json::Value::Bool(true));
-    assert_eq!(body["input"].as_array().map(Vec::len), Some(8));
-    assert_eq!(body["input"][0]["id"].as_str(), Some("reasoning-id"));
-    assert_eq!(body["input"][1]["id"].as_str(), Some("message-id"));
-    assert_eq!(body["input"][2]["id"].as_str(), Some("web-search-id"));
-    assert_eq!(body["input"][3]["id"].as_str(), Some("function-id"));
+    assert_eq!(body["input"].as_array().map(Vec::len), Some(10));
+    assert_eq!(body["input"][0]["id"].as_str(), Some("rs_reasoning-id"));
+    assert_eq!(body["input"][1]["id"].as_str(), Some("msg_message-id"));
+    assert_eq!(body["input"][2]["id"].as_str(), Some("ws_web-search-id"));
+    assert_eq!(body["input"][3]["id"].as_str(), Some("fc_function-id"));
     assert_eq!(
         body["input"][4]["call_id"].as_str(),
         Some("function-call-id")
     );
-    assert_eq!(body["input"][5]["id"].as_str(), Some("local-shell-id"));
-    assert_eq!(body["input"][6]["id"].as_str(), Some("custom-tool-id"));
+    assert_eq!(body["input"][5]["id"].as_str(), Some("lsh_local-shell-id"));
+    assert_eq!(body["input"][6]["id"].as_str(), Some("ctc_custom-tool-id"));
     assert_eq!(
         body["input"][7]["call_id"].as_str(),
         Some("custom-tool-call-id")
     );
+    assert_eq!(body["input"][8].get("id"), None);
+    assert_eq!(body["input"][9].get("id"), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3209,6 +3458,7 @@ async fn token_count_includes_rate_limits_snapshot() {
                 "total_token_usage": {
                     "input_tokens": 123,
                     "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0,
                     "output_tokens": 0,
                     "reasoning_output_tokens": 0,
                     "total_tokens": 123
@@ -3216,6 +3466,7 @@ async fn token_count_includes_rate_limits_snapshot() {
                 "last_token_usage": {
                     "input_tokens": 123,
                     "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0,
                     "output_tokens": 0,
                     "reasoning_output_tokens": 0,
                     "total_tokens": 123
@@ -3238,6 +3489,7 @@ async fn token_count_includes_rate_limits_snapshot() {
                 },
                 "credits": null,
                 "individual_limit": null,
+                "spend_control_reached": null,
                 "plan_type": null,
                 "rate_limit_reached_type": null
             }
@@ -3279,6 +3531,13 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
         .insert_header("x-codex-primary-over-secondary-limit-percent", "95.0")
         .insert_header("x-codex-primary-window-minutes", "15")
         .insert_header("x-codex-secondary-window-minutes", "60")
+        .insert_header("x-codex-credits-has-credits", "true")
+        .insert_header("x-codex-credits-unlimited", "false")
+        .insert_header("x-codex-credits-balance", "")
+        .insert_header(
+            "x-codex-rate-limit-reached-type",
+            "workspace_member_usage_limit_reached",
+        )
         .set_body_json(json!({
             "error": {
                 "type": "usage_limit_reached",
@@ -3312,10 +3571,15 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
             "window_minutes": 60,
             "resets_at": null
         },
-        "credits": null,
+        "credits": {
+            "has_credits": true,
+            "unlimited": false,
+            "balance": null
+        },
         "individual_limit": null,
+        "spend_control_reached": null,
         "plan_type": null,
-        "rate_limit_reached_type": null
+        "rate_limit_reached_type": "workspace_member_usage_limit_reached"
     });
 
     let submission_id = codex
@@ -3351,7 +3615,7 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
         unreachable!();
     };
     assert!(
-        error_event.message.to_lowercase().contains("usage limit"),
+        error_event.message.contains("spend cap set by the owner"),
         "unexpected error message for submission {submission_id}: {}",
         error_event.message
     );

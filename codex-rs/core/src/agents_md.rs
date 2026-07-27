@@ -29,6 +29,7 @@ use codex_file_system::FindUpErrorPolicy;
 use codex_file_system::find_nearest_ancestor_with_markers;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
+use futures::StreamExt;
 use std::io;
 use toml::Value as TomlValue;
 use tracing::error;
@@ -42,6 +43,11 @@ pub const LOCAL_AGENTS_MD_FILENAME: &str = "AGENTS.override.md";
 /// concatenated with the following separator.
 const AGENTS_MD_SEPARATOR: &str = "\n\n--- project-doc ---\n\n";
 
+// Metadata probes are cheap and the exec-server transport already bounds total in-flight calls.
+// This covers typical project hierarchies in one remote round trip without monopolizing that
+// transport when independent startup discovery runs concurrently.
+const MAX_CONCURRENT_ANCESTOR_PROBES: usize = 256;
+
 /// Loads project AGENTS.md content and combines it with host-provided user
 /// instructions.
 pub(crate) async fn load_project_instructions(
@@ -50,7 +56,7 @@ pub(crate) async fn load_project_instructions(
     environments: &TurnEnvironmentSnapshot,
 ) -> Option<LoadedAgentsMd> {
     let mut loaded = LoadedAgentsMd::from_user_instructions(user_instructions);
-    for turn_environment in &environments.turn_environments {
+    for turn_environment in environments.turn_environments() {
         let filesystem = turn_environment.environment.get_filesystem();
         match read_agents_md(
             config,
@@ -198,22 +204,28 @@ async fn agents_md_paths(
         vec![dir]
     };
 
-    let mut found = Vec::new();
     let candidate_filenames = candidate_filenames(config);
-    for directory in search_dirs {
-        for name in &candidate_filenames {
-            let candidate = directory
-                .join(name)
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-            match fs.get_metadata(&candidate, /*sandbox*/ None).await {
-                Ok(metadata) if metadata.is_file => {
-                    found.push(candidate);
-                    break;
+    let candidate_filenames = &candidate_filenames;
+    let mut results = futures::stream::iter(search_dirs)
+        .map(|directory| async move {
+            for name in candidate_filenames {
+                let candidate = directory
+                    .join(name)
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+                match fs.get_metadata(&candidate, /*sandbox*/ None).await {
+                    Ok(metadata) if metadata.is_file => return Ok(Some(candidate)),
+                    Ok(_) => {}
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                    Err(err) => return Err(err),
                 }
-                Ok(_) => {}
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => return Err(err),
             }
+            Ok(None)
+        })
+        .buffered(MAX_CONCURRENT_ANCESTOR_PROBES);
+    let mut found = Vec::new();
+    while let Some(result) = results.next().await {
+        if let Some(candidate) = result? {
+            found.push(candidate);
         }
     }
     Ok(found)

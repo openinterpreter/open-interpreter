@@ -130,8 +130,8 @@ async fn responses_stream_includes_subagent_header_on_review() {
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
-        codex_tools::Harness::Native,
-        /*harness_guidance*/ true,
+        /*harness*/ codex_tools::Harness::Native,
+        /*harness_guidance*/ false,
         /*item_ids_enabled*/ false,
         /*concurrent_reasoning_summaries_enabled*/ false,
         /*attestation_provider*/ None,
@@ -268,8 +268,8 @@ async fn responses_stream_includes_subagent_header_on_other() {
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
-        codex_tools::Harness::Native,
-        /*harness_guidance*/ true,
+        /*harness*/ codex_tools::Harness::Native,
+        /*harness_guidance*/ false,
         /*item_ids_enabled*/ false,
         /*concurrent_reasoning_summaries_enabled*/ false,
         /*attestation_provider*/ None,
@@ -352,7 +352,6 @@ async fn responses_respects_model_info_overrides_from_config() {
     config.model = Some("gpt-3.5-turbo".to_string());
     config.model_provider_id = provider.name.clone();
     config.model_provider = provider.clone();
-    config.model_supports_reasoning_summaries = Some(true);
     config.model_reasoning_summary = Some(ReasoningSummary::Detailed);
     let effort = config.model_reasoning_effort.clone();
     let summary = config.model_reasoning_summary;
@@ -392,8 +391,8 @@ async fn responses_respects_model_info_overrides_from_config() {
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
-        codex_tools::Harness::Native,
-        /*harness_guidance*/ true,
+        /*harness*/ codex_tools::Harness::Native,
+        /*harness_guidance*/ false,
         /*item_ids_enabled*/ false,
         /*concurrent_reasoning_summaries_enabled*/ false,
         /*attestation_provider*/ None,

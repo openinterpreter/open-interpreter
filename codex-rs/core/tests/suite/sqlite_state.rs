@@ -375,6 +375,8 @@ async fn backfill_scans_existing_rollouts() -> Result<()> {
                     selected_capability_roots: Vec::new(),
                     memory_mode: None,
                     history_mode: Default::default(),
+                    history_base: None,
+                    subagent_history_start_ordinal: None,
                     multi_agent_version: None,
                     context_window: None,
                 },
@@ -384,10 +386,12 @@ async fn backfill_scans_existing_rollouts() -> Result<()> {
             let lines = [
                 RolloutLine {
                     timestamp: "2026-01-27T12:00:00Z".to_string(),
+                    ordinal: None,
                     item: RolloutItem::SessionMeta(session_meta_line),
                 },
                 RolloutLine {
                     timestamp: "2026-01-27T12:00:01Z".to_string(),
+                    ordinal: None,
                     item: RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
                         client_id: None,
                         message: "hello from backfill".to_string(),

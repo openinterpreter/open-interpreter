@@ -17,6 +17,7 @@ use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::ExecCommandStatus;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
+use codex_utils_output_truncation::approx_tokens_from_byte_count;
 use codex_utils_path_uri::PathUri;
 use core_test_support::TempDirExt;
 use core_test_support::assert_regex_match;
@@ -2898,17 +2899,27 @@ async fn unified_exec_formats_large_output_summary() -> Result<()> {
     });
     let test = builder.build_with_auto_env(&server).await?;
 
-    let script = r#"python3 - <<'PY'
+    let output_line = "token token \n";
+    let output_repetitions = 100_000;
+    let original_output_bytes =
+        b"HEAD\n".len() + output_line.len() * output_repetitions + b"TAIL\n".len();
+    let expected_original_token_count =
+        usize::try_from(approx_tokens_from_byte_count(original_output_bytes)).unwrap_or(usize::MAX);
+    let script = format!(
+        r#"python3 - <<'PY'
 import sys
-sys.stdout.write("token token \n" * 5000)
+sys.stdout.write("HEAD\n")
+sys.stdout.write("token token \n" * {output_repetitions})
+sys.stdout.write("TAIL\n")
 PY
-"#;
+"#
+    );
 
     let call_id = "uexec-large-output";
     let args = serde_json::json!({
         "cmd": script,
         "max_output_tokens": 100,
-        "yield_time_ms": 500,
+        "yield_time_ms": 3_000,
     });
 
     let responses = vec![
@@ -2926,6 +2937,18 @@ PY
 
     submit_unified_exec_turn(&test, "summarize large output", PermissionProfile::Disabled).await?;
 
+    let end_event = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::ExecCommandEnd(event) if event.call_id == call_id => Some(event.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(end_event.aggregated_output.contains("HEAD\n"));
+    assert!(end_event.aggregated_output.contains("TAIL\n"));
+    assert_regex_match(
+        r"\.\.\. \d+ bytes omitted \.\.\.",
+        &end_event.aggregated_output,
+    );
+
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
     })
@@ -2942,13 +2965,16 @@ PY
     let large_output = outputs.get(call_id).expect("missing large output summary");
 
     let output_text = large_output.output.replace("\r\n", "\n");
-    let truncated_pattern = r"(?s)^Warning: truncated output \(original token count: \d+\)\nTotal output lines: \d+\n\n(token token \n){5,}.*…\d+ tokens truncated….*(token token \n){5,}$";
-    assert_regex_match(truncated_pattern, &output_text);
-
-    let original_tokens = large_output
-        .original_token_count
-        .expect("missing original_token_count for large output summary");
-    assert!(original_tokens > 0);
+    assert!(output_text.starts_with(&format!(
+        "Warning: truncated output (original token count: {expected_original_token_count})\n"
+    )));
+    assert_regex_match(r"\.\.\. \d+ bytes omitted \.\.\.", &output_text);
+    assert!(output_text.contains("HEAD\n"));
+    assert!(output_text.contains("TAIL\n"));
+    assert_eq!(
+        large_output.original_token_count,
+        Some(expected_original_token_count)
+    );
 
     Ok(())
 }
@@ -3382,6 +3408,78 @@ async fn unified_exec_runs_on_all_platforms() -> Result<()> {
 
     // TODO: Weaker match because windows produces control characters
     assert_regex_match(".*hello crossplat.*", &output.output);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn write_stdin_calls_run_in_parallel_across_sessions() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_target_windows!(Ok(()), "uses bash and POSIX file rendezvous commands");
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_model("gpt-5.4").with_config(|config| {
+        config.use_experimental_unified_exec_tool = true;
+        config
+            .features
+            .enable(Feature::UnifiedExec)
+            .expect("test config should allow feature update");
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    let start_args = serde_json::to_string(&json!({
+        "cmd": "bash --noprofile --norc",
+        "tty": true,
+        "yield_time_ms": 250,
+    }))?;
+    let cross_session_a = serde_json::to_string(&json!({
+        "session_id": 1000,
+        "chars": ": > .write-stdin-a; while [ ! -e .write-stdin-b ]; do sleep 0.01; done; printf 'alpha-%s\\n' ready; exit\n",
+        "yield_time_ms": 5_000,
+    }))?;
+    let cross_session_b = serde_json::to_string(&json!({
+        "session_id": 1001,
+        "chars": ": > .write-stdin-b; while [ ! -e .write-stdin-a ]; do sleep 0.01; done; printf 'beta-%s\\n' ready; exit\n",
+        "yield_time_ms": 5_000,
+    }))?;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-start-1"),
+                ev_function_call("start-a", "exec_command", &start_args),
+                ev_function_call("start-b", "exec_command", &start_args),
+                ev_completed("resp-start-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-cross-1"),
+                ev_function_call("cross-a", "write_stdin", &cross_session_a),
+                ev_function_call("cross-b", "write_stdin", &cross_session_b),
+                ev_completed("resp-cross-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-done", "done"),
+                ev_completed("resp-done"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(&test, "start terminals", PermissionProfile::Disabled).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let outputs = collect_tool_outputs(
+        &response_mock
+            .requests()
+            .into_iter()
+            .map(|request| request.body_json())
+            .collect::<Vec<_>>(),
+    )?;
+    assert_regex_match(".*alpha-ready.*", &outputs["cross-a"].output);
+    assert_regex_match(".*beta-ready.*", &outputs["cross-b"].output);
 
     Ok(())
 }

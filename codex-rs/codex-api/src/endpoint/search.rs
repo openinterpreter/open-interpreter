@@ -70,6 +70,7 @@ mod tests {
     use codex_client::Response;
     use codex_client::StreamResponse;
     use codex_client::TransportError;
+    use codex_protocol::ResponseItemId;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ResponseItem;
     use http::StatusCode;
@@ -138,6 +139,12 @@ mod tests {
             serde_json::to_vec(&json!({
                 "encrypted_output": "ciphertext",
                 "output": "search result",
+                "results": [{
+                    "type": "text_result",
+                    "ref_id": "turn0search0",
+                    "url": "https://example.com/result",
+                    "future_field": {"preserved": true},
+                }],
             }))
             .expect("serialize response"),
         );
@@ -150,7 +157,7 @@ mod tests {
                     model: "gpt-test".to_string(),
                     reasoning: None,
                     input: Some(SearchInput::Items(vec![ResponseItem::Message {
-                        id: Some("msg_search".to_string()),
+                        id: Some(ResponseItemId::with_suffix("msg", "search")),
                         role: "user".to_string(),
                         content: vec![
                             ContentItem::InputText {
@@ -208,6 +215,12 @@ mod tests {
             SearchResponse {
                 encrypted_output: Some("ciphertext".to_string()),
                 output: "search result".to_string(),
+                results: Some(vec![json!({
+                    "type": "text_result",
+                    "ref_id": "turn0search0",
+                    "url": "https://example.com/result",
+                    "future_field": {"preserved": true},
+                })]),
             }
         );
 

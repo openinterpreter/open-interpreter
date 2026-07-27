@@ -2,8 +2,8 @@ use super::*;
 use crate::session::tests::build_world_state_from_turn_context;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
-use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
@@ -40,26 +40,6 @@ fn user_message(text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
         phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    }
-}
-
-fn function_call(name: &str, call_id: &str, arguments: serde_json::Value) -> ResponseItem {
-    ResponseItem::FunctionCall {
-        id: None,
-        name: name.to_string(),
-        namespace: None,
-        arguments: arguments.to_string(),
-        call_id: call_id.to_string(),
-        internal_chat_message_metadata_passthrough: None,
-    }
-}
-
-fn function_call_output(call_id: &str, output: &str) -> ResponseItem {
-    ResponseItem::FunctionCallOutput {
-        id: None,
-        call_id: call_id.to_string(),
-        output: FunctionCallOutputPayload::from_text(output.to_string()),
         internal_chat_message_metadata_passthrough: None,
     }
 }
@@ -106,7 +86,7 @@ fn content_items_to_text_ignores_image_only_content() {
 fn collect_user_messages_extracts_user_text_only() {
     let items = vec![
         ResponseItem::Message {
-            id: Some("assistant".to_string()),
+            id: Some(ResponseItemId::with_suffix("msg", "assistant")),
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: "ignored".to_string(),
@@ -115,7 +95,7 @@ fn collect_user_messages_extracts_user_text_only() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::Message {
-            id: Some("user".to_string()),
+            id: Some(ResponseItemId::with_suffix("msg", "user")),
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
                 text: "first".to_string(),
@@ -129,103 +109,6 @@ fn collect_user_messages_extracts_user_text_only() {
     let collected = collect_user_messages(&items);
 
     assert_eq!(vec![compacted_user_message("first")], collected);
-}
-
-#[test]
-fn zcode_retained_compacted_user_messages_keeps_read_tool_reminders_only() {
-    let read_reminder = "<system-reminder>\nCalled the Read tool with the following input: {}\nResult of calling the Read tool:\n1\talpha\n</system-reminder>";
-    let retained = zcode_retained_compacted_user_messages(&[
-        user_message("ordinary prompt"),
-        user_message(read_reminder),
-        user_message("<subagent_notification>{}</subagent_notification>"),
-    ]);
-
-    assert_eq!(retained.len(), 1);
-    let ResponseItem::Message { content, .. } = &retained[0] else {
-        panic!("expected message");
-    };
-    assert_eq!(
-        content,
-        &vec![ContentItem::InputText {
-            text: read_reminder.to_string(),
-        }]
-    );
-}
-
-#[test]
-fn zcode_retained_compacted_user_messages_synthesizes_recent_whole_file_read_reminders() {
-    let temp_dir = tempfile::tempdir().expect("tempdir");
-    let notes_path = temp_dir.path().join("research-notes.md");
-    std::fs::write(
-        &notes_path,
-        "# Research Notes\nCanvas and usability notes.\n",
-    )
-    .expect("write notes");
-    let notes_path = notes_path.to_string_lossy().to_string();
-    let retained = zcode_retained_compacted_user_messages(&[
-        function_call(
-            "Read",
-            "read-notes-1",
-            serde_json::json!({"file_path":notes_path}),
-        ),
-        function_call_output(
-            "read-notes-1",
-            "Wasted call — file unchanged since your last Read. Refer to that earlier tool_result instead.",
-        ),
-        function_call(
-            "Read",
-            "read-game-1",
-            serde_json::json!({"file_path":"/workspace/game.js"}),
-        ),
-        function_call_output("read-game-1", &"1\tconst x = 1;\n".repeat(7000)),
-        function_call(
-            "Read",
-            "read-notes-2",
-            serde_json::json!({"file_path":notes_path}),
-        ),
-        function_call_output(
-            "read-notes-2",
-            "Wasted call — file unchanged since your last Read. Refer to that earlier tool_result instead.",
-        ),
-        function_call(
-            "Read",
-            "read-ranged-1",
-            serde_json::json!({"file_path":"/workspace/index.html","offset":1,"limit":5}),
-        ),
-        function_call_output("read-ranged-1", "1\t<html>"),
-        function_call(
-            "Read",
-            "read-level-1",
-            serde_json::json!({"file_path":"/workspace/generated-levels/level-042.json"}),
-        ),
-        function_call_output(
-            "read-level-1",
-            "<open-interpreter-harness-no-truncate>\n1\t{\"marker\":\"ZCODE_WEB_GAME_LEVEL\"}",
-        ),
-    ]);
-
-    let texts = retained
-        .iter()
-        .map(|item| match item {
-            ResponseItem::Message { content, .. } => content_items_to_text(content).unwrap(),
-            other => panic!("expected message, found {other:?}"),
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(texts.len(), 2);
-    assert!(texts[0].contains("/workspace/generated-levels/level-042.json"));
-    assert!(texts[0].contains("ZCODE_WEB_GAME_LEVEL"));
-    assert!(texts[0].contains("Result of calling the Read tool:\n1\t{"));
-    assert!(!texts[0].contains("<open-interpreter-harness-no-truncate>"));
-    assert!(texts[1].contains("research-notes.md"));
-    assert!(texts[1].contains("# Research Notes"));
-    assert!(!texts.iter().any(|text| text.contains("/workspace/game.js")));
-    assert!(
-        !texts
-            .iter()
-            .any(|text| text.contains("/workspace/index.html"))
-    );
-    assert!(!texts.iter().any(|text| text.contains("Wasted call")));
 }
 
 #[test]
@@ -398,66 +281,6 @@ fn should_use_remote_compact_task_for_azure_provider() {
 
     assert!(should_use_remote_compact_task(&provider));
 }
-
-#[tokio::test]
-async fn zcode_compact_failures_advance_window_without_retrying() {
-    let (_session, mut turn_context) = crate::session::tests::make_session_and_context().await;
-    let mut config = turn_context.config.as_ref().clone();
-    config.harness = Some("zcode".to_string());
-    turn_context.config = std::sync::Arc::new(config);
-
-    assert!(!should_retry_failed_compact(&turn_context));
-    assert!(should_advance_window_after_failed_compact(&turn_context));
-}
-
-#[tokio::test]
-async fn default_compact_failures_keep_retry_policy() {
-    let (_session, turn_context) = crate::session::tests::make_session_and_context().await;
-
-    assert!(should_retry_failed_compact(&turn_context));
-    assert!(!should_advance_window_after_failed_compact(&turn_context));
-}
-
-#[tokio::test]
-async fn zcode_manual_compact_skips_user_only_history() {
-    let (session, mut turn_context) = crate::session::tests::make_session_and_context().await;
-    let mut config = turn_context.config.as_ref().clone();
-    config.harness = Some("zcode".to_string());
-    turn_context.config = std::sync::Arc::new(config);
-    session
-        .record_conversation_items(&turn_context, &[user_message("prompt")])
-        .await;
-
-    assert!(should_skip_zcode_manual_compact(&session, &turn_context).await);
-}
-
-#[tokio::test]
-async fn zcode_manual_compact_runs_after_assistant_work() {
-    let (session, mut turn_context) = crate::session::tests::make_session_and_context().await;
-    let mut config = turn_context.config.as_ref().clone();
-    config.harness = Some("zcode".to_string());
-    turn_context.config = std::sync::Arc::new(config);
-    session
-        .record_conversation_items(
-            &turn_context,
-            &[
-                user_message("prompt"),
-                ResponseItem::Message {
-                    id: None,
-                    role: "assistant".to_string(),
-                    content: vec![ContentItem::OutputText {
-                        text: "completed work".to_string(),
-                    }],
-                    phase: None,
-                    internal_chat_message_metadata_passthrough: None,
-                },
-            ],
-        )
-        .await;
-
-    assert!(!should_skip_zcode_manual_compact(&session, &turn_context).await);
-}
-
 #[tokio::test]
 async fn process_compacted_history_replaces_developer_messages() {
     let compacted_history = vec![

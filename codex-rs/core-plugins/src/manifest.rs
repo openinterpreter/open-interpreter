@@ -6,7 +6,9 @@ use codex_utils_plugins::find_plugin_manifest_path;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::fs;
+use std::io;
 use std::path::Path;
+use std::path::PathBuf;
 const MAX_DEFAULT_PROMPT_COUNT: usize = 3;
 const MAX_DEFAULT_PROMPT_LEN: usize = 128;
 
@@ -17,7 +19,7 @@ pub type PluginManifestMcpServers =
     codex_plugin::manifest::PluginManifestMcpServers<AbsolutePathBuf>;
 pub type PluginManifestPaths = codex_plugin::manifest::PluginManifestPaths<AbsolutePathBuf>;
 
-pub(crate) type UriPluginManifest = codex_plugin::manifest::PluginManifest<PathUri>;
+pub type UriPluginManifest = codex_plugin::manifest::PluginManifest<PathUri>;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,6 +44,12 @@ struct RawPluginManifest {
     hooks: Option<RawPluginManifestHooks>,
     #[serde(default)]
     interface: Option<RawPluginManifestInterface>,
+}
+
+#[derive(Deserialize)]
+struct RawPluginCommandManifest {
+    #[serde(default)]
+    commands: Option<RawPluginManifestPaths>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -118,7 +126,7 @@ enum RawPluginManifestMcpServers {
 enum RawPluginManifestHooks {
     Path(String),
     Paths(Vec<String>),
-    Inline(HooksFile),
+    Inline(Box<HooksFile>),
     InlineList(Vec<HooksFile>),
     Invalid(JsonValue),
 }
@@ -139,6 +147,24 @@ pub fn load_plugin_manifest(plugin_root: &Path) -> Option<PluginManifest> {
     }
 }
 
+pub(crate) fn load_plugin_command_paths(plugin_root: &Path) -> io::Result<Option<Vec<PathBuf>>> {
+    let Some(manifest_path) = find_plugin_manifest_path(plugin_root) else {
+        return Ok(None);
+    };
+    let manifest =
+        serde_json::from_str::<RawPluginCommandManifest>(&fs::read_to_string(manifest_path)?)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let Some(commands) = manifest.commands else {
+        return Ok(None);
+    };
+    let plugin_root = PathUri::from_host_native_path(plugin_root)?;
+    resolve_manifest_paths(&plugin_root, "commands", Some(&commands))
+        .into_iter()
+        .map(|path| Ok(path.to_abs_path()?.into_path_buf()))
+        .collect::<io::Result<Vec<_>>>()
+        .map(Some)
+}
+
 pub(crate) fn parse_plugin_manifest(
     plugin_root: &Path,
     manifest_path: &Path,
@@ -152,7 +178,7 @@ pub(crate) fn parse_plugin_manifest(
         .try_map_resources(|path| path.to_abs_path().map_err(serde_json::Error::io))
 }
 
-pub(crate) fn parse_plugin_manifest_uri(
+pub fn parse_plugin_manifest_uri(
     plugin_root: &PathUri,
     manifest_path: &PathUri,
     contents: &str,
@@ -285,7 +311,7 @@ fn resolve_manifest_hooks(
         }
         RawPluginManifestHooks::Inline(hooks) => {
             Some(codex_plugin::manifest::PluginManifestHooks::Inline(vec![
-                hooks,
+                *hooks,
             ]))
         }
         RawPluginManifestHooks::InlineList(hooks) => (!hooks.is_empty())

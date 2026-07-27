@@ -1,6 +1,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::CellId;
@@ -14,6 +16,7 @@ use super::WaitOutcome;
 use super::WaitRequest;
 use super::WaitToPendingOutcome;
 use super::WaitToPendingRequest;
+use super::yield_timeout;
 use crate::CodeModeToolKind;
 use crate::ExecuteRequest;
 use crate::ExecuteToPendingOutcome;
@@ -25,9 +28,117 @@ use serde_json::Value as JsonValue;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+#[test]
+fn yield_timeout_adds_grace_only_at_ten_seconds() {
+    assert_eq!(
+        yield_timeout(/*yield_time_ms*/ 9_999),
+        Duration::from_millis(9_999)
+    );
+    assert_eq!(
+        yield_timeout(/*yield_time_ms*/ 10_000),
+        Duration::from_secs(11)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn execute_waits_for_nested_tool_during_yield_grace() {
+    let delegate = Arc::new(ReleasableToolDelegate::default());
+    let service = InProcessCodeModeSession::with_delegate(delegate.clone());
+    let request = ExecuteRequest {
+        enabled_tools: vec![echo_tool()],
+        source: r#"await tools.echo({}); text("done");"#.to_string(),
+        yield_time_ms: Some(10_000),
+        ..execute_request("")
+    };
+    let started = service.execute(request).await.unwrap();
+    let response = tokio::spawn(started.initial_response());
+    wait_until_tool_started(&delegate).await;
+    tokio::time::advance(Duration::from_millis(10_500)).await;
+    delegate.release_tool();
+    wait_until_finished(&response).await;
+    let response = response.await.unwrap().unwrap();
+
+    assert_eq!(
+        response,
+        RuntimeResponse::Result {
+            cell_id: cell_id("1"),
+            content_items: vec![FunctionCallOutputContentItem::InputText {
+                text: "done".to_string(),
+            }],
+            error_text: None,
+        }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn wait_waits_for_nested_tool_during_yield_grace() {
+    let delegate = Arc::new(ReleasableToolDelegate::default());
+    let service = InProcessCodeModeSession::with_delegate(delegate.clone());
+    let initial_response = service
+        .execute_to_pending(ExecuteRequest {
+            enabled_tools: vec![echo_tool()],
+            source: r#"await tools.echo({}); text("done");"#.to_string(),
+            ..execute_request("")
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        initial_response,
+        ExecuteToPendingOutcome::Pending {
+            cell_id: cell_id("1"),
+            content_items: Vec::new(),
+            pending_tool_call_ids: vec!["tool-1".to_string()],
+        }
+    );
+    let response = service
+        .begin_wait(WaitRequest {
+            cell_id: cell_id("1"),
+            yield_time_ms: 10_000,
+        })
+        .await;
+    let response = tokio::spawn(response);
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(10_500)).await;
+    delegate.release_tool();
+    wait_until_finished(&response).await;
+    let response = response.await.unwrap();
+
+    assert_eq!(
+        response.unwrap(),
+        WaitOutcome::LiveCell(RuntimeResponse::Result {
+            cell_id: cell_id("1"),
+            content_items: vec![FunctionCallOutputContentItem::InputText {
+                text: "done".to_string(),
+            }],
+            error_text: None,
+        })
+    );
+}
+
+async fn wait_until_finished<T>(task: &tokio::task::JoinHandle<T>) {
+    for _ in 0..10_000 {
+        if task.is_finished() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("code-mode response did not finish while virtual time was held in the grace period");
+}
+
+async fn wait_until_tool_started(delegate: &ReleasableToolDelegate) {
+    for _ in 0..10_000 {
+        if delegate.tool_started.load(Ordering::Acquire) {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("nested code-mode tool did not start");
+}
+
 #[derive(Default)]
 struct ReleasableToolDelegate {
     tool_release: Notify,
+    tool_started: AtomicBool,
 }
 
 impl ReleasableToolDelegate {
@@ -42,6 +153,7 @@ impl CodeModeSessionDelegate for ReleasableToolDelegate {
         _invocation: CodeModeNestedToolCall,
         cancellation_token: CancellationToken,
     ) -> ToolInvocationFuture<'a> {
+        self.tool_started.store(true, Ordering::Release);
         Box::pin(async move {
             tokio::select! {
                 _ = self.tool_release.notified() => Ok(JsonValue::Null),
@@ -627,6 +739,7 @@ async fn output_helpers_return_undefined() {
 const returnsUndefined = [
   text("first"),
   image("data:image/png;base64,AAA"),
+  audio("data:audio/wav;base64,YXVkaW8="),
   notify("ping"),
 ].map((value) => value === undefined);
 text(JSON.stringify(returnsUndefined));
@@ -650,13 +763,89 @@ text(JSON.stringify(returnsUndefined));
                     image_url: "data:image/png;base64,AAA".to_string(),
                     detail: Some(crate::DEFAULT_IMAGE_DETAIL),
                 },
+                FunctionCallOutputContentItem::InputAudio {
+                    audio_url: "data:audio/wav;base64,YXVkaW8=".to_string(),
+                },
                 FunctionCallOutputContentItem::InputText {
-                    text: "[true,true,true]".to_string(),
+                    text: "[true,true,true,true]".to_string(),
                 },
             ],
             error_text: None,
         }
     );
+}
+
+#[tokio::test]
+async fn audio_helper_accepts_audio_url_object_and_raw_mcp_audio_block() {
+    let service = InProcessCodeModeSession::new();
+
+    let response = execute(
+        &service,
+        ExecuteRequest {
+            source: r#"
+audio({
+  audio_url: "data:audio/mpeg;base64,YXVkaW8=",
+});
+audio({
+  type: "audio",
+  data: "YXVkaW8=",
+  mimeType: "audio/wav",
+});
+"#
+            .to_string(),
+            yield_time_ms: None,
+            ..execute_request("")
+        },
+    )
+    .await;
+
+    assert_eq!(
+        response,
+        RuntimeResponse::Result {
+            cell_id: cell_id("1"),
+            content_items: vec![
+                FunctionCallOutputContentItem::InputAudio {
+                    audio_url: "data:audio/mpeg;base64,YXVkaW8=".to_string(),
+                },
+                FunctionCallOutputContentItem::InputAudio {
+                    audio_url: "data:audio/wav;base64,YXVkaW8=".to_string(),
+                },
+            ],
+            error_text: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn audio_helper_rejects_non_data_urls() {
+    for source in [
+        r#"audio("https://example.com/audio.wav");"#,
+        r#"audio({ audio_url: "file:///tmp/audio.wav" });"#,
+    ] {
+        let service = InProcessCodeModeSession::new();
+
+        let response = execute(
+            &service,
+            ExecuteRequest {
+                source: source.to_string(),
+                yield_time_ms: None,
+                ..execute_request("")
+            },
+        )
+        .await;
+
+        assert_eq!(
+            response,
+            RuntimeResponse::Result {
+                cell_id: cell_id("1"),
+                content_items: Vec::new(),
+                error_text: Some(
+                    "Tool call failed: invalid audio output. Pass a base64 data URI instead"
+                        .to_string(),
+                ),
+            }
+        );
+    }
 }
 
 #[tokio::test]
@@ -872,6 +1061,40 @@ async fn image_helpers_reject_remote_urls() {
                     }
                 );
         }
+    }
+}
+
+#[tokio::test]
+async fn image_helpers_reject_invalid_image_outputs() {
+    let image_url =
+        "Error executing tool exec: Expected at least one message to convert to CallToolResult";
+    for source in [
+        format!("image({image_url:?}, \"original\");"),
+        format!("generatedImage({{ image_url: {image_url:?} }});"),
+    ] {
+        let service = InProcessCodeModeSession::new();
+
+        let response = execute(
+            &service,
+            ExecuteRequest {
+                source,
+                yield_time_ms: None,
+                ..execute_request("")
+            },
+        )
+        .await;
+
+        assert_eq!(
+            response,
+            RuntimeResponse::Result {
+                cell_id: cell_id("1"),
+                content_items: Vec::new(),
+                error_text: Some(
+                    "Tool call failed: invalid image output. Pass a base64 data URI instead"
+                        .to_string(),
+                ),
+            }
+        );
     }
 }
 

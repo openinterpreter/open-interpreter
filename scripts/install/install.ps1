@@ -802,6 +802,63 @@ function Test-VisibleCodexCommand {
     }
 }
 
+function Resolve-WindowsArchitecture {
+    param(
+        [AllowNull()]
+        [string]$RuntimeArchitecture,
+        [AllowNull()]
+        [string]$Wow64Architecture,
+        [AllowNull()]
+        [string]$ProcessArchitecture
+    )
+
+    $rawArchitecture = if (-not [string]::IsNullOrWhiteSpace($RuntimeArchitecture)) {
+        $RuntimeArchitecture
+    } elseif (-not [string]::IsNullOrWhiteSpace($Wow64Architecture)) {
+        $Wow64Architecture
+    } else {
+        $ProcessArchitecture
+    }
+
+    switch -Regex ([string]$rawArchitecture) {
+        "^(?i:arm64)$" { return "Arm64" }
+        "^(?i:(?:amd64|x64))$" { return "X64" }
+        default { throw "Unsupported architecture: $rawArchitecture" }
+    }
+}
+
+function Get-WindowsRuntimeArchitecture {
+    try {
+        $runtimeInformation = [type]::GetType(
+            "System.Runtime.InteropServices.RuntimeInformation, System.Runtime.InteropServices.RuntimeInformation",
+            $false
+        )
+        if ($null -eq $runtimeInformation) {
+            $runtimeInformation = [AppDomain]::CurrentDomain.GetAssemblies() |
+                ForEach-Object {
+                    $_.GetType("System.Runtime.InteropServices.RuntimeInformation", $false)
+                } |
+                Where-Object { $null -ne $_ } |
+                Select-Object -First 1
+        }
+        if ($null -eq $runtimeInformation) {
+            return $null
+        }
+
+        $property = $runtimeInformation.GetProperty(
+            "OSArchitecture",
+            [System.Reflection.BindingFlags]"Public,Static"
+        )
+        if ($null -eq $property) {
+            return $null
+        }
+
+        return $property.GetValue($null).ToString()
+    } catch {
+        return $null
+    }
+}
+
 if ($env:OS -ne "Windows_NT") {
     Write-Error "install.ps1 supports Windows only. Use install.sh on macOS or Linux."
     exit 1
@@ -812,7 +869,11 @@ if (-not [Environment]::Is64BitOperatingSystem) {
     exit 1
 }
 
-$architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+$architecture = Resolve-WindowsArchitecture `
+    (Get-WindowsRuntimeArchitecture) `
+    $env:PROCESSOR_ARCHITEW6432 `
+    $env:PROCESSOR_ARCHITECTURE
+
 $target = $null
 $platformLabel = $null
 $npmTag = $null

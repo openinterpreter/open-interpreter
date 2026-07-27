@@ -221,7 +221,7 @@ fn exec_server_env_keeps_command_native_and_carries_sandbox_context() {
         enforce_managed_network: true,
         manager: &manager,
         sandbox_cwd: &cwd_uri,
-        workspace_roots: std::slice::from_ref(&cwd),
+        workspace_roots: std::slice::from_ref(&cwd_uri),
         codex_linux_sandbox_exe: None,
         use_legacy_landlock: false,
         windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Disabled,
@@ -246,7 +246,7 @@ fn exec_server_env_keeps_command_native_and_carries_sandbox_context() {
         capture_policy: crate::exec::ExecCapturePolicy::ShellTool,
     };
     let request = attempt
-        .env_for_exec_server(command(), options(), /*network*/ None, Some("remote"))
+        .env_for_exec_server(command(), options())
         .expect("prepare remote exec request");
 
     assert_eq!(
@@ -264,7 +264,7 @@ fn exec_server_env_keeps_command_native_and_carries_sandbox_context() {
         Some(codex_exec_server::FileSystemSandboxContext {
             permissions: exec_server_permissions.clone().into(),
             cwd: Some(cwd_uri.clone()),
-            workspace_roots: Vec::new(),
+            workspace_roots: vec![cwd_uri.clone()],
             windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Disabled,
             windows_sandbox_private_desktop: false,
             use_legacy_landlock: false,
@@ -278,7 +278,7 @@ fn exec_server_env_keeps_command_native_and_carries_sandbox_context() {
 
     attempt.sandbox_requested = false;
     let request = attempt
-        .env_for_exec_server(command(), options(), /*network*/ None, Some("remote"))
+        .env_for_exec_server(command(), options())
         .expect("prepare unsandboxed remote exec request");
 
     assert_eq!(request.exec_server_sandbox, None);

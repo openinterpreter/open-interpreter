@@ -13,12 +13,8 @@ use crate::goal_files;
 use crate::text_formatting::truncate_text;
 use codex_app_server_protocol::ThreadGoal;
 use codex_app_server_protocol::ThreadGoalStatus;
+use codex_product_info::Product;
 use codex_protocol::ThreadId;
-
-const EPHEMERAL_THREAD_GOAL_ERROR_MESSAGE: &str = concat!(
-    "Goals need a saved session. This session is temporary.\n",
-    "Run `codex` to start a saved session, or `codex resume` / `/resume` to reopen one.",
-);
 
 impl App {
     pub(super) async fn open_thread_goal_menu(
@@ -347,10 +343,18 @@ async fn cleanup_materialized_goal_files(
 
 fn thread_goal_error_message(action: &str, err: &color_eyre::Report) -> String {
     if is_ephemeral_thread_goal_error(err) {
-        EPHEMERAL_THREAD_GOAL_ERROR_MESSAGE.to_string()
+        ephemeral_thread_goal_error_message(Product::current())
     } else {
         format!("Failed to {action} thread goal: {err}")
     }
+}
+
+fn ephemeral_thread_goal_error_message(product: Product) -> String {
+    let command = product.command_name();
+    format!(
+        "Goals need a saved session. This session is temporary.\n\
+         Run `{command}` to start a saved session, or `{command} resume` / `/resume` to reopen one."
+    )
 }
 
 fn is_ephemeral_thread_goal_error(err: &color_eyre::Report) -> bool {
@@ -391,7 +395,19 @@ mod tests {
 
         assert_eq!(
             thread_goal_error_message("read", &err),
-            EPHEMERAL_THREAD_GOAL_ERROR_MESSAGE
+            ephemeral_thread_goal_error_message(Product::current())
+        );
+    }
+
+    #[test]
+    fn thread_goal_error_message_uses_the_product_command() {
+        assert!(
+            ephemeral_thread_goal_error_message(Product::Codex)
+                .contains("Run `codex` to start a saved session")
+        );
+        assert!(
+            ephemeral_thread_goal_error_message(Product::OpenInterpreter)
+                .contains("Run `interpreter` to start a saved session")
         );
     }
 

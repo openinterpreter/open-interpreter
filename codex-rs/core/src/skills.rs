@@ -4,14 +4,14 @@ use crate::session::turn_context::TurnContext;
 use codex_analytics::InvocationType;
 use codex_analytics::SkillInvocation;
 use codex_analytics::build_track_events_context;
+use codex_extension_api::SkillInvocationInput;
+use codex_extension_api::SkillInvocationKind;
 use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_plugins::PluginSkillRoot;
 
 pub use codex_core_skills::SkillError;
 pub use codex_core_skills::SkillLoadOutcome;
-pub use codex_core_skills::SkillMetadata;
-pub use codex_core_skills::SkillPolicy;
 pub use codex_core_skills::SkillRenderReport;
 pub use codex_core_skills::SkillsLoadInput;
 pub use codex_core_skills::SkillsService;
@@ -32,6 +32,8 @@ pub use codex_core_skills::render;
 pub use codex_core_skills::render::SkillRenderSideEffects;
 pub use codex_core_skills::service;
 pub use codex_core_skills::system;
+pub use codex_skills::SkillMetadata;
+pub use codex_skills::SkillPolicy;
 
 pub(crate) fn skills_load_input_from_config(
     config: &Config,
@@ -84,6 +86,19 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
     };
     if !inserted {
         return;
+    }
+
+    for contributor in sess.services.extensions.skill_invocation_contributors() {
+        contributor
+            .on_skill_invocation(SkillInvocationInput {
+                session_store: &sess.services.session_extension_data,
+                thread_store: &sess.services.thread_extension_data,
+                turn_store: turn_context.extension_data.as_ref(),
+                turn_id: turn_context.sub_id.as_str(),
+                skill_resource: skill_path.as_ref(),
+                kind: SkillInvocationKind::Implicit,
+            })
+            .await;
     }
 
     turn_context.session_telemetry.counter(

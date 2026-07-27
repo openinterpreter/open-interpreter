@@ -27,6 +27,13 @@ fn write_user_skill(codex_home: &TempDir, dir: &str, name: &str, description: &s
     fs::write(skill_dir.join("SKILL.md"), content).unwrap();
 }
 
+fn write_home_agents_skill(user_home: &TempDir, dir: &str, name: &str, description: &str) {
+    let skill_dir = user_home.path().join(".agents").join("skills").join(dir);
+    fs::create_dir_all(&skill_dir).unwrap();
+    let content = format!("---\nname: {name}\ndescription: {description}\n---\n\n# Body\n");
+    fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+}
+
 fn write_plugin_skill(
     codex_home: &TempDir,
     marketplace: &str,
@@ -199,6 +206,33 @@ fn new_with_disabled_bundled_skills_removes_stale_cached_system_skills() {
         !codex_home.path().join("skills/.system").exists(),
         "expected disabling system skills to remove stale cached bundled skills"
     );
+}
+
+#[tokio::test]
+async fn explicit_user_home_isolates_user_installed_skill_discovery() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let user_home = tempfile::tempdir().expect("tempdir");
+    let other_home = tempfile::tempdir().expect("tempdir");
+    let cwd = tempfile::tempdir().expect("tempdir");
+    write_home_agents_skill(&user_home, "included", "included-skill", "included");
+    write_home_agents_skill(&other_home, "excluded", "excluded-skill", "excluded");
+    let config_layer_stack = config_stack(&codex_home, "");
+    let skills_service = SkillsService::new_with_restriction_product_and_user_home(
+        codex_home.path().abs(),
+        /*bundled_skills_enabled*/ false,
+        Some(Product::Codex),
+        user_home.path().abs(),
+    );
+
+    let outcome =
+        skills_for_config_with_stack(&skills_service, &cwd, &config_layer_stack, &[]).await;
+    let names = outcome
+        .skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect::<HashSet<_>>();
+
+    assert_eq!(names, HashSet::from(["included-skill"]));
 }
 
 #[tokio::test]

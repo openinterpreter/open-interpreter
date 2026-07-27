@@ -17,5 +17,5 @@ expression: "render_lines(&view, 84)"
   [ ] git-branch         Current Git branch (omitted when unavailable)              
   [ ] context-remaining  Percentage of context window remaining (omitted when unk…  
                                                                                     
-  [ ! ] Action Required | my-project | Interpreting | thread title                  
+  [ ! ] Action Required | my-project | Working | thread title                       
   Press space to toggle; ←/→ to move; enter to confirm and close; esc to close

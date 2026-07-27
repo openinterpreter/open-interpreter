@@ -31,7 +31,6 @@ impl App {
         Some(ThreadSettingsUpdateParams {
             thread_id: thread_id.to_string(),
             model: Some(model),
-            model_provider: Some(self.config.model_provider_id.clone()),
             collaboration_mode: Some(self.chat_widget.effective_collaboration_mode()),
             ..ThreadSettingsUpdateParams::default()
         })

@@ -3,9 +3,9 @@ source: tui/src/chatwidget/tests/side.rs
 expression: normalized_backend_snapshot(terminal.backend())
 ---
 "                                                                                "
-"• Interpreting (0s • esc to interrupt)                                          "
+"• Working (0s • esc to interrupt)                                               "
 "                                                                                "
-"────────────────────────────────────────────────────────────────────────────────"
+"                                                                                "
 "› Ask Codex to do anything                                                      "
 "                                                                                "
-"  openai gpt-5.6-sol default                                  Side starting...  "
+"  gpt-5.6-sol default                                         Side starting...  "

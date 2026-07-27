@@ -28,6 +28,19 @@ fn under_development_features_are_disabled_by_default() {
 }
 
 #[test]
+fn executor_capability_discovery_is_an_opt_in_map_feature() {
+    let mut features = Features::with_defaults();
+    assert!(!features.enabled(Feature::ExecutorCapabilityDiscovery));
+
+    features.apply_map(&BTreeMap::from([(
+        "executor_capability_discovery".to_string(),
+        true,
+    )]));
+
+    assert!(features.enabled(Feature::ExecutorCapabilityDiscovery));
+}
+
+#[test]
 fn default_enabled_features_are_stable() {
     for spec in crate::FEATURES {
         if spec.default_enabled {
@@ -39,57 +52,6 @@ fn default_enabled_features_are_stable() {
             );
         }
     }
-}
-
-#[test]
-fn use_legacy_landlock_is_deprecated_and_disabled_by_default() {
-    assert_eq!(Feature::UseLegacyLandlock.stage(), Stage::Deprecated);
-    assert_eq!(Feature::UseLegacyLandlock.default_enabled(), false);
-}
-
-#[test]
-fn use_linux_sandbox_bwrap_is_removed_and_disabled_by_default() {
-    assert_eq!(Feature::UseLinuxSandboxBwrap.stage(), Stage::Removed);
-    assert_eq!(Feature::UseLinuxSandboxBwrap.default_enabled(), false);
-}
-
-#[test]
-fn undo_is_removed_and_disabled_by_default() {
-    assert_eq!(Feature::GhostCommit.stage(), Stage::Removed);
-    assert_eq!(Feature::GhostCommit.default_enabled(), false);
-}
-
-#[test]
-fn image_detail_original_is_removed_and_disabled_by_default() {
-    assert_eq!(Feature::ImageDetailOriginal.stage(), Stage::Removed);
-    assert_eq!(Feature::ImageDetailOriginal.default_enabled(), false);
-}
-
-#[test]
-fn apply_patch_freeform_is_removed_and_disabled_by_default() {
-    assert_eq!(Feature::ApplyPatchFreeform.stage(), Stage::Removed);
-    assert_eq!(Feature::ApplyPatchFreeform.default_enabled(), false);
-    assert_eq!(
-        feature_for_key("apply_patch_freeform"),
-        Some(Feature::ApplyPatchFreeform)
-    );
-}
-
-#[test]
-fn plugin_hooks_is_removed_and_disabled_by_default() {
-    assert_eq!(Feature::PluginHooks.stage(), Stage::Removed);
-    assert_eq!(Feature::PluginHooks.default_enabled(), false);
-    assert_eq!(feature_for_key("plugin_hooks"), Some(Feature::PluginHooks));
-}
-
-#[test]
-fn external_migration_is_removed_and_disabled_by_default() {
-    assert_eq!(Feature::ExternalMigration.stage(), Stage::Removed);
-    assert_eq!(Feature::ExternalMigration.default_enabled(), false);
-    assert_eq!(
-        feature_for_key("external_migration"),
-        Some(Feature::ExternalMigration)
-    );
 }
 
 #[test]
@@ -124,52 +86,6 @@ fn code_mode_only_requires_code_mode() {
 }
 
 #[test]
-fn code_mode_host_is_stable_and_enabled_by_default() {
-    assert_eq!(Feature::CodeModeHost.stage(), Stage::Stable);
-    assert_eq!(Feature::CodeModeHost.default_enabled(), true);
-    assert_eq!(
-        feature_for_key("code_mode_host"),
-        Some(Feature::CodeModeHost)
-    );
-}
-
-#[test]
-fn guardian_approval_is_stable_and_enabled_by_default() {
-    let spec = Feature::GuardianApproval.info();
-
-    assert_eq!(spec.stage, Stage::Stable);
-    assert_eq!(Feature::GuardianApproval.default_enabled(), true);
-}
-
-#[test]
-fn request_permissions_is_under_development() {
-    assert_eq!(
-        Feature::ExecPermissionApprovals.stage(),
-        Stage::UnderDevelopment
-    );
-    assert_eq!(Feature::ExecPermissionApprovals.default_enabled(), false);
-}
-
-#[test]
-fn request_permissions_tool_is_under_development() {
-    assert_eq!(
-        Feature::RequestPermissionsTool.stage(),
-        Stage::UnderDevelopment
-    );
-    assert_eq!(Feature::RequestPermissionsTool.default_enabled(), false);
-}
-
-#[test]
-fn terminal_resize_reflow_is_removed_and_enabled_by_default() {
-    assert_eq!(
-        feature_for_key("terminal_resize_reflow"),
-        Some(Feature::TerminalResizeReflow)
-    );
-    assert_eq!(Feature::TerminalResizeReflow.stage(), Stage::Removed);
-    assert_eq!(Feature::TerminalResizeReflow.default_enabled(), true);
-}
-
-#[test]
 fn from_sources_ignores_removed_terminal_resize_reflow_feature_key() {
     let features_toml = FeaturesToml::from(BTreeMap::from([(
         "terminal_resize_reflow".to_string(),
@@ -190,86 +106,7 @@ fn from_sources_ignores_removed_terminal_resize_reflow_feature_key() {
 }
 
 #[test]
-fn tool_suggest_is_stable_and_enabled_by_default() {
-    assert_eq!(Feature::ToolSuggest.stage(), Stage::Stable);
-    assert_eq!(Feature::ToolSuggest.default_enabled(), true);
-}
-
-#[test]
-fn network_proxy_is_experimental_and_disabled_by_default() {
-    assert_eq!(
-        feature_for_key("network_proxy"),
-        Some(Feature::NetworkProxy)
-    );
-    assert!(matches!(
-        Feature::NetworkProxy.stage(),
-        Stage::Experimental { .. }
-    ));
-    assert_eq!(Feature::NetworkProxy.default_enabled(), false);
-}
-
-#[test]
-fn tool_search_is_removed_and_disabled_by_default() {
-    assert_eq!(Feature::ToolSearch.stage(), Stage::Removed);
-    assert_eq!(Feature::ToolSearch.default_enabled(), false);
-    assert_eq!(feature_for_key("tool_search"), Some(Feature::ToolSearch));
-}
-
-#[test]
-fn secret_auth_storage_defaults_to_windows_only() {
-    assert_eq!(Feature::SecretAuthStorage.stage(), Stage::Stable);
-    assert_eq!(Feature::SecretAuthStorage.default_enabled(), cfg!(windows));
-    assert_eq!(
-        feature_for_key("secret_auth_storage"),
-        Some(Feature::SecretAuthStorage)
-    );
-}
-
-#[test]
-fn browser_controls_are_stable_and_enabled_by_default() {
-    assert_eq!(Feature::InAppBrowser.stage(), Stage::Stable);
-    assert_eq!(Feature::InAppBrowser.default_enabled(), true);
-    assert_eq!(
-        feature_for_key("in_app_browser"),
-        Some(Feature::InAppBrowser)
-    );
-
-    assert_eq!(Feature::BrowserUse.stage(), Stage::Stable);
-    assert_eq!(Feature::BrowserUse.default_enabled(), true);
-    assert_eq!(feature_for_key("browser_use"), Some(Feature::BrowserUse));
-
-    assert_eq!(Feature::BrowserUseExternal.stage(), Stage::Stable);
-    assert_eq!(Feature::BrowserUseExternal.default_enabled(), true);
-    assert_eq!(
-        feature_for_key("browser_use_external"),
-        Some(Feature::BrowserUseExternal)
-    );
-
-    assert_eq!(Feature::ComputerUse.stage(), Stage::Stable);
-    assert_eq!(Feature::ComputerUse.default_enabled(), true);
-    assert_eq!(feature_for_key("computer_use"), Some(Feature::ComputerUse));
-}
-
-#[test]
-fn use_linux_sandbox_bwrap_is_a_removed_feature_key() {
-    assert_eq!(
-        feature_for_key("use_legacy_landlock"),
-        Some(Feature::UseLegacyLandlock)
-    );
-    assert_eq!(
-        feature_for_key("use_linux_sandbox_bwrap"),
-        Some(Feature::UseLinuxSandboxBwrap)
-    );
-}
-
-#[test]
-fn image_generation_is_stable_and_extension_alias_is_supported() {
-    assert_eq!(Feature::ImageGeneration.stage(), Stage::Stable);
-    assert_eq!(Feature::ImageGeneration.default_enabled(), true);
-    assert_eq!(
-        feature_for_key("image_generation"),
-        Some(Feature::ImageGeneration)
-    );
+fn image_generation_extension_alias_is_supported() {
     assert_eq!(
         feature_for_key("imagegenext"),
         Some(Feature::ImageGeneration)
@@ -326,61 +163,6 @@ fn use_legacy_landlock_config_records_deprecation_notice() {
 }
 
 #[test]
-fn image_detail_original_is_a_removed_feature_key() {
-    assert_eq!(
-        feature_for_key("image_detail_original"),
-        Some(Feature::ImageDetailOriginal)
-    );
-}
-
-#[test]
-fn js_repl_features_are_removed_feature_keys() {
-    assert_eq!(Feature::JsRepl.stage(), Stage::Removed);
-    assert_eq!(Feature::JsRepl.default_enabled(), false);
-    assert_eq!(feature_for_key("js_repl"), Some(Feature::JsRepl));
-
-    assert_eq!(Feature::JsReplToolsOnly.stage(), Stage::Removed);
-    assert_eq!(Feature::JsReplToolsOnly.default_enabled(), false);
-    assert_eq!(
-        feature_for_key("js_repl_tools_only"),
-        Some(Feature::JsReplToolsOnly)
-    );
-}
-
-#[test]
-fn tool_call_mcp_elicitation_is_stable_and_enabled_by_default() {
-    assert_eq!(Feature::ToolCallMcpElicitation.stage(), Stage::Stable);
-    assert_eq!(Feature::ToolCallMcpElicitation.default_enabled(), true);
-}
-
-#[test]
-fn auth_elicitation_is_stable_and_enabled_by_default() {
-    assert_eq!(Feature::AuthElicitation.stage(), Stage::Stable);
-    assert_eq!(Feature::AuthElicitation.default_enabled(), true);
-    assert_eq!(
-        feature_for_key("auth_elicitation"),
-        Some(Feature::AuthElicitation)
-    );
-}
-
-#[test]
-fn mentions_v2_is_stable_and_enabled_by_default() {
-    assert_eq!(Feature::MentionsV2.stage(), Stage::Stable);
-    assert_eq!(Feature::MentionsV2.default_enabled(), true);
-    assert_eq!(feature_for_key("mentions_v2"), Some(Feature::MentionsV2));
-}
-
-#[test]
-fn remote_control_is_removed_and_disabled_by_default() {
-    assert_eq!(Feature::RemoteControl.stage(), Stage::Removed);
-    assert_eq!(Feature::RemoteControl.default_enabled(), false);
-    assert_eq!(
-        feature_for_key("remote_control"),
-        Some(Feature::RemoteControl)
-    );
-}
-
-#[test]
 fn remote_control_config_is_ignored() {
     let mut entries = BTreeMap::new();
     entries.insert("remote_control".to_string(), true);
@@ -392,19 +174,7 @@ fn remote_control_config_is_ignored() {
 }
 
 #[test]
-fn workspace_dependencies_is_stable_and_enabled_by_default() {
-    assert_eq!(Feature::WorkspaceDependencies.stage(), Stage::Stable);
-    assert_eq!(Feature::WorkspaceDependencies.default_enabled(), true);
-    assert_eq!(
-        feature_for_key("workspace_dependencies"),
-        Some(Feature::WorkspaceDependencies)
-    );
-}
-
-#[test]
 fn telepathy_is_legacy_alias_for_chronicle() {
-    assert_eq!(Feature::Chronicle.stage(), Stage::UnderDevelopment);
-    assert_eq!(Feature::Chronicle.default_enabled(), false);
     assert_eq!(feature_for_key("chronicle"), Some(Feature::Chronicle));
     assert_eq!(feature_for_key("telepathy"), Some(Feature::Chronicle));
 }
@@ -419,33 +189,6 @@ fn collab_is_legacy_alias_for_multi_agent() {
 fn codex_hooks_is_legacy_alias_for_hooks() {
     assert_eq!(feature_for_key("hooks"), Some(Feature::CodexHooks));
     assert_eq!(feature_for_key("codex_hooks"), Some(Feature::CodexHooks));
-}
-
-#[test]
-fn multi_agent_is_stable_and_enabled_by_default() {
-    assert_eq!(Feature::Collab.stage(), Stage::Stable);
-    assert_eq!(Feature::Collab.default_enabled(), true);
-}
-
-#[test]
-fn enable_fanout_is_under_development() {
-    assert_eq!(Feature::SpawnCsv.stage(), Stage::UnderDevelopment);
-    assert_eq!(Feature::SpawnCsv.default_enabled(), false);
-}
-
-#[test]
-fn enable_fanout_normalization_enables_multi_agent_one_way() {
-    let mut enable_fanout_features = Features::with_defaults();
-    enable_fanout_features.enable(Feature::SpawnCsv);
-    enable_fanout_features.normalize_dependencies();
-    assert_eq!(enable_fanout_features.enabled(Feature::SpawnCsv), true);
-    assert_eq!(enable_fanout_features.enabled(Feature::Collab), true);
-
-    let mut collab_features = Features::with_defaults();
-    collab_features.enable(Feature::Collab);
-    collab_features.normalize_dependencies();
-    assert_eq!(collab_features.enabled(Feature::Collab), true);
-    assert_eq!(collab_features.enabled(Feature::SpawnCsv), false);
 }
 
 #[test]
@@ -651,6 +394,7 @@ subagent_usage_hint_text = "Subagent guidance."
 multi_agent_mode_hint_text = "Custom mode guidance."
 tool_namespace = "agents"
 hide_spawn_agent_metadata = true
+expose_spawn_agent_model_overrides = true
 non_code_mode_only = true
 "#,
     )
@@ -675,6 +419,7 @@ non_code_mode_only = true
             multi_agent_mode_hint_text: Some("Custom mode guidance.".to_string()),
             tool_namespace: Some("agents".to_string()),
             hide_spawn_agent_metadata: Some(true),
+            expose_spawn_agent_model_overrides: Some(true),
             non_code_mode_only: Some(true),
         }))
     );
@@ -771,28 +516,7 @@ fn unstable_warning_event_only_mentions_enabled_under_development_features() {
 }
 
 #[test]
-fn unstable_warning_event_ignores_stable_default_mode_request_user_input() {
-    let mut configured_features = Table::new();
-    configured_features.insert(
-        "default_mode_request_user_input".to_string(),
-        TomlValue::Boolean(true),
-    );
-
-    let mut features = Features::with_defaults();
-    features.enable(Feature::DefaultModeRequestUserInput);
-
-    let warning = unstable_features_warning_event(
-        Some(&configured_features),
-        /*suppress_unstable_features_warning*/ false,
-        &features,
-        "/tmp/config.toml",
-    );
-
-    assert!(warning.is_none());
-}
-
-#[test]
-fn unstable_warning_event_mentions_enabled_structured_under_development_feature() {
+fn unstable_warning_event_ignores_enabled_structured_stable_feature() {
     let configured_features: Table = toml::from_str(
         r#"
 multi_agent_v2 = { enabled = true, tool_namespace = "agents" }
@@ -817,7 +541,7 @@ code_mode = true
         panic!("expected warning event");
     };
     assert_eq!(
-        "Under-development features enabled: code_mode, multi_agent_v2. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /tmp/config.toml.".to_string(),
+        "Under-development features enabled: code_mode. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /tmp/config.toml.".to_string(),
         message
     );
 }

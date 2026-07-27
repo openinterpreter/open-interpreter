@@ -110,9 +110,9 @@ WHERE id = 1
 #[cfg(test)]
 mod tests {
     use super::StateRuntime;
-    use super::base_sqlite_options;
     use super::test_support::unique_temp_dir;
     use chrono::Utc;
+    use codex_utils_absolute_path::test_support::PathExt;
     use pretty_assertions::assert_eq;
     use sqlx::Connection;
 
@@ -175,11 +175,11 @@ mod tests {
         let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
-        let mut write_connection = sqlx::SqliteConnection::connect_with(&base_sqlite_options(
-            &crate::state_db_path(codex_home.as_path()),
-        ))
-        .await
-        .expect("open write connection");
+        let write_pool = crate::SqliteConfig::new_for_testing(codex_home.as_path().abs())
+            .open_read_write_pool(&crate::state_db_path(codex_home.as_path()))
+            .await
+            .expect("open write pool");
+        let mut write_connection = write_pool.acquire().await.expect("open write connection");
         let write_transaction = write_connection
             .begin_with("BEGIN IMMEDIATE")
             .await

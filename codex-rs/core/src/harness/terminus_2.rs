@@ -1706,7 +1706,7 @@ fn plain_text_content(content: &[ContentItem]) -> Option<String> {
         .iter()
         .filter_map(|item| match item {
             ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text),
-            ContentItem::InputImage { .. } => None,
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
         })
         .cloned()
         .collect::<Vec<_>>()

@@ -1,7 +1,6 @@
 //! Status indicator and terminal-title state for `ChatWidget`.
 
 use crate::status_indicator_widget::STATUS_DETAILS_DEFAULT_MAX_LINES;
-use crate::status_indicator_widget::STATUS_HEADER_INTERPRETING;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct StatusIndicatorState {
@@ -13,7 +12,7 @@ pub(super) struct StatusIndicatorState {
 impl StatusIndicatorState {
     pub(super) fn working() -> Self {
         Self {
-            header: String::from(STATUS_HEADER_INTERPRETING),
+            header: String::from("Working"),
             details: None,
             details_max_lines: STATUS_DETAILS_DEFAULT_MAX_LINES,
         }
@@ -62,6 +61,10 @@ impl PendingGuardianReviewStatus {
         let original_len = self.entries.len();
         self.entries.retain(|entry| entry.id != id);
         self.entries.len() != original_len
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.entries.clear();
     }
 
     pub(super) fn is_empty(&self) -> bool {
