@@ -11,6 +11,8 @@ use codex_protocol::protocol::AskForApproval;
 #[cfg(test)]
 use codex_protocol::protocol::SandboxPolicy;
 #[cfg(test)]
+use codex_protocol::protocol::ThreadHistoryMode;
+#[cfg(test)]
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
@@ -25,7 +27,7 @@ use uuid::Uuid;
 use crate::ThreadMetadata;
 
 #[cfg(test)]
-pub(super) fn unique_temp_dir() -> PathBuf {
+pub(crate) fn unique_temp_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
@@ -49,6 +51,7 @@ pub(super) fn test_thread_metadata(
         updated_at: now,
         recency_at: now,
         source: "cli".to_string(),
+        history_mode: ThreadHistoryMode::Legacy,
         thread_source: None,
         agent_nickname: None,
         agent_role: None,
@@ -59,6 +62,7 @@ pub(super) fn test_thread_metadata(
         cwd,
         cli_version: "0.0.0".to_string(),
         title: String::new(),
+        name: None,
         preview: Some("hello".to_string()),
         sandbox_policy: crate::extract::enum_to_string(&SandboxPolicy::new_read_only_policy()),
         approval_mode: crate::extract::enum_to_string(&AskForApproval::OnRequest),

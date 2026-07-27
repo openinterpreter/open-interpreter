@@ -1,0 +1,13 @@
+name: blocking-ci
+
+# Open Interpreter keeps inherited heavyweight Codex workflows manual-only and
+# does not use this upstream wrapper as an automatic push/PR entrypoint.
+on:
+  workflow_dispatch:
+
+jobs:
+  disabled:
+    name: Disabled in Open Interpreter
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "Use public-ci and cargo-ci for Open Interpreter."

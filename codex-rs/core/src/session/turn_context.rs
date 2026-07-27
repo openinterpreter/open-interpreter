@@ -1,5 +1,4 @@
 use super::*;
-use crate::agents_md::LoadedAgentsMd;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::shell_snapshot::ShellSnapshotFile;
 use codex_core_skills::HostSkillsSnapshot;
@@ -10,7 +9,9 @@ use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_sandboxing::compatibility_sandbox_policy_for_permission_profile;
 use codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy;
@@ -45,6 +46,7 @@ pub(crate) struct TurnEnvironment {
     pub(crate) environment_id: String,
     pub(crate) environment: Arc<Environment>,
     cwd: PathUri,
+    workspace_roots: Vec<PathUri>,
     pub(crate) shell: Option<shell::Shell>,
     pub(crate) shell_snapshot: ShellSnapshotTask,
 }
@@ -54,12 +56,14 @@ impl TurnEnvironment {
         environment_id: String,
         environment: Arc<Environment>,
         cwd: PathUri,
+        workspace_roots: Vec<PathUri>,
         shell: Option<shell::Shell>,
     ) -> Self {
         Self {
             environment_id,
             environment,
             cwd,
+            workspace_roots,
             shell,
             shell_snapshot: futures::future::ready(None).boxed().shared(),
         }
@@ -79,10 +83,15 @@ impl TurnEnvironment {
         &self.cwd
     }
 
+    pub(crate) fn workspace_roots(&self) -> &[PathUri] {
+        &self.workspace_roots
+    }
+
     pub(crate) fn selection(&self) -> TurnEnvironmentSelection {
         TurnEnvironmentSelection {
             environment_id: self.environment_id.clone(),
             cwd: self.cwd.clone(),
+            workspace_roots: self.workspace_roots.clone(),
         }
     }
 }
@@ -93,6 +102,7 @@ impl std::fmt::Debug for TurnEnvironment {
             .field("environment_id", &self.environment_id)
             .field("environment", &self.environment)
             .field("cwd", &self.cwd)
+            .field("workspace_roots", &self.workspace_roots)
             .field("shell", &self.shell)
             .finish_non_exhaustive()
     }
@@ -112,7 +122,9 @@ pub struct TurnContext {
     pub(crate) reasoning_effort: Option<ReasoningEffortConfig>,
     pub(crate) reasoning_summary: ReasoningSummaryConfig,
     pub(crate) session_source: SessionSource,
+    pub(crate) history_mode: ThreadHistoryMode,
     pub(crate) parent_thread_id: Option<ThreadId>,
+    pub(crate) originator: String,
     pub(crate) environments: TurnEnvironmentSnapshot,
     /// The session's absolute working directory. All relative paths provided
     /// by the model as well as sandbox policies are resolved against this path
@@ -123,8 +135,8 @@ pub struct TurnContext {
     pub(crate) timezone: Option<String>,
     pub(crate) app_server_client_name: Option<String>,
     pub(crate) developer_instructions: Option<String>,
-    pub(crate) user_instructions: Option<String>,
-    pub(crate) collaboration_mode: CollaborationMode,
+    pub(crate) mode: ModeKind,
+    pub(crate) collaboration_mode_developer_instructions: Option<String>,
     pub(crate) multi_agent_version: MultiAgentVersion,
     pub(crate) personality: Option<Personality>,
     pub(crate) approval_policy: Constrained<AskForApproval>,
@@ -139,7 +151,7 @@ pub struct TurnContext {
     pub(crate) extension_data: Arc<codex_extension_api::ExtensionData>,
     pub(crate) turn_skills: TurnSkillsContext,
     pub(crate) turn_timing_state: Arc<TurnTimingState>,
-    pub(crate) terminal_error: Arc<Mutex<Option<String>>>,
+    pub(crate) terminal_error: Arc<Mutex<Option<ErrorEvent>>>,
     pub(crate) server_model_warning_emitted: AtomicBool,
     pub(crate) model_verification_emitted: AtomicBool,
 }
@@ -150,6 +162,22 @@ enum TurnMultiAgentRuntime {
 }
 
 impl TurnContext {
+    pub(crate) fn item_ids_enabled(&self) -> bool {
+        self.config.features.enabled(Feature::ItemIds)
+            || matches!(self.history_mode, ThreadHistoryMode::Paginated)
+    }
+
+    pub(crate) fn collaboration_mode(&self) -> CollaborationMode {
+        CollaborationMode {
+            mode: self.mode,
+            settings: Settings {
+                model: self.model_info.slug.clone(),
+                reasoning_effort: self.reasoning_effort.clone(),
+                developer_instructions: self.collaboration_mode_developer_instructions.clone(),
+            },
+        }
+    }
+
     pub(crate) fn permission_profile(&self) -> PermissionProfile {
         self.permission_profile.clone()
     }
@@ -171,13 +199,9 @@ impl TurnContext {
     }
 
     pub(crate) fn effective_reasoning_effort(&self) -> Option<ReasoningEffortConfig> {
-        if self.model_info.supports_reasoning_summaries {
-            self.reasoning_effort
-                .clone()
-                .or_else(|| self.model_info.default_reasoning_level.clone())
-        } else {
-            None
-        }
+        self.reasoning_effort
+            .clone()
+            .or_else(|| self.model_info.default_reasoning_level.clone())
     }
 
     pub(crate) fn effective_reasoning_effort_for_tracing(&self) -> String {
@@ -203,10 +227,7 @@ impl TurnContext {
         self.config
             .features
             .apps_enabled_for_auth(uses_codex_backend)
-    }
-
-    pub(crate) fn tool_environment_mode(&self) -> ToolEnvironmentMode {
-        ToolEnvironmentMode::from_count(self.environments.turn_environments.len())
+            && self.config.orchestrator_mcp_enabled
     }
 
     pub(crate) async fn with_model(
@@ -242,13 +263,11 @@ impl TurnContext {
         };
         config.model_reasoning_effort = reasoning_effort.clone();
 
-        let collaboration_mode = self.collaboration_mode.with_updates(
-            Some(model.clone()),
-            Some(reasoning_effort.clone()),
-            /*developer_instructions*/ None,
-        );
         let available_models = models_manager
-            .list_models(RefreshStrategy::OnlineIfUncached)
+            .list_models(
+                RefreshStrategy::OnlineIfUncached,
+                config.http_client_factory(),
+            )
             .await;
 
         Self {
@@ -266,7 +285,9 @@ impl TurnContext {
             reasoning_effort,
             reasoning_summary: self.reasoning_summary,
             session_source: self.session_source.clone(),
+            history_mode: self.history_mode,
             parent_thread_id: self.parent_thread_id,
+            originator: self.originator.clone(),
             environments: self.environments.clone(),
             #[allow(deprecated)]
             cwd: self.cwd.clone(),
@@ -274,8 +295,10 @@ impl TurnContext {
             timezone: self.timezone.clone(),
             app_server_client_name: self.app_server_client_name.clone(),
             developer_instructions: self.developer_instructions.clone(),
-            user_instructions: self.user_instructions.clone(),
-            collaboration_mode,
+            mode: self.mode,
+            collaboration_mode_developer_instructions: self
+                .collaboration_mode_developer_instructions
+                .clone(),
             multi_agent_version: self.multi_agent_version,
             personality: self.personality,
             approval_policy: self.approval_policy.clone(),
@@ -300,20 +323,14 @@ impl TurnContext {
         }
     }
 
-    #[deprecated(note = "resolve paths from the selected turn environment cwd instead")]
-    pub(crate) fn resolve_path(&self, path: Option<String>) -> AbsolutePathBuf {
-        #[allow(deprecated)]
-        path.as_ref()
-            .map_or_else(|| self.cwd.clone(), |path| self.cwd.join(path))
-    }
-
     pub(crate) fn file_system_sandbox_context(
         &self,
         additional_permissions: Option<AdditionalPermissionProfile>,
-        cwd: &PathUri,
+        environment: &TurnEnvironment,
     ) -> FileSystemSandboxContext {
+        let permission_profile = self.config.permissions.permission_profile();
         let (base_file_system_sandbox_policy, base_network_sandbox_policy) =
-            self.permission_profile.to_runtime_permissions();
+            permission_profile.to_runtime_permissions();
         let file_system_sandbox_policy = effective_file_system_sandbox_policy(
             &base_file_system_sandbox_policy,
             additional_permissions.as_ref(),
@@ -323,19 +340,14 @@ impl TurnContext {
             additional_permissions.as_ref(),
         );
         let permissions = PermissionProfile::from_runtime_permissions_with_enforcement(
-            self.permission_profile.enforcement(),
+            permission_profile.enforcement(),
             &file_system_sandbox_policy,
             network_sandbox_policy,
         );
         FileSystemSandboxContext {
             permissions: permissions.into(),
-            cwd: Some(cwd.clone()),
-            workspace_roots: self
-                .config
-                .effective_workspace_roots()
-                .iter()
-                .map(PathUri::from_abs_path)
-                .collect(),
+            cwd: Some(environment.cwd().clone()),
+            workspace_roots: environment.workspace_roots().to_vec(),
             windows_sandbox_level: self.windows_sandbox_level,
             windows_sandbox_private_desktop: self
                 .config
@@ -372,6 +384,7 @@ impl TurnContext {
             current_date: self.current_date.clone(),
             timezone: self.timezone.clone(),
             approval_policy: self.approval_policy.value(),
+            approvals_reviewer: Some(self.config.approvals_reviewer),
             sandbox_policy: self.sandbox_policy(),
             permission_profile: Some(self.permission_profile()),
             network: self.turn_context_network_item(),
@@ -379,8 +392,9 @@ impl TurnContext {
             model: self.model_info.slug.clone(),
             comp_hash: self.model_info.comp_hash.clone(),
             personality: self.personality,
-            collaboration_mode: Some(self.collaboration_mode.clone()),
+            collaboration_mode: Some(self.collaboration_mode()),
             multi_agent_version: Some(self.multi_agent_version),
+            multi_agent_mode: super::multi_agents::effective_multi_agent_mode(self),
             realtime_active: Some(self.realtime_active),
             effort: self.reasoning_effort.clone(),
             summary: ReasoningSummaryConfig::Auto,
@@ -429,12 +443,11 @@ impl Session {
         let config = session_configuration.original_config_do_not_use.clone();
         let mut per_turn_config = (*config).clone();
         per_turn_config.cwd = cwd;
-        per_turn_config.model_provider_id = session_configuration.model_provider_id.clone();
-        per_turn_config.model_provider = session_configuration.provider.clone();
-        per_turn_config.workspace_roots = session_configuration.workspace_roots.clone();
+        let workspace_roots = session_configuration.primary_workspace_roots();
+        per_turn_config.workspace_roots = workspace_roots.clone();
         per_turn_config
             .permissions
-            .set_workspace_roots(session_configuration.workspace_roots.clone());
+            .set_workspace_roots(workspace_roots);
         per_turn_config.model_reasoning_effort =
             session_configuration.collaboration_mode.reasoning_effort();
         per_turn_config.model_reasoning_summary = session_configuration.model_reasoning_summary;
@@ -469,10 +482,6 @@ impl Session {
             Self::build_per_turn_config(session_configuration, session_configuration.cwd().clone());
         config.model = Some(session_configuration.collaboration_mode.model().to_string());
         config.permissions.approval_policy = session_configuration.approval_policy.clone();
-        config.workspace_roots = session_configuration.workspace_roots.clone();
-        config
-            .permissions
-            .set_workspace_roots(session_configuration.workspace_roots.clone());
         config
     }
 
@@ -497,7 +506,8 @@ impl Session {
         sub_id: String,
         skills_snapshot: HostSkillsSnapshot,
     ) -> TurnContext {
-        let reasoning_effort = session_configuration.collaboration_mode.reasoning_effort();
+        let collaboration_mode = &session_configuration.collaboration_mode;
+        let reasoning_effort = collaboration_mode.reasoning_effort();
         let reasoning_summary = session_configuration
             .model_reasoning_summary
             .unwrap_or(model_info.default_reasoning_summary);
@@ -523,6 +533,7 @@ impl Session {
             per_turn_config.features.enabled(Feature::FastMode),
             &model_info,
         );
+        let permission_profile = per_turn_config.permissions.effective_permission_profile();
         let per_turn_config = Arc::new(per_turn_config);
         let turn_metadata_state = Arc::new(TurnMetadataState::new(
             session_id.to_string(),
@@ -530,9 +541,10 @@ impl Session {
             session_configuration.forked_from_thread_id,
             session_configuration.parent_thread_id,
             &session_configuration.session_source,
+            session_configuration.thread_source.clone(),
             sub_id.clone(),
             cwd.clone(),
-            &session_configuration.permission_profile(),
+            &permission_profile,
             session_configuration.windows_sandbox_level,
             network.is_some(),
         ));
@@ -551,7 +563,9 @@ impl Session {
             reasoning_effort,
             reasoning_summary,
             session_source,
+            history_mode: session_configuration.history_mode,
             parent_thread_id: session_configuration.parent_thread_id,
+            originator: session_configuration.originator.clone(),
             environments,
             #[allow(deprecated)]
             cwd,
@@ -559,15 +573,15 @@ impl Session {
             timezone: Some(timezone),
             app_server_client_name: session_configuration.app_server_client_name.clone(),
             developer_instructions: session_configuration.developer_instructions.clone(),
-            user_instructions: session_configuration
-                .loaded_agents_md
-                .as_ref()
-                .map(LoadedAgentsMd::render),
-            collaboration_mode: session_configuration.collaboration_mode.clone(),
+            mode: collaboration_mode.mode,
+            collaboration_mode_developer_instructions: collaboration_mode
+                .settings
+                .developer_instructions
+                .clone(),
             multi_agent_version,
             personality: session_configuration.personality,
             approval_policy: session_configuration.approval_policy.clone(),
-            permission_profile: session_configuration.permission_profile(),
+            permission_profile,
             network,
             windows_sandbox_level: session_configuration.windows_sandbox_level,
             available_models,
@@ -691,7 +705,7 @@ impl Session {
         multi_agent_runtime: TurnMultiAgentRuntime,
     ) -> Arc<TurnContext> {
         let turn_environments = self.services.turn_environments.snapshot().await;
-        let primary_turn_environment = turn_environments.primary().cloned();
+        let primary_turn_environment = turn_environments.primary();
         // TODO(anp): Migrate per-turn config and legacy TurnContext cwd consumers to PathUri so
         // a foreign primary environment does not fall back to the session's host cwd.
         let cwd = primary_turn_environment
@@ -700,43 +714,47 @@ impl Session {
             .unwrap_or_else(|| session_configuration.cwd().clone());
         let per_turn_config = Self::build_per_turn_config(&session_configuration, cwd.clone());
         {
-            let mcp_connection_manager = self.services.mcp_connection_manager.load_full();
+            let mcp_runtime = self.services.latest_mcp_runtime();
+            let mcp_connection_manager = mcp_runtime.manager();
             mcp_connection_manager.set_approval_policy(&session_configuration.approval_policy);
             mcp_connection_manager
                 .set_permission_profile(session_configuration.permission_profile());
         }
 
-        let model_info = {
-            let models_manager_config = per_turn_config.to_models_manager_config();
-            let remote_models = self
-                .services
-                .models_manager
-                .try_get_remote_models()
-                .unwrap_or_default();
-            codex_models_manager::provider_catalog_models::provider_model_info(
-                &session_configuration.provider,
+        let model_info = self
+            .services
+            .models_manager
+            .get_model_info(
                 session_configuration.collaboration_mode.model(),
-                &models_manager_config,
-                &remote_models,
+                &per_turn_config.to_models_manager_config(),
             )
-        };
+            .await;
+        self.services
+            .thread_extension_data
+            .insert(model_info.clone());
 
         let multi_agent_version = match multi_agent_runtime {
             TurnMultiAgentRuntime::ResolveAndStore => {
                 self.resolve_multi_agent_version_for_model(&model_info, &per_turn_config)
             }
-            TurnMultiAgentRuntime::Preview => self
-                .multi_agent_version()
-                .or(model_info.multi_agent_version)
-                .unwrap_or_else(|| per_turn_config.multi_agent_version_from_features()),
+            TurnMultiAgentRuntime::Preview => per_turn_config.multi_agent_version_for_model(
+                self.multi_agent_version()
+                    .or(model_info.multi_agent_version),
+            ),
         };
+        let plugins_input = per_turn_config.plugins_config_input();
         let plugin_outcome = self
             .services
             .plugins_manager
-            .plugins_for_config(&per_turn_config.plugins_config_input())
+            .plugins_for_config(&plugins_input)
             .await;
         let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
-        let skills_input = skills_load_input_from_config(&per_turn_config, effective_skill_roots);
+        let plugin_skill_snapshots = self
+            .services
+            .plugins_manager
+            .plugin_skill_snapshots_for_config(&plugins_input);
+        let skills_input = skills_load_input_from_config(&per_turn_config, effective_skill_roots)
+            .with_plugin_skill_snapshots(plugin_skill_snapshots);
         let fs = primary_turn_environment
             .map(|turn_environment| turn_environment.environment.get_filesystem());
         let skills_snapshot = self
@@ -789,7 +807,7 @@ impl Session {
         turn_context
     }
 
-    pub(crate) async fn maybe_emit_unknown_model_warning_for_turn(&self, tc: &TurnContext) {
+    pub(crate) async fn maybe_emit_model_warnings_for_turn(&self, tc: &TurnContext) {
         if tc.model_info.used_fallback_model_metadata {
             self.send_event(
                 tc,
@@ -801,6 +819,13 @@ impl Session {
                 }),
             )
             .await;
+        }
+
+        if let Some(message) =
+            unsupported_code_mode_warning(&tc.model_info, tc.config.features.get())
+        {
+            self.send_event(tc, EventMsg::Warning(WarningEvent { message }))
+                .await;
         }
     }
 

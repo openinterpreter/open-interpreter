@@ -1,21 +1,27 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+mod attribution;
 mod certs;
 mod config;
 mod connect_policy;
+mod credential_broker;
 mod http_proxy;
 mod mitm;
 mod mitm_hook;
+mod native_certs;
 mod network_policy;
 mod policy;
 mod proxy;
 mod reasons;
+mod remote_config;
 mod responses;
 mod runtime;
 mod socks5;
 mod state;
 mod upstream;
 
+pub use attribution::PROXY_ATTRIBUTION_TOKEN_ENV_KEY;
+pub use attribution::write_attribution_frame;
 pub use certs::CUSTOM_CA_ENV_KEYS;
 pub use certs::is_managed_mitm_ca_trust_bundle_path;
 pub use config::NetworkDomainPermission;
@@ -26,6 +32,9 @@ pub use config::NetworkProxyConfig;
 pub use config::NetworkUnixSocketPermission;
 pub use config::NetworkUnixSocketPermissions;
 pub use config::host_and_port_from_network_addr;
+pub use credential_broker::CREDENTIAL_BROKER_ACTIVE_ENV_KEY;
+pub use credential_broker::brokered_credential_dummy_env_keys;
+pub use credential_broker::brokered_credential_env_keys;
 pub use mitm_hook::InjectedHeaderConfig;
 pub use mitm_hook::MitmHookActionsConfig;
 pub use mitm_hook::MitmHookBodyConfig;
@@ -46,6 +55,7 @@ pub use proxy::Args;
 #[cfg(target_os = "macos")]
 pub use proxy::CODEX_PROXY_GIT_SSH_COMMAND_MARKER;
 pub use proxy::DEFAULT_NO_PROXY_VALUE;
+pub use proxy::ManagedNetworkSandboxContext;
 pub use proxy::NO_PROXY_ENV_KEYS;
 pub use proxy::NetworkProxy;
 pub use proxy::NetworkProxyBuilder;
@@ -55,8 +65,11 @@ pub use proxy::PROXY_ENV_KEYS;
 #[cfg(target_os = "macos")]
 pub use proxy::PROXY_GIT_SSH_COMMAND_ENV_KEY;
 pub use proxy::PROXY_URL_ENV_KEYS;
+pub use proxy::PreparedManagedNetwork;
 pub use proxy::has_proxy_url_env_vars;
 pub use proxy::proxy_url_env_value;
+pub use remote_config::RemoteNetworkProxyConfig;
+pub use remote_config::RemoteNetworkProxyLaunchConfig;
 pub use runtime::BlockedRequest;
 pub use runtime::BlockedRequestArgs;
 pub use runtime::BlockedRequestObserver;
@@ -68,7 +81,6 @@ pub use runtime::NetworkProxyState;
 pub use state::NetworkProxyAuditMetadata;
 pub use state::NetworkProxyConstraintError;
 pub use state::NetworkProxyConstraints;
-pub use state::PartialNetworkConfig;
 pub use state::PartialNetworkProxyConfig;
 pub use state::build_config_state;
 pub use state::validate_policy_against_constraints;

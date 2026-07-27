@@ -1,6 +1,7 @@
 pub use codex_backend_openapi_models::models::ConfigBundleResponse;
 pub use codex_backend_openapi_models::models::CreditStatusDetails;
 pub use codex_backend_openapi_models::models::DeliveredConfigToml;
+pub use codex_backend_openapi_models::models::DeliveredManagedLayers;
 pub use codex_backend_openapi_models::models::DeliveredRequirementsToml;
 pub use codex_backend_openapi_models::models::DeliveredTomlFragment;
 pub use codex_backend_openapi_models::models::PaginatedListTaskListItem;
@@ -23,6 +24,23 @@ pub struct RateLimitResetCreditsSummary {
     pub available_count: i64,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct RateLimitResetCreditsDetails {
+    pub credits: Vec<RateLimitResetCreditDetails>,
+    pub available_count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct RateLimitResetCreditDetails {
+    pub id: String,
+    pub reset_type: String,
+    pub status: String,
+    pub granted_at: String,
+    pub expires_at: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RateLimitsWithResetCredits {
     pub rate_limits: Vec<RateLimitSnapshot>,
@@ -34,6 +52,23 @@ pub(crate) struct RateLimitStatusWithResetCredits {
     #[serde(flatten)]
     pub rate_limits: RateLimitStatusPayload,
     pub rate_limit_reset_credits: Option<RateLimitResetCreditsSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct CodexWorkspaceMessagesResponse {
+    #[serde(default)]
+    pub messages: Vec<CodexWorkspaceMessage>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct CodexWorkspaceMessage {
+    pub message_id: String,
+    pub message_type: CodexWorkspaceMessageType,
+    pub message_body: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub archived_at: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -50,6 +85,15 @@ pub struct ConsumeRateLimitResetCreditResponse {
     pub code: ConsumeRateLimitResetCreditCode,
     #[serde(default)]
     pub windows_reset: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexWorkspaceMessageType {
+    Headline,
+    Announcement,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug)]
@@ -519,5 +563,62 @@ Second line"
             .assistant_error_message()
             .expect("error should be present");
         assert_eq!(msg, "APPLY_FAILED: Patch could not be applied");
+    }
+
+    #[test]
+    fn workspace_messages_response_deserializes_messages() {
+        let response: CodexWorkspaceMessagesResponse = serde_json::from_value(serde_json::json!({
+            "messages": [
+                {
+                    "message_id": "headline-id",
+                    "message_type": "headline",
+                    "message_body": "Headline body",
+                    "created_at": "2026-06-14T00:00:00Z",
+                    "archived_at": null
+                },
+                {
+                    "message_id": "announcement-id",
+                    "message_type": "announcement",
+                    "message_body": "Announcement body",
+                    "created_at": "2026-06-14T01:00:00Z",
+                    "archived_at": null
+                },
+                {
+                    "message_id": "unknown-id",
+                    "message_type": "unknown",
+                    "message_body": "Unknown body"
+                }
+            ]
+        }))
+        .expect("workspace messages response should deserialize");
+
+        assert_eq!(
+            response,
+            CodexWorkspaceMessagesResponse {
+                messages: vec![
+                    CodexWorkspaceMessage {
+                        message_id: "headline-id".to_string(),
+                        message_type: CodexWorkspaceMessageType::Headline,
+                        message_body: "Headline body".to_string(),
+                        created_at: Some("2026-06-14T00:00:00Z".to_string()),
+                        archived_at: None,
+                    },
+                    CodexWorkspaceMessage {
+                        message_id: "announcement-id".to_string(),
+                        message_type: CodexWorkspaceMessageType::Announcement,
+                        message_body: "Announcement body".to_string(),
+                        created_at: Some("2026-06-14T01:00:00Z".to_string()),
+                        archived_at: None,
+                    },
+                    CodexWorkspaceMessage {
+                        message_id: "unknown-id".to_string(),
+                        message_type: CodexWorkspaceMessageType::Unknown,
+                        message_body: "Unknown body".to_string(),
+                        created_at: None,
+                        archived_at: None,
+                    },
+                ],
+            }
+        );
     }
 }

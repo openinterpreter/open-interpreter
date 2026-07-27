@@ -107,6 +107,12 @@ impl SkillProviders {
             .any(|source| source.kind == SkillSourceKind::Orchestrator)
     }
 
+    pub(crate) fn has_host_provider(&self) -> bool {
+        self.sources
+            .iter()
+            .any(|source| source.kind == SkillSourceKind::Host)
+    }
+
     pub(crate) async fn list_for_turn(&self, query: SkillListQuery) -> SkillCatalog {
         self.list_matching(&query, |source| source.should_list(&query))
             .await
@@ -133,6 +139,16 @@ impl SkillProviders {
         }
 
         Ok(catalog)
+    }
+
+    pub(crate) async fn list_executor_for_turn(&self, query: SkillListQuery) -> SkillCatalog {
+        self.list_matching(&query, |source| source.kind == SkillSourceKind::Executor)
+            .await
+    }
+
+    pub(crate) async fn list_host_for_turn(&self, query: SkillListQuery) -> SkillCatalog {
+        self.list_matching(&query, |source| source.kind == SkillSourceKind::Host)
+            .await
     }
 
     async fn list_matching(

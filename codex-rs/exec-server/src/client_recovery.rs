@@ -15,6 +15,7 @@ use super::ExecServerClient;
 use super::ExecServerError;
 use super::Inner;
 use super::OrderedSessionEvents;
+use super::RecoveryPolicy;
 use super::SessionState;
 use super::disconnected_message;
 use super::fail_all_in_flight_work;
@@ -58,6 +59,7 @@ impl SessionState {
             exit_code,
             closed,
             failure,
+            sandbox_denied,
         } = response;
         if let Some(message) = failure {
             return Err(ExecServerError::Protocol(format!(
@@ -77,40 +79,85 @@ impl SessionState {
             {
                 return Ok(false);
             }
+            let pending_exit = ordered_events.pending.range_mut(..=target_seq).find_map(
+                |(_, event)| match event {
+                    ExecProcessEvent::Exited {
+                        sandbox_denied: pending_sandbox_denied,
+                        ..
+                    } => Some(pending_sandbox_denied),
+                    _ => None,
+                },
+            );
+            let exit_pending = pending_exit.is_some();
+            if let Some(pending_sandbox_denied) = pending_exit {
+                *pending_sandbox_denied =
+                    Some(pending_sandbox_denied.unwrap_or(false) || sandbox_denied);
+            }
+            let mut exit_known = ordered_events.exit_published || exit_pending;
+            if closed
+                && (matches!(
+                    ordered_events.pending.get(&target_seq),
+                    Some(event) if !matches!(event, ExecProcessEvent::Closed { .. })
+                ) || chunks.iter().any(|chunk| chunk.seq == target_seq))
+            {
+                return Err(ExecServerError::Protocol(format!(
+                    "process close sequence {target_seq} conflicts with recovered output"
+                )));
+            }
+            let mut published_closed = false;
             for chunk in chunks {
+                if chunk.seq > target_seq {
+                    return Err(ExecServerError::Protocol(format!(
+                        "recovered process output sequence {} exceeds target sequence {target_seq}",
+                        chunk.seq
+                    )));
+                }
+                let next_seq = ordered_events.last_published_seq.saturating_add(1);
+                if exited && !exit_known && chunk.seq > next_seq {
+                    let exit_code = exit_code.ok_or_else(|| {
+                        ExecServerError::Protocol(
+                            "recovering exited process did not include its exit code".to_string(),
+                        )
+                    })?;
+                    ordered_events
+                        .insert_pending(ExecProcessEvent::Exited {
+                            seq: next_seq,
+                            exit_code,
+                            sandbox_denied: Some(sandbox_denied),
+                        })
+                        .map_err(ExecServerError::Protocol)?;
+                    published_closed |= self.publish_ready(&mut ordered_events);
+                    exit_known = true;
+                }
                 if chunk.seq > ordered_events.last_published_seq {
                     ordered_events
-                        .pending
-                        .entry(chunk.seq)
-                        .or_insert(ExecProcessEvent::Output(chunk));
+                        .insert_pending(ExecProcessEvent::Output(chunk))
+                        .map_err(ExecServerError::Protocol)?;
+                    published_closed |= self.publish_ready(&mut ordered_events);
                 }
             }
-            if closed {
-                match ordered_events.pending.get(&target_seq) {
-                    Some(ExecProcessEvent::Closed { .. }) => {}
-                    Some(_) => {
-                        return Err(ExecServerError::Protocol(format!(
-                            "process close sequence {target_seq} conflicts with recovered output"
-                        )));
-                    }
-                    None => {
-                        ordered_events
-                            .pending
-                            .insert(target_seq, ExecProcessEvent::Closed { seq: target_seq });
-                    }
-                }
+            if closed
+                && !ordered_events.closed_published
+                && !matches!(
+                    ordered_events.pending.get(&target_seq),
+                    Some(ExecProcessEvent::Closed { .. })
+                )
+            {
+                ordered_events
+                    .insert_pending(ExecProcessEvent::Closed { seq: target_seq })
+                    .map_err(ExecServerError::Protocol)?;
             }
 
-            let exit_known = ordered_events.exit_published
-                || ordered_events
+            let event_count = target_seq.saturating_sub(ordered_events.last_published_seq);
+            let first_unpublished_seq = ordered_events.last_published_seq.saturating_add(1);
+            let retained_count = if first_unpublished_seq <= target_seq {
+                ordered_events
                     .pending
-                    .range(..=target_seq)
-                    .any(|(_, event)| matches!(event, ExecProcessEvent::Exited { .. }));
-            let event_count = target_seq - ordered_events.last_published_seq;
-            let retained_count = ordered_events
-                .pending
-                .range(ordered_events.last_published_seq.saturating_add(1)..=target_seq)
-                .count() as u64;
+                    .range(first_unpublished_seq..=target_seq)
+                    .count() as u64
+            } else {
+                0
+            };
             let missing_count = event_count.saturating_sub(retained_count);
             if exited && !exit_known {
                 if missing_count != 1 {
@@ -123,12 +170,17 @@ impl SessionState {
                     )
                 })?;
                 ordered_events
-                    .pending
-                    .insert(seq, ExecProcessEvent::Exited { seq, exit_code });
+                    .insert_pending(ExecProcessEvent::Exited {
+                        seq,
+                        exit_code,
+                        sandbox_denied: Some(sandbox_denied),
+                    })
+                    .map_err(ExecServerError::Protocol)?;
             } else if missing_count != 0 {
                 return Err(recovery_gap_error(target_seq));
             }
-            self.publish_ready(&mut ordered_events)
+            published_closed |= self.publish_ready(&mut ordered_events);
+            published_closed
         };
 
         self.note_change(target_seq);
@@ -246,7 +298,7 @@ impl Inner {
                 ConnectionStatus::Connected(current)
                     if Arc::ptr_eq(current, &failed_rpc_client) =>
                 {
-                    connection.status = ConnectionStatus::Recovering;
+                    connection.set_status(ConnectionStatus::Recovering);
                     true
                 }
                 ConnectionStatus::Connected(_)
@@ -359,7 +411,7 @@ impl Inner {
             {
                 false
             } else {
-                connection.status = ConnectionStatus::Connected(rpc_client);
+                connection.set_status(ConnectionStatus::Connected(rpc_client));
                 true
             }
         };
@@ -386,6 +438,7 @@ impl Inner {
         let rpc_client = Arc::new(rpc_client);
         let client = ExecServerClient {
             inner: Arc::clone(self),
+            recovery_policy: RecoveryPolicy::Wait,
         };
         // Resuming a session redirects notifications from its running processes
         // to this connection during initialize. Drain them immediately so a
@@ -429,7 +482,7 @@ impl Inner {
                 Ok(false) => {}
                 Err(error) => {
                     let terminated: Result<TerminateResponse, ExecServerError> = rpc_client
-                        .call(
+                        .call_for_cleanup(
                             EXEC_TERMINATE_METHOD,
                             &TerminateParams {
                                 process_id: process_id.clone(),
@@ -459,7 +512,7 @@ impl Inner {
             match &connection.status {
                 ConnectionStatus::Failed(existing) => (existing.clone(), false),
                 ConnectionStatus::Connected(_) | ConnectionStatus::Recovering => {
-                    connection.status = ConnectionStatus::Failed(message.clone());
+                    connection.set_status(ConnectionStatus::Failed(message.clone()));
                     (message, true)
                 }
             }
@@ -529,10 +582,15 @@ fn is_retryable_registry_error(error: &ExecServerError) -> bool {
             if error.is_connect() || error.is_timeout()
     ) || matches!(
         error,
-        ExecServerError::EnvironmentRegistryHttp { status, .. }
+        ExecServerError::EnvironmentRegistryHttp { status, code, .. }
             if status.is_server_error()
                 || *status == reqwest::StatusCode::REQUEST_TIMEOUT
                 || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                // TODO: Replace this coarse retry with an explicit registry/presence
+                // recovery FSM so `environment_offline` is retried only while the
+                // executor is expected to reconnect.
+                || (*status == reqwest::StatusCode::CONFLICT
+                    && code.as_deref() == Some("environment_offline"))
     )
 }
 

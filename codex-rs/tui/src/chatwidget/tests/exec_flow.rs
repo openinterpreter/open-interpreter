@@ -64,7 +64,7 @@ fn app_server_exec_approval_request_splits_shell_wrapped_command() {
                 shlex::try_join(["/bin/zsh", "-lc", script])
                     .expect("round-trippable shell wrapper"),
             ),
-            cwd: Some(test_path_buf("/tmp").abs()),
+            cwd: Some(test_path_buf("/tmp").abs().into()),
             command_actions: None,
             additional_permissions: None,
             proposed_execpolicy_amendment: None,
@@ -363,7 +363,7 @@ async fn exec_end_without_begin_uses_event_command() {
         AppServerThreadItem::CommandExecution {
             id: "call-orphan".to_string(),
             command: codex_shell_command::parse_command::shlex_join(&command),
-            cwd,
+            cwd: cwd.into(),
             process_id: None,
             source: ExecCommandSource::Agent,
             status: AppServerCommandExecutionStatus::Completed,
@@ -731,12 +731,12 @@ async fn unified_exec_empty_poll_for_finished_process_does_not_show_waiting_stat
 
     terminal_interaction(&mut chat, "call-finished", "proc-finished", "");
 
-    assert_eq!(chat.status_state.current_status.header, "Interpreting");
+    assert_eq!(chat.status_state.current_status.header, "Working");
     let status = chat
         .bottom_pane
         .status_widget()
         .expect("task status indicator should remain visible");
-    assert_eq!(status.header(), "Interpreting");
+    assert_eq!(status.header(), "Working");
     assert!(chat.unified_exec_wait_streak.is_none());
 }
 
@@ -860,6 +860,45 @@ async fn view_image_tool_call_adds_history_cell() {
     assert_eq!(cells.len(), 1, "expected a single history cell");
     let combined = lines_to_single_string(&cells[0]);
     assert_chatwidget_snapshot!("local_image_attachment_history_snapshot", combined);
+}
+
+#[tokio::test]
+async fn view_image_tool_call_preserves_foreign_path() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let image_path: LegacyAppPathString =
+        serde_json::from_value(json!(r"C:\workspace\assets\example.png"))
+            .expect("valid legacy app path string");
+
+    handle_view_image_tool_call(&mut chat, "call-image", image_path);
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1, "expected a single history cell");
+    let combined = lines_to_single_string(&cells[0]);
+    assert_chatwidget_snapshot!("foreign_image_attachment_history_snapshot", combined);
+}
+
+#[tokio::test]
+async fn image_generation_begin_restores_working_status_after_single_line_preamble() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.on_task_started();
+    chat.on_agent_message_delta("Generating an image.".to_string());
+    chat.on_image_generation_begin();
+
+    assert!(chat.bottom_pane.is_task_running());
+    assert!(chat.bottom_pane.status_indicator_visible());
+
+    let width: u16 = 80;
+    let height = chat.desired_height(width);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+        .expect("create terminal");
+    terminal
+        .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
+        .expect("draw image generation status");
+    assert_chatwidget_snapshot!(
+        "image_generation_begin_restores_working_status",
+        normalized_backend_snapshot(terminal.backend())
+    );
 }
 
 #[tokio::test]
@@ -1069,10 +1108,10 @@ async fn user_message_during_user_shell_command_is_queued_not_steered() {
 async fn disabled_slash_command_while_task_running_snapshot() {
     // Build a chat widget and simulate an active task
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.bottom_pane.set_task_running(/*running*/ true);
+    handle_turn_started(&mut chat, "turn-1");
 
-    // Dispatch a command that is unavailable while a task runs (e.g., /model)
-    chat.dispatch_command(SlashCommand::Model);
+    // Resume remains available during MCP startup, but not while an agent turn is active.
+    chat.dispatch_command(SlashCommand::Resume);
 
     // Drain history and snapshot the rendered error line(s)
     let cells = drain_insert_history(&mut rx);

@@ -16,11 +16,9 @@ axum = { workspace = true, default-features = false, features = [
 ] }
 base64 = { workspace = true }
 codex-api = { workspace = true }
-codex-client = { workspace = true }
 codex-config = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-keyring-store = { workspace = true }
-codex-product-info = { workspace = true }
 codex-protocol = { workspace = true }
 codex-secrets = { workspace = true }
 codex-utils-path-uri = { workspace = true }
@@ -85,6 +83,11 @@ keyring = { workspace = true, features = ["windows-native"] }
 
 [target.'cfg(any(target_os = "freebsd", target_os = "openbsd"))'.dependencies]
 keyring = { workspace = true, features = ["sync-secret-service"] }
+
+# This test is compiled through `#[path]` inside the inline `oauth::tests` module. Cargo-shear
+# cannot resolve that nested module path and otherwise reports the linked file as unlinked.
+[package.metadata.cargo-shear]
+ignored-paths = ["src/oauth/tests/persistor_tests.rs"]
 
 [lib]
 doctest = false

@@ -1,0 +1,14 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+expression: popup
+---
+  Our systems are thinking a bit more about this request before responding.
+  Hang tight or retry with a faster model for a quicker response, though it
+  may be less capable of handling complex requests.
+
+› 1. Retry with a faster model
+  2. Dismiss and keep waiting
+  3. Learn more
+
+  No action is required. Codex will keep waiting, and this menu will close when
+  the response is ready.

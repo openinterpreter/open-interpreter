@@ -2,41 +2,39 @@
 //!
 //! This module owns startup of individual RMCP clients: building the transport,
 //! initializing the server, listing raw tools, applying per-server tool filters,
-//! and exposing cached startup snapshots while a client is still connecting.
+//! and exposing cached Codex Apps tools while a client is still connecting.
 //! Higher-level aggregation and resource/tool APIs live in
 //! [`crate::connection_manager`].
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::codex_apps::CachedCodexAppsToolsLoad;
-use crate::codex_apps::CodexAppsToolsCacheContext;
-use crate::codex_apps::filter_disallowed_codex_apps_tools;
-use crate::codex_apps::load_cached_codex_apps_tools;
-use crate::codex_apps::load_startup_cached_codex_apps_server_info;
-use crate::codex_apps::load_startup_cached_codex_apps_tools_snapshot;
 use crate::codex_apps::normalize_codex_apps_callable_name;
 use crate::codex_apps::normalize_codex_apps_callable_namespace;
 use crate::codex_apps::normalize_codex_apps_tool_title;
-use crate::codex_apps::write_cached_codex_apps_tools_if_needed;
+use crate::codex_apps::prepare_openai_file_params_for_model;
 use crate::elicitation::ElicitationRequestManager;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::mcp::ToolPluginProvenance;
+use crate::openai_docs_source_attribution::maybe_with_openai_docs_source_attribution;
 use crate::runtime::McpRuntimeContext;
 use crate::runtime::emit_duration;
 use crate::server::EffectiveMcpServer;
 use crate::server::McpServerLaunch;
+use crate::tool_catalog_cache::McpToolCatalogCacheContext;
+use crate::tool_catalog_cache::McpToolCatalogFetchTicket;
 use crate::tools::ToolFilter;
 use crate::tools::ToolInfo;
 use crate::tools::filter_tools;
-use crate::tools::tool_with_model_visible_input_schema;
 use anyhow::Result;
 use anyhow::anyhow;
 use async_channel::Sender;
@@ -47,14 +45,22 @@ use codex_config::McpServerConfig;
 use codex_config::McpServerTransportConfig;
 use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::OAuthCredentialsStoreMode;
+use codex_connectors::ConnectorRuntimeContext;
+use codex_connectors::ConnectorRuntimeFetchSource;
+use codex_exec_server::Environment;
 use codex_exec_server::HttpClient;
 use codex_exec_server::ReqwestHttpClient;
 use codex_protocol::mcp::McpServerInfo;
 use codex_protocol::protocol::Event;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::McpStartupStatus;
+use codex_protocol::protocol::McpStartupUpdateEvent;
 use codex_rmcp_client::ExecutorStdioServerLauncher;
 use codex_rmcp_client::LocalStdioServerLauncher;
 use codex_rmcp_client::RmcpClient;
 use codex_rmcp_client::StdioServerLauncher;
+use codex_rmcp_client::ToolWithConnectorId;
+use codex_rmcp_client::is_authentication_required_error;
 use futures::future::BoxFuture;
 use futures::future::FutureExt;
 use futures::future::Shared;
@@ -62,20 +68,33 @@ use rmcp::model::ClientCapabilities;
 use rmcp::model::ElicitationCapability;
 use rmcp::model::Implementation;
 use rmcp::model::InitializeRequestParams;
+use rmcp::model::JsonObject;
 use rmcp::model::ProtocolVersion;
 use rmcp::model::Tool as RmcpTool;
+use tokio::time::Instant as TokioInstant;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
+use tracing::instrument;
 use tracing::warn;
 
 /// MCP server capability indicating that Codex should include [`SandboxState`]
 /// in tool-call request `_meta` under this key.
 pub const MCP_SANDBOX_STATE_META_CAPABILITY: &str = "codex/sandbox-state-meta";
+/// Experimental MCP server capability for development and testing only; production servers should
+/// not use it. Its `cacheable: false` property disables sharing tool definitions across connections.
+const MCP_TOOL_CATALOG_CACHE_CAPABILITY: &str = "codex/tool-catalog-cache";
+const MCP_TOOL_CATALOG_CACHEABLE_PROPERTY: &str = "cacheable";
+pub const OPENAI_FORM_CAPABILITY: &str = "openai/form";
 
 pub(crate) const MCP_TOOLS_LIST_DURATION_METRIC: &str = "codex.mcp.tools.list.duration_ms";
 pub(crate) const MCP_TOOLS_FETCH_UNCACHED_DURATION_METRIC: &str =
     "codex.mcp.tools.fetch_uncached.duration_ms";
+pub(crate) const CODEX_APPS_REFRESH_DURATION_METRIC: &str = "codex.apps.refresh.duration_ms";
 pub(crate) const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
+
+pub(crate) const CODEX_APPS_RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const CODEX_APPS_RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 const UNTRUSTED_CONNECTOR_META_KEYS: &[&str] = &[
     "connector_id",
@@ -94,15 +113,16 @@ pub(crate) struct ManagedClient {
     pub(crate) tool_timeout: Option<Duration>,
     pub(crate) server_instructions: Option<String>,
     pub(crate) server_supports_sandbox_state_meta_capability: bool,
-    pub(crate) codex_apps_tools_cache_context: Option<CodexAppsToolsCacheContext>,
+    pub(crate) codex_apps_tools_cache_context: Option<ConnectorRuntimeContext<ToolInfo>>,
 }
 
 impl ManagedClient {
-    fn listed_tools(&self) -> Vec<ToolInfo> {
+    pub(crate) fn listed_tools(&self) -> Vec<ToolInfo> {
         let total_start = Instant::now();
-        if let Some(cache_context) = self.codex_apps_tools_cache_context.as_ref()
-            && let CachedCodexAppsToolsLoad::Hit(tools) =
-                load_cached_codex_apps_tools(cache_context)
+        if let Some(tools) = self
+            .codex_apps_tools_cache_context
+            .as_ref()
+            .and_then(ConnectorRuntimeContext::current_tools)
         {
             emit_duration(
                 MCP_TOOLS_LIST_DURATION_METRIC,
@@ -124,86 +144,230 @@ impl ManagedClient {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct AsyncManagedClient {
-    pub(crate) client: Shared<BoxFuture<'static, Result<ManagedClient, StartupOutcomeError>>>,
-    pub(crate) cached_tool_info_snapshot: Option<Vec<ToolInfo>>,
-    pub(crate) cached_server_info: Option<McpServerInfo>,
-    pub(crate) startup_complete: Arc<AtomicBool>,
-    pub(crate) tool_plugin_provenance: Arc<ToolPluginProvenance>,
-    pub(crate) cancel_token: CancellationToken,
+pub(crate) type ManagedClientFuture =
+    Shared<BoxFuture<'static, Result<ManagedClient, StartupOutcomeError>>>;
+
+#[derive(Default)]
+struct CodexAppsStartupReconnectState {
+    current_client: Option<ManagedClient>,
+    reconnect_in_flight: bool,
+    consecutive_failures: u32,
+    retry_not_before: Option<TokioInstant>,
 }
 
-impl AsyncManagedClient {
-    // Keep this constructor flat so the startup inputs remain readable at the
-    // single call site instead of introducing a one-off params wrapper.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+#[derive(Clone)]
+struct CodexAppsStartupStatusContext {
+    submit_id: String,
+    server_name: String,
+    tx_event: Sender<Event>,
+}
+
+pub(crate) struct CodexAppsStartupReconnect {
+    factory: Arc<dyn Fn() -> ManagedClientFuture + Send + Sync>,
+    state: StdMutex<CodexAppsStartupReconnectState>,
+    startup_status_context: Option<CodexAppsStartupStatusContext>,
+}
+
+impl CodexAppsStartupReconnect {
+    pub(crate) fn new(factory: Arc<dyn Fn() -> ManagedClientFuture + Send + Sync>) -> Self {
+        Self {
+            factory,
+            state: StdMutex::new(CodexAppsStartupReconnectState::default()),
+            startup_status_context: None,
+        }
+    }
+
+    fn with_startup_status_context(
+        mut self,
+        submit_id: String,
         server_name: String,
-        server: EffectiveMcpServer,
-        store_mode: OAuthCredentialsStoreMode,
-        keyring_backend_kind: AuthKeyringBackendKind,
-        cancel_token: CancellationToken,
-        tx_event: Sender<Event>,
-        elicitation_requests: ElicitationRequestManager,
-        codex_apps_tools_cache_context: Option<CodexAppsToolsCacheContext>,
-        tool_plugin_provenance: Arc<ToolPluginProvenance>,
-        runtime_context: McpRuntimeContext,
-        runtime_auth_provider: Option<SharedAuthProvider>,
-        client_elicitation_capability: ElicitationCapability,
+        tx_event: Option<Sender<Event>>,
     ) -> Self {
+        self.startup_status_context = tx_event.map(|tx_event| CodexAppsStartupStatusContext {
+            submit_id,
+            server_name,
+            tx_event,
+        });
+        self
+    }
+
+    fn current_client(&self) -> Option<ManagedClient> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .current_client
+            .clone()
+    }
+
+    fn reconnect_in_background(self: &Arc<Self>) {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.current_client.is_some() || state.reconnect_in_flight {
+                return;
+            }
+            if state
+                .retry_not_before
+                .is_some_and(|retry_not_before| TokioInstant::now() < retry_not_before)
+            {
+                return;
+            }
+            state.reconnect_in_flight = true;
+        }
+
+        let reconnect = Arc::clone(self);
+        tokio::spawn(async move {
+            let result = (reconnect.factory)().await;
+            let startup_status_context = reconnect.startup_status_context.clone();
+            let recovered = {
+                let mut state = reconnect
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.reconnect_in_flight = false;
+                match result {
+                    Ok(client) => {
+                        state.current_client = Some(client);
+                        state.consecutive_failures = 0;
+                        state.retry_not_before = None;
+                        true
+                    }
+                    Err(error) => {
+                        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+                        let retry_after = codex_apps_reconnect_backoff(state.consecutive_failures);
+                        state.retry_not_before = Some(TokioInstant::now() + retry_after);
+                        warn!(
+                            error = %error,
+                            retry_after_ms = retry_after.as_millis(),
+                            "Apps MCP startup reconnect failed; continuing with cached tools"
+                        );
+                        false
+                    }
+                }
+            };
+
+            if recovered && let Some(context) = startup_status_context {
+                let _ = context
+                    .tx_event
+                    .send(Event {
+                        id: context.submit_id,
+                        msg: EventMsg::McpStartupUpdate(McpStartupUpdateEvent {
+                            server: context.server_name,
+                            status: McpStartupStatus::Ready,
+                        }),
+                    })
+                    .await;
+            }
+        });
+    }
+}
+
+fn codex_apps_reconnect_backoff(consecutive_failures: u32) -> Duration {
+    let exponent = consecutive_failures.saturating_sub(1).min(5);
+    CODEX_APPS_RECONNECT_INITIAL_BACKOFF
+        .saturating_mul(1 << exponent)
+        .min(CODEX_APPS_RECONNECT_MAX_BACKOFF)
+}
+
+#[derive(Clone)]
+struct ManagedClientStartup {
+    server_name: String,
+    server: EffectiveMcpServer,
+    store_mode: OAuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+    tx_event: Option<Sender<Event>>,
+    elicitation_requests: ElicitationRequestManager,
+    codex_apps_tools_cache_context: Option<ConnectorRuntimeContext<ToolInfo>>,
+    tool_catalog_cache_context: Option<McpToolCatalogCacheContext>,
+    runtime_context: McpRuntimeContext,
+    resolved_environment: std::result::Result<Option<Arc<Environment>>, String>,
+    runtime_auth_provider: Option<SharedAuthProvider>,
+    client_elicitation_capability: ElicitationCapability,
+    supports_openai_form_elicitation: bool,
+    cancel_token: CancellationToken,
+    startup_complete: Arc<AtomicBool>,
+}
+
+impl ManagedClientStartup {
+    fn start(&self) -> ManagedClientFuture {
+        let Self {
+            server_name,
+            server,
+            store_mode,
+            keyring_backend_kind,
+            tx_event,
+            elicitation_requests,
+            codex_apps_tools_cache_context,
+            tool_catalog_cache_context,
+            runtime_context,
+            resolved_environment,
+            runtime_auth_provider,
+            client_elicitation_capability,
+            supports_openai_form_elicitation,
+            cancel_token,
+            startup_complete,
+        } = self.clone();
+        let is_codex_apps_mcp_server = server_name == CODEX_APPS_MCP_SERVER_NAME;
         let tool_filter = server
             .configured_config()
             .map(ToolFilter::from_config)
             .unwrap_or_default();
-        let cached_tool_info_snapshot = load_startup_cached_codex_apps_tools_snapshot(
-            &server_name,
-            codex_apps_tools_cache_context.as_ref(),
-        );
-        let cached_tool_info_snapshot =
-            cached_tool_info_snapshot.map(|tools| filter_tools(tools, &tool_filter));
-        let cached_server_info = load_startup_cached_codex_apps_server_info(
-            &server_name,
-            codex_apps_tools_cache_context.as_ref(),
-        );
-        let startup_tool_filter = tool_filter;
-        let startup_complete = Arc::new(AtomicBool::new(false));
-        let startup_complete_for_fut = Arc::clone(&startup_complete);
-        let cancel_token_for_fut = cancel_token.clone();
-        let fut = async move {
+        let startup_timeout = server
+            .configured_config()
+            .and_then(|config| config.startup_timeout_sec)
+            .unwrap_or(DEFAULT_STARTUP_TIMEOUT);
+        let cancel_token_for_fut = cancel_token;
+        let tool_catalog_fetch_ticket = tool_catalog_cache_context
+            .as_ref()
+            .map(McpToolCatalogCacheContext::begin_fetch);
+        async move {
+            let refresh_start = is_codex_apps_mcp_server.then(Instant::now);
             let outcome = match async {
                 if let Err(error) = validate_mcp_server_name(&server_name) {
                     return Err(error.into());
                 }
 
-                let client = Arc::new(
+                let client = match tokio::time::timeout(
+                    startup_timeout,
                     make_rmcp_client(
                         &server_name,
                         server.clone(),
                         store_mode,
                         keyring_backend_kind,
                         runtime_context,
+                        resolved_environment,
                         runtime_auth_provider,
-                    )
-                    .await?,
-                );
+                    ),
+                )
+                .await
+                {
+                    Ok(result) => Arc::new(result?),
+                    Err(_) => {
+                        return Err(StartupOutcomeError::from(anyhow!(
+                            "MCP client startup timed out after {startup_timeout:?}"
+                        )));
+                    }
+                };
                 start_server_task(
                     server_name,
                     client,
                     StartServerTaskParams {
-                        startup_timeout: server
-                            .configured_config()
-                            .and_then(|config| config.startup_timeout_sec)
-                            .or(Some(DEFAULT_STARTUP_TIMEOUT)),
+                        is_codex_apps_mcp_server,
+                        startup_timeout: Some(startup_timeout),
                         tool_timeout: server
                             .configured_config()
                             .and_then(|config| config.tool_timeout_sec)
                             .unwrap_or(DEFAULT_TOOL_TIMEOUT),
-                        tool_filter: startup_tool_filter,
+                        tool_filter,
                         tx_event,
                         elicitation_requests,
                         codex_apps_tools_cache_context,
+                        tool_catalog_cache_context,
+                        tool_catalog_fetch_ticket,
                         client_elicitation_capability,
+                        supports_openai_form_elicitation,
                     },
                 )
                 .await
@@ -214,12 +378,113 @@ impl AsyncManagedClient {
                 Ok(result) => result,
                 Err(CancelErr::Cancelled) => Err(StartupOutcomeError::Cancelled),
             };
+            if outcome.is_ok()
+                && let Some(refresh_start) = refresh_start
+            {
+                emit_duration(
+                    CODEX_APPS_REFRESH_DURATION_METRIC,
+                    refresh_start.elapsed(),
+                    &[("path", "legacy"), ("trigger", "initial")],
+                );
+            }
 
-            startup_complete_for_fut.store(true, Ordering::Release);
+            startup_complete.store(true, Ordering::Release);
             outcome
+        }
+        .in_current_span()
+        .boxed()
+        .shared()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct AsyncManagedClient {
+    pub(crate) client: ManagedClientFuture,
+    pub(crate) is_codex_apps_mcp_server: bool,
+    pub(crate) cached_server_info: Option<McpServerInfo>,
+    pub(crate) codex_apps_tools_cache_context: Option<ConnectorRuntimeContext<ToolInfo>>,
+    pub(crate) tool_catalog_cache_context: Option<McpToolCatalogCacheContext>,
+    pub(crate) tool_filter: ToolFilter,
+    pub(crate) startup_complete: Arc<AtomicBool>,
+    pub(crate) startup_reconnect: Option<Arc<CodexAppsStartupReconnect>>,
+    pub(crate) tool_plugin_provenance: Arc<ToolPluginProvenance>,
+    pub(crate) cancel_token: CancellationToken,
+}
+
+impl AsyncManagedClient {
+    // Keep this constructor flat so the startup inputs remain readable at the
+    // single call site instead of introducing a one-off params wrapper.
+    #[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        server_name: String,
+        startup_submit_id: String,
+        server: EffectiveMcpServer,
+        store_mode: OAuthCredentialsStoreMode,
+        keyring_backend_kind: AuthKeyringBackendKind,
+        cancel_token: CancellationToken,
+        tx_event: Option<Sender<Event>>,
+        elicitation_requests: ElicitationRequestManager,
+        codex_apps_tools_cache_context: Option<ConnectorRuntimeContext<ToolInfo>>,
+        tool_catalog_cache_context: Option<McpToolCatalogCacheContext>,
+        tool_plugin_provenance: Arc<ToolPluginProvenance>,
+        runtime_context: McpRuntimeContext,
+        resolved_environment: std::result::Result<Option<Arc<Environment>>, String>,
+        runtime_auth_provider: Option<SharedAuthProvider>,
+        client_elicitation_capability: ElicitationCapability,
+        supports_openai_form_elicitation: bool,
+    ) -> Self {
+        let is_codex_apps_mcp_server = server_name == CODEX_APPS_MCP_SERVER_NAME;
+        let reconnect_server_name = server_name.clone();
+        let reconnect_tx_event = tx_event.clone();
+        let tool_filter = server
+            .configured_config()
+            .map(ToolFilter::from_config)
+            .unwrap_or_default();
+        let cached_server_info = if is_codex_apps_mcp_server {
+            codex_apps_tools_cache_context
+                .as_ref()
+                .and_then(ConnectorRuntimeContext::cached_server_info)
+        } else {
+            None
         };
-        let client = fut.boxed().shared();
-        if cached_tool_info_snapshot.is_some() {
+        let startup_complete = Arc::new(AtomicBool::new(false));
+        let startup = Arc::new(ManagedClientStartup {
+            server_name,
+            server,
+            store_mode,
+            keyring_backend_kind,
+            tx_event,
+            elicitation_requests,
+            codex_apps_tools_cache_context: codex_apps_tools_cache_context.clone(),
+            tool_catalog_cache_context: tool_catalog_cache_context.clone(),
+            runtime_context,
+            resolved_environment,
+            runtime_auth_provider,
+            client_elicitation_capability,
+            supports_openai_form_elicitation,
+            cancel_token: cancel_token.clone(),
+            startup_complete: Arc::clone(&startup_complete),
+        });
+        let client = startup.start();
+        let startup_reconnect = is_codex_apps_mcp_server.then(|| {
+            let startup = Arc::clone(&startup);
+            Arc::new(
+                CodexAppsStartupReconnect::new(Arc::new(move || startup.start()))
+                    .with_startup_status_context(
+                        startup_submit_id,
+                        reconnect_server_name,
+                        reconnect_tx_event,
+                    ),
+            )
+        });
+        if codex_apps_tools_cache_context
+            .as_ref()
+            .is_some_and(ConnectorRuntimeContext::has_current_tools)
+            || tool_catalog_cache_context
+                .as_ref()
+                .is_some_and(McpToolCatalogCacheContext::has_tools)
+        {
             let startup_task = client.clone();
             tokio::spawn(async move {
                 let _ = startup_task.await;
@@ -228,16 +493,39 @@ impl AsyncManagedClient {
 
         Self {
             client,
-            cached_tool_info_snapshot,
+            is_codex_apps_mcp_server,
             cached_server_info,
+            codex_apps_tools_cache_context,
+            tool_catalog_cache_context,
+            tool_filter,
             startup_complete,
+            startup_reconnect,
             tool_plugin_provenance,
             cancel_token,
         }
     }
 
     pub(crate) async fn client(&self) -> Result<ManagedClient, StartupOutcomeError> {
+        if let Some(client) = self
+            .startup_reconnect
+            .as_ref()
+            .and_then(|reconnect| reconnect.current_client())
+        {
+            return Ok(client);
+        }
         self.client.clone().await
+    }
+
+    pub(crate) async fn reconnect_failed_startup(&self) {
+        let Some(startup_reconnect) = self.startup_reconnect.as_ref() else {
+            return;
+        };
+        if !self.startup_complete.load(Ordering::Acquire) {
+            return;
+        }
+        if matches!(self.client().await, Err(StartupOutcomeError::Failed { .. })) {
+            startup_reconnect.reconnect_in_background();
+        }
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -251,76 +539,50 @@ impl AsyncManagedClient {
         }
     }
 
-    fn cached_tool_info_snapshot_while_initializing(&self) -> Option<Vec<ToolInfo>> {
-        if !self.startup_complete.load(Ordering::Acquire) {
-            return self.cached_tool_info_snapshot.clone();
+    pub(crate) fn has_cached_tools(&self) -> bool {
+        self.codex_apps_tools_cache_context
+            .as_ref()
+            .is_some_and(ConnectorRuntimeContext::has_current_tools)
+            || self
+                .tool_catalog_cache_context
+                .as_ref()
+                .is_some_and(McpToolCatalogCacheContext::has_tools)
+    }
+
+    fn cached_tools(&self) -> Option<Vec<ToolInfo>> {
+        self.codex_apps_tools_cache_context
+            .as_ref()
+            .and_then(ConnectorRuntimeContext::current_tools)
+            .or_else(|| {
+                self.tool_catalog_cache_context
+                    .as_ref()
+                    .and_then(McpToolCatalogCacheContext::current_tools)
+            })
+            .map(|tools| filter_tools(tools, &self.tool_filter))
+    }
+
+    pub(crate) fn prepare_tools(&self, tools: Vec<ToolInfo>) -> Vec<ToolInfo> {
+        if self.is_codex_apps_mcp_server {
+            prepare_codex_apps_tools_for_model(tools, &self.tool_plugin_provenance)
+        } else {
+            prepare_regular_mcp_tools_for_model(tools, &self.tool_plugin_provenance)
         }
-        None
     }
 
     pub(crate) async fn listed_tools(&self) -> Option<Vec<ToolInfo>> {
-        let annotate_tools = |tools: Vec<ToolInfo>| {
-            let mut tools = tools;
-            for tool in &mut tools {
-                if tool.server_name == CODEX_APPS_MCP_SERVER_NAME {
-                    tool.tool = tool_with_model_visible_input_schema(&tool.tool);
-                }
-
-                let plugin_names = match tool.connector_id.as_deref() {
-                    Some(connector_id) => self
-                        .tool_plugin_provenance
-                        .plugin_display_names_for_connector_id(connector_id),
-                    None => self
-                        .tool_plugin_provenance
-                        .plugin_display_names_for_mcp_server_name(tool.server_name.as_str()),
-                };
-                tool.plugin_display_names = plugin_names.to_vec();
-
-                if plugin_names.is_empty() {
-                    continue;
-                }
-
-                let plugin_source_note = if plugin_names.len() == 1 {
-                    format!("This tool is part of plugin `{}`.", plugin_names[0])
-                } else {
-                    format!(
-                        "This tool is part of plugins {}.",
-                        plugin_names
-                            .iter()
-                            .map(|plugin_name| format!("`{plugin_name}`"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                };
-                let description = tool
-                    .tool
-                    .description
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("");
-                let annotated_description = if description.is_empty() {
-                    plugin_source_note
-                } else if matches!(description.chars().last(), Some('.' | '!' | '?')) {
-                    format!("{description} {plugin_source_note}")
-                } else {
-                    format!("{description}. {plugin_source_note}")
-                };
-                tool.tool.description = Some(Cow::Owned(annotated_description));
-            }
-            tools
-        };
-
-        // Keep cache payloads raw; plugin provenance is resolved per-session at read time.
-        let tools = if let Some(startup_tools) = self.cached_tool_info_snapshot_while_initializing()
+        // Plugin provenance is resolved per-session rather than stored in shared cache payloads.
+        let tools = if !self.startup_complete.load(Ordering::Acquire)
+            && let Some(startup_tools) = self.cached_tools()
         {
             Some(startup_tools)
         } else {
             match self.client().await {
                 Ok(client) => Some(client.listed_tools()),
-                Err(_) => self.cached_tool_info_snapshot.clone(),
+                Err(_) if self.is_codex_apps_mcp_server => self.cached_tools(),
+                Err(_) => None,
             }
-        };
-        tools.map(annotate_tools)
+        }?;
+        Some(self.prepare_tools(tools))
     }
 }
 
@@ -331,23 +593,44 @@ pub(crate) enum StartupOutcomeError {
     // We can't store the original error here because anyhow::Error doesn't implement
     // `Clone`.
     #[error("MCP startup failed: {error}")]
-    Failed { error: String },
+    Failed {
+        error: String,
+        is_authentication_required: bool,
+    },
 }
 
-impl From<anyhow::Error> for StartupOutcomeError {
-    fn from(error: anyhow::Error) -> Self {
-        Self::Failed {
-            error: error.to_string(),
+impl StartupOutcomeError {
+    pub(crate) fn is_authentication_required(&self) -> bool {
+        match self {
+            Self::Cancelled => false,
+            Self::Failed {
+                is_authentication_required,
+                ..
+            } => *is_authentication_required,
         }
     }
 }
 
+impl From<anyhow::Error> for StartupOutcomeError {
+    fn from(error: anyhow::Error) -> Self {
+        let is_authentication_required = is_authentication_required_error(&error);
+        Self::Failed {
+            error: error.to_string(),
+            is_authentication_required,
+        }
+    }
+}
+
+#[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
 pub(crate) async fn list_tools_for_client_uncached(
     server_name: &str,
+    is_codex_apps_mcp_server: bool,
+    codex_apps_refresh_trigger: &'static str,
     client: &Arc<RmcpClient>,
     timeout: Option<Duration>,
     server_instructions: Option<&str>,
 ) -> Result<Vec<ToolInfo>> {
+    let fetch_start = Instant::now();
     let resp = client
         .list_tools_with_connector_ids(/*params*/ None, timeout)
         .await?;
@@ -355,71 +638,180 @@ pub(crate) async fn list_tools_for_client_uncached(
         .tools
         .into_iter()
         .map(|tool| {
-            let mut tool_def = tool.tool;
-            let (connector_id, connector_name, connector_description) =
-                sanitize_tool_connector_metadata(
-                    server_name,
-                    &mut tool_def,
-                    tool.connector_id,
-                    tool.connector_name,
-                    tool.connector_description,
-                );
-            let callable_name = normalize_codex_apps_callable_name(
+            tool_info_from_listed_tool(
                 server_name,
-                &tool_def.name,
-                connector_id.as_deref(),
-                connector_name.as_deref(),
-            );
-            let callable_namespace =
-                normalize_codex_apps_callable_namespace(server_name, connector_name.as_deref());
-            if let Some(title) = tool_def.title.as_deref() {
-                let normalized_title =
-                    normalize_codex_apps_tool_title(server_name, connector_name.as_deref(), title);
-                if tool_def.title.as_deref() != Some(normalized_title.as_str()) {
-                    tool_def.title = Some(normalized_title);
-                }
-            }
-            let has_connector_metadata = connector_id.is_some()
-                || connector_name.is_some()
-                || connector_description.is_some();
-            let namespace_description = if has_connector_metadata {
-                connector_description
-            } else {
-                server_instructions.map(str::to_string)
-            };
-            ToolInfo {
-                server_name: server_name.to_owned(),
-                supports_parallel_tool_calls: false,
-                server_origin: None,
-                callable_name,
-                callable_namespace,
-                namespace_description,
-                tool: tool_def,
-                connector_id,
-                connector_name,
-                plugin_display_names: Vec::new(),
-            }
+                is_codex_apps_mcp_server,
+                server_instructions,
+                tool,
+            )
         })
         .collect();
-    if server_name == CODEX_APPS_MCP_SERVER_NAME {
-        return Ok(filter_disallowed_codex_apps_tools(tools));
+    if is_codex_apps_mcp_server {
+        emit_duration(
+            MCP_TOOLS_FETCH_UNCACHED_DURATION_METRIC,
+            fetch_start.elapsed(),
+            &[("trigger", codex_apps_refresh_trigger)],
+        );
+    } else {
+        emit_duration(
+            MCP_TOOLS_FETCH_UNCACHED_DURATION_METRIC,
+            fetch_start.elapsed(),
+            &[],
+        );
     }
     Ok(tools)
 }
 
-fn sanitize_tool_connector_metadata(
-    server_name: &str,
-    tool: &mut RmcpTool,
-    connector_id: Option<String>,
-    connector_name: Option<String>,
-    connector_description: Option<String>,
-) -> (Option<String>, Option<String>, Option<String>) {
-    if server_name == CODEX_APPS_MCP_SERVER_NAME {
-        return (connector_id, connector_name, connector_description);
+/// Presents declared Codex Apps file parameters to the model as local-path inputs and adds plugin
+/// names to each tool. Plugin membership is resolved by connector ID, falling back to the MCP
+/// server when absent.
+fn prepare_codex_apps_tools_for_model(
+    mut tools: Vec<ToolInfo>,
+    tool_plugin_provenance: &ToolPluginProvenance,
+) -> Vec<ToolInfo> {
+    for tool in &mut tools {
+        prepare_openai_file_params_for_model(tool);
+        let plugin_names = match tool.connector_id.as_deref() {
+            Some(connector_id) => {
+                tool_plugin_provenance.plugin_display_names_for_connector_id(connector_id)
+            }
+            None => tool_plugin_provenance
+                .plugin_display_names_for_mcp_server_name(tool.server_name.as_str()),
+        };
+        add_plugin_provenance_to_tool(tool, plugin_names);
+    }
+    tools
+}
+
+/// Stores plugin names on the tool and appends a model-visible plugin membership note.
+fn add_plugin_provenance_to_tool(tool: &mut ToolInfo, plugin_names: &[String]) {
+    tool.plugin_display_names = plugin_names.to_vec();
+    if plugin_names.is_empty() {
+        return;
     }
 
-    strip_untrusted_connector_meta(tool);
-    (None, None, None)
+    let plugin_source_note = if plugin_names.len() == 1 {
+        format!("This tool is part of plugin `{}`.", plugin_names[0])
+    } else {
+        format!(
+            "This tool is part of plugins {}.",
+            plugin_names
+                .iter()
+                .map(|plugin_name| format!("`{plugin_name}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let description = tool
+        .tool
+        .description
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("");
+    let annotated_description = if description.is_empty() {
+        plugin_source_note
+    } else if matches!(description.chars().last(), Some('.' | '!' | '?')) {
+        format!("{description} {plugin_source_note}")
+    } else {
+        format!("{description}. {plugin_source_note}")
+    };
+    tool.tool.description = Some(Cow::Owned(annotated_description));
+}
+
+/// Adds server-scoped plugin names to regular MCP tools without changing their input schemas.
+fn prepare_regular_mcp_tools_for_model(
+    mut tools: Vec<ToolInfo>,
+    tool_plugin_provenance: &ToolPluginProvenance,
+) -> Vec<ToolInfo> {
+    for tool in &mut tools {
+        let plugin_names = tool_plugin_provenance
+            .plugin_display_names_for_mcp_server_name(tool.server_name.as_str());
+        add_plugin_provenance_to_tool(tool, plugin_names);
+    }
+    tools
+}
+
+fn tool_info_from_listed_tool(
+    server_name: &str,
+    is_codex_apps_mcp_server: bool,
+    server_instructions: Option<&str>,
+    tool: ToolWithConnectorId,
+) -> ToolInfo {
+    if is_codex_apps_mcp_server {
+        codex_apps_tool_info_from_listed_tool(server_name, server_instructions, tool)
+    } else {
+        regular_mcp_tool_info_from_listed_tool(server_name, server_instructions, tool)
+    }
+}
+
+/// Converts a Codex Apps tool by preserving connector fields, removing connector prefixes from
+/// model-visible names and titles, and using the connector description for its tool namespace.
+fn codex_apps_tool_info_from_listed_tool(
+    server_name: &str,
+    server_instructions: Option<&str>,
+    tool: ToolWithConnectorId,
+) -> ToolInfo {
+    let mut tool_def = tool.tool;
+    let connector_id = tool.connector_id;
+    let connector_name = tool.connector_name;
+    let connector_description = tool.connector_description;
+    let callable_name = normalize_codex_apps_callable_name(
+        &tool_def.name,
+        connector_id.as_deref(),
+        connector_name.as_deref(),
+    );
+    let callable_namespace =
+        normalize_codex_apps_callable_namespace(server_name, connector_name.as_deref());
+    if let Some(title) = tool_def.title.as_deref() {
+        let normalized_title = normalize_codex_apps_tool_title(connector_name.as_deref(), title);
+        if tool_def.title.as_deref() != Some(normalized_title.as_str()) {
+            tool_def.title = Some(normalized_title);
+        }
+    }
+    let has_connector_metadata =
+        connector_id.is_some() || connector_name.is_some() || connector_description.is_some();
+    let namespace_description = if has_connector_metadata {
+        connector_description
+    } else {
+        server_instructions.map(str::to_string)
+    };
+    ToolInfo {
+        server_name: server_name.to_owned(),
+        supports_parallel_tool_calls: false,
+        server_origin: None,
+        callable_name,
+        callable_namespace,
+        namespace_description,
+        tool: tool_def,
+        openai_file_input_optional_fields: HashMap::new(),
+        connector_id,
+        connector_name,
+        plugin_display_names: Vec::new(),
+    }
+}
+
+/// Converts a regular MCP tool by removing reserved connector metadata, keeping its raw tool name,
+/// and using the MCP server name and instructions for the model-visible namespace.
+fn regular_mcp_tool_info_from_listed_tool(
+    server_name: &str,
+    server_instructions: Option<&str>,
+    tool: ToolWithConnectorId,
+) -> ToolInfo {
+    let mut tool_def = tool.tool;
+    strip_untrusted_connector_meta(&mut tool_def);
+    ToolInfo {
+        server_name: server_name.to_owned(),
+        supports_parallel_tool_calls: false,
+        server_origin: None,
+        callable_name: tool_def.name.to_string(),
+        callable_namespace: server_name.to_string(),
+        namespace_description: server_instructions.map(str::to_string),
+        tool: tool_def,
+        openai_file_input_optional_fields: HashMap::new(),
+        connector_id: None,
+        connector_name: None,
+        plugin_display_names: Vec::new(),
+    }
 }
 
 fn strip_untrusted_connector_meta(tool: &mut RmcpTool) {
@@ -470,28 +862,29 @@ fn validate_mcp_server_name(server_name: &str) -> Result<()> {
     Ok(())
 }
 
+#[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
 async fn start_server_task(
     server_name: String,
     client: Arc<RmcpClient>,
     params: StartServerTaskParams,
 ) -> Result<ManagedClient, StartupOutcomeError> {
     let StartServerTaskParams {
+        is_codex_apps_mcp_server,
         startup_timeout,
         tool_timeout,
         tool_filter,
         tx_event,
         elicitation_requests,
         codex_apps_tools_cache_context,
+        tool_catalog_cache_context,
+        tool_catalog_fetch_ticket,
         client_elicitation_capability,
+        supports_openai_form_elicitation,
     } = params;
-    let mut capabilities = ClientCapabilities::default();
-    capabilities.elicitation = Some(client_elicitation_capability);
-    let params = InitializeRequestParams::new(
-        capabilities,
-        Implementation::new("codex-mcp-client", env!("CARGO_PKG_VERSION")).with_title("Codex"),
-    )
-    .with_protocol_version(ProtocolVersion::V_2025_06_18);
-
+    let params = mcp_initialize_request_params(
+        client_elicitation_capability,
+        supports_openai_form_elicitation,
+    );
     let send_elicitation = elicitation_requests.make_sender(server_name.clone(), tx_event);
 
     let initialize_result = client
@@ -499,6 +892,19 @@ async fn start_server_task(
         .await
         .map_err(StartupOutcomeError::from)?;
 
+    let server_disables_tool_catalog_cache = initialize_result
+        .capabilities
+        .experimental
+        .as_ref()
+        .and_then(|experimental| experimental.get(MCP_TOOL_CATALOG_CACHE_CAPABILITY))
+        .and_then(|capability| capability.get(MCP_TOOL_CATALOG_CACHEABLE_PROPERTY))
+        .and_then(serde_json::Value::as_bool)
+        == Some(false);
+    if server_disables_tool_catalog_cache
+        && let Some(cache_context) = tool_catalog_cache_context.as_ref()
+    {
+        cache_context.disable();
+    }
     let server_supports_sandbox_state_meta_capability = initialize_result
         .capabilities
         .experimental
@@ -506,28 +912,35 @@ async fn start_server_task(
         .and_then(|exp| exp.get(MCP_SANDBOX_STATE_META_CAPABILITY))
         .is_some();
     let list_start = Instant::now();
-    let fetch_start = Instant::now();
+    let fetch_ticket = codex_apps_tools_cache_context
+        .as_ref()
+        .map(|cache_context| cache_context.begin_fetch(ConnectorRuntimeFetchSource::Startup));
     let tools = list_tools_for_client_uncached(
         &server_name,
+        is_codex_apps_mcp_server,
+        /*codex_apps_refresh_trigger*/ "initial",
         &client,
         startup_timeout,
         initialize_result.instructions.as_deref(),
     )
     .await
     .map_err(StartupOutcomeError::from)?;
-    emit_duration(
-        MCP_TOOLS_FETCH_UNCACHED_DURATION_METRIC,
-        fetch_start.elapsed(),
-        &[],
-    );
     let server_info = mcp_server_info_from_implementation(initialize_result.server_info);
-    write_cached_codex_apps_tools_if_needed(
-        &server_name,
-        codex_apps_tools_cache_context.as_ref(),
-        &server_info,
-        &tools,
-    );
-    if server_name == CODEX_APPS_MCP_SERVER_NAME {
+    let tools = match (codex_apps_tools_cache_context.as_ref(), fetch_ticket) {
+        (Some(cache_context), Some(fetch_ticket)) => {
+            cache_context.publish_if_newest_accepted(fetch_ticket, &server_info, tools)
+        }
+        (None, None) => tools,
+        _ => unreachable!("Codex Apps fetch ticket requires cache context"),
+    };
+    let has_shared_tool_catalog = is_codex_apps_mcp_server || tool_catalog_cache_context.is_some();
+    if let (Some(cache_context), Some(fetch_ticket)) = (
+        tool_catalog_cache_context.as_ref(),
+        tool_catalog_fetch_ticket,
+    ) {
+        cache_context.publish_if_newest(fetch_ticket, &tools);
+    }
+    if has_shared_tool_catalog {
         emit_duration(
             MCP_TOOLS_LIST_DURATION_METRIC,
             list_start.elapsed(),
@@ -550,6 +963,25 @@ async fn start_server_task(
     Ok(managed)
 }
 
+fn mcp_initialize_request_params(
+    client_elicitation_capability: ElicitationCapability,
+    supports_openai_form_elicitation: bool,
+) -> InitializeRequestParams {
+    let mut capabilities = ClientCapabilities::default();
+    capabilities.elicitation = Some(client_elicitation_capability);
+    if supports_openai_form_elicitation {
+        capabilities.extensions = Some(BTreeMap::from([(
+            OPENAI_FORM_CAPABILITY.to_string(),
+            JsonObject::new(),
+        )]));
+    }
+    InitializeRequestParams::new(
+        capabilities,
+        Implementation::new("codex-mcp-client", env!("CARGO_PKG_VERSION")).with_title("Codex"),
+    )
+    .with_protocol_version(ProtocolVersion::V_2025_06_18)
+}
+
 fn mcp_server_info_from_implementation(server_info: Implementation) -> McpServerInfo {
     McpServerInfo {
         name: server_info.name,
@@ -567,29 +999,34 @@ fn mcp_server_info_from_implementation(server_info: Implementation) -> McpServer
 }
 
 struct StartServerTaskParams {
+    is_codex_apps_mcp_server: bool,
     startup_timeout: Option<Duration>, // TODO: cancel_token should handle this.
     tool_timeout: Duration,
     tool_filter: ToolFilter,
-    tx_event: Sender<Event>,
+    tx_event: Option<Sender<Event>>,
     elicitation_requests: ElicitationRequestManager,
-    codex_apps_tools_cache_context: Option<CodexAppsToolsCacheContext>,
+    codex_apps_tools_cache_context: Option<ConnectorRuntimeContext<ToolInfo>>,
+    tool_catalog_cache_context: Option<McpToolCatalogCacheContext>,
+    tool_catalog_fetch_ticket: Option<McpToolCatalogFetchTicket>,
     client_elicitation_capability: ElicitationCapability,
+    supports_openai_form_elicitation: bool,
 }
 
+#[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
 async fn make_rmcp_client(
     server_name: &str,
     server: EffectiveMcpServer,
     store_mode: OAuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
     runtime_context: McpRuntimeContext,
+    resolved_environment: std::result::Result<Option<Arc<Environment>>, String>,
     runtime_auth_provider: Option<SharedAuthProvider>,
 ) -> Result<RmcpClient, StartupOutcomeError> {
     let config = match server.launch() {
         McpServerLaunch::Configured(config) => config.as_ref().clone(),
     };
-    let resolved_environment = runtime_context
-        .resolve_server_environment(server_name, &config)
-        .map_err(|err| StartupOutcomeError::from(anyhow!(err)))?;
+    let resolved_environment =
+        resolved_environment.map_err(|err| StartupOutcomeError::from(anyhow!(err)))?;
     let is_local_environment = config.is_local_environment();
     let McpServerConfig { transport, .. } = config;
 
@@ -626,6 +1063,7 @@ async fn make_rmcp_client(
                 )) as Arc<dyn StdioServerLauncher>
             };
 
+            let cwd = cwd.map(codex_utils_path_uri::LegacyAppPathString::into_string);
             RmcpClient::new_stdio_client(command_os, args_os, env_os, &env_vars, cwd, launcher)
                 .await
                 .map_err(|err| StartupOutcomeError::from(anyhow!(err)))
@@ -640,6 +1078,7 @@ async fn make_rmcp_client(
                 || Arc::new(ReqwestHttpClient) as Arc<dyn HttpClient>,
                 |environment| environment.get_http_client(),
             );
+            let http_client = maybe_with_openai_docs_source_attribution(&url, http_client);
             let resolved_bearer_token =
                 match resolve_bearer_token(server_name, bearer_token_env_var.as_deref()) {
                     Ok(token) => token,
@@ -665,8 +1104,41 @@ async fn make_rmcp_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use rmcp::model::JsonObject;
     use rmcp::model::Meta;
+    use rmcp::transport::auth::AuthError;
+
+    #[test]
+    fn startup_outcome_error_identifies_authentication_required() {
+        let error = anyhow::Error::new(AuthError::AuthorizationRequired)
+            .context("failed to initialize MCP server");
+
+        let error = StartupOutcomeError::from(error);
+
+        assert!(error.is_authentication_required());
+    }
+
+    #[test]
+    fn mcp_initialize_advertises_openai_form_only_when_supported() {
+        let unsupported = mcp_initialize_request_params(
+            ElicitationCapability::default(),
+            /*supports_openai_form_elicitation*/ false,
+        );
+        assert_eq!(unsupported.capabilities.extensions, None);
+
+        let supported = mcp_initialize_request_params(
+            ElicitationCapability::default(),
+            /*supports_openai_form_elicitation*/ true,
+        );
+        assert_eq!(
+            supported.capabilities.extensions,
+            Some(BTreeMap::from([(
+                OPENAI_FORM_CAPABILITY.to_string(),
+                JsonObject::new(),
+            )]))
+        );
+    }
 
     fn tool_with_connector_meta() -> RmcpTool {
         RmcpTool::new(
@@ -696,18 +1168,7 @@ mod tests {
     fn custom_mcp_connector_metadata_is_stripped() {
         let mut tool = tool_with_connector_meta();
 
-        let (connector_id, connector_name, connector_description) =
-            sanitize_tool_connector_metadata(
-                "minimaltest",
-                &mut tool,
-                Some("connector_gmail".to_string()),
-                Some("Gmail".to_string()),
-                Some("Mail connector".to_string()),
-            );
-
-        assert_eq!(connector_id, None);
-        assert_eq!(connector_name, None);
-        assert_eq!(connector_description, None);
+        strip_untrusted_connector_meta(&mut tool);
 
         let meta = tool.meta.as_ref().expect("meta");
         for key in [
@@ -730,32 +1191,37 @@ mod tests {
 
     #[test]
     fn codex_apps_connector_metadata_is_preserved() {
-        let mut tool = tool_with_connector_meta();
+        let tool = tool_with_connector_meta();
+        let expected_tool = tool.clone();
 
-        let (connector_id, connector_name, connector_description) =
-            sanitize_tool_connector_metadata(
-                CODEX_APPS_MCP_SERVER_NAME,
-                &mut tool,
-                Some("connector_gmail".to_string()),
-                Some("Gmail".to_string()),
-                Some("Mail connector".to_string()),
-            );
+        let tool_info = tool_info_from_listed_tool(
+            CODEX_APPS_MCP_SERVER_NAME,
+            /*is_codex_apps_mcp_server*/ true,
+            /*server_instructions*/ None,
+            ToolWithConnectorId {
+                tool,
+                connector_id: Some("connector_gmail".to_string()),
+                connector_name: Some("Gmail".to_string()),
+                connector_description: Some("Mail connector".to_string()),
+            },
+        );
 
-        assert_eq!(connector_id.as_deref(), Some("connector_gmail"));
-        assert_eq!(connector_name.as_deref(), Some("Gmail"));
-        assert_eq!(connector_description.as_deref(), Some("Mail connector"));
-
-        let meta = tool.meta.as_ref().expect("meta");
-        for key in [
-            "connector_id",
-            "connector_name",
-            "connector_display_name",
-            "connector_description",
-            "connectorDescription",
-            "connectorFutureField",
-            "CONNECTOR_UPPERCASE",
-        ] {
-            assert!(meta.0.contains_key(key), "{key} should be preserved");
-        }
+        let expected = ToolInfo {
+            server_name: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+            supports_parallel_tool_calls: false,
+            server_origin: None,
+            callable_name: "capture_file_upload".to_string(),
+            callable_namespace: "codex_apps__gmail".to_string(),
+            namespace_description: Some("Mail connector".to_string()),
+            tool: expected_tool,
+            openai_file_input_optional_fields: HashMap::new(),
+            connector_id: Some("connector_gmail".to_string()),
+            connector_name: Some("Gmail".to_string()),
+            plugin_display_names: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(tool_info).expect("serialize actual tool info"),
+            serde_json::to_value(expected).expect("serialize expected tool info")
+        );
     }
 }

@@ -7,6 +7,11 @@
 use super::*;
 
 impl ChatWidget {
+    pub(crate) fn set_parent_owned_thread(&mut self) {
+        self.blocks_direct_input = true;
+        self.bottom_pane.set_parent_owned_thread();
+    }
+
     pub(super) fn handle_composer_input_result(
         &mut self,
         input_result: InputResult,
@@ -24,8 +29,9 @@ impl ChatWidget {
                 {
                     return;
                 }
-                let should_submit_now =
-                    self.is_session_configured() && !self.is_plan_streaming_in_tui();
+                let should_submit_now = self.is_session_configured()
+                    && !self.is_plan_streaming_in_tui()
+                    && !self.input_queue.suppress_queue_autosend;
                 if should_submit_now {
                     if self.only_user_shell_commands_running()
                         && !user_message.text.starts_with('!')
@@ -36,8 +42,9 @@ impl ChatWidget {
                     // Submitted is emitted when user submits.
                     // Reset any reasoning header only when we are actually submitting a turn.
                     self.reasoning_buffer.clear();
-                    self.full_reasoning_buffer.clear();
-                    self.set_status_header(String::from(STATUS_HEADER_INTERPRETING));
+                    self.reasoning_header = None;
+                    self.reasoning_summary_parts.clear();
+                    self.set_status_header(String::from("Working"));
                     self.submit_user_message(user_message);
                 } else {
                     self.queue_user_message(user_message);
@@ -61,12 +68,29 @@ impl ChatWidget {
             InputResult::CommandWithArgs(cmd, args, text_elements) => {
                 self.handle_slash_command_with_args_dispatch(cmd, args, text_elements);
             }
+            InputResult::ParentOwnedInputBlocked => {
+                self.add_error_message(PARENT_OWNED_INPUT_MESSAGE.to_string());
+            }
             InputResult::None => {}
         }
         if had_modal_or_popup && self.bottom_pane.no_modal_or_popup_active() {
             self.maybe_send_next_queued_input();
         }
         self.refresh_plan_mode_nudge();
+    }
+
+    pub(super) fn defer_input_until_settings_applied(&mut self) {
+        if !self.bottom_pane.no_modal_or_popup_active() {
+            self.input_queue.suppress_queue_autosend = true;
+        }
+    }
+
+    pub(super) fn on_modal_or_popup_closed(&mut self) {
+        if self.input_queue.suppress_queue_autosend {
+            self.app_event_tx.send(AppEvent::SettingsSelectionClosed);
+        } else {
+            self.maybe_send_next_queued_input();
+        }
     }
 
     pub(super) fn queue_user_message(&mut self, user_message: UserMessage) {
@@ -84,7 +108,10 @@ impl ChatWidget {
         action: QueuedInputAction,
         pending_pastes: Vec<(String, String)>,
     ) {
-        if !self.is_session_configured() || self.is_user_turn_pending_or_running() {
+        if !self.is_session_configured()
+            || self.is_user_turn_pending_or_running()
+            || self.input_queue.suppress_queue_autosend
+        {
             self.input_queue
                 .queued_user_messages
                 .push_back(QueuedUserMessage {
@@ -104,6 +131,9 @@ impl ChatWidget {
     /// If idle and there are queued inputs, submit exactly one to start the next turn.
     pub(crate) fn maybe_send_next_queued_input(&mut self) -> bool {
         if self.input_queue.suppress_queue_autosend {
+            return false;
+        }
+        if self.blocks_direct_input {
             return false;
         }
         if self.is_user_turn_pending_or_running() {
@@ -171,6 +201,10 @@ impl ChatWidget {
         text: String,
         mut collaboration_mode: CollaborationModeMask,
     ) {
+        if self.blocks_direct_input {
+            self.add_error_message(PARENT_OWNED_INPUT_MESSAGE.to_string());
+            return;
+        }
         if collaboration_mode.mode == Some(ModeKind::Plan)
             && let Some(effort) = self.config.plan_mode_reasoning_effort.clone()
         {

@@ -3,10 +3,10 @@ use codex_protocol::items::parse_hook_prompt_fragment;
 use codex_protocol::models::ContentItem;
 
 use super::AdditionalContextUserFragment;
-use super::EnvironmentContext;
 use super::FragmentRegistration;
 use super::FragmentRegistrationProxy;
 use super::InternalModelContextFragment;
+use super::KimiCronFire;
 use super::LegacyApplyPatchExecCommandWarning;
 use super::LegacyModelMismatchWarning;
 use super::LegacyUnifiedExecProcessLimitWarning;
@@ -16,10 +16,11 @@ use super::SubagentNotification;
 use super::TurnAborted;
 use super::UserInstructions;
 use super::UserShellCommand;
+use super::world_state::EnvironmentsState;
 
 static USER_INSTRUCTIONS_REGISTRATION: FragmentRegistrationProxy<UserInstructions> =
     FragmentRegistrationProxy::new();
-static ENVIRONMENT_CONTEXT_REGISTRATION: FragmentRegistrationProxy<EnvironmentContext> =
+static ENVIRONMENT_CONTEXT_REGISTRATION: FragmentRegistrationProxy<EnvironmentsState> =
     FragmentRegistrationProxy::new();
 static ADDITIONAL_CONTEXT_REGISTRATION: FragmentRegistrationProxy<AdditionalContextUserFragment> =
     FragmentRegistrationProxy::new();
@@ -34,6 +35,8 @@ static SUBAGENT_NOTIFICATION_REGISTRATION: FragmentRegistrationProxy<SubagentNot
 static INTERNAL_MODEL_CONTEXT_REGISTRATION: FragmentRegistrationProxy<
     InternalModelContextFragment,
 > = FragmentRegistrationProxy::new();
+static KIMI_CRON_FIRE_REGISTRATION: FragmentRegistrationProxy<KimiCronFire> =
+    FragmentRegistrationProxy::new();
 static RECOMMENDED_PLUGINS_REGISTRATION: FragmentRegistrationProxy<RecommendedPluginsInstructions> =
     FragmentRegistrationProxy::new();
 static LEGACY_UNIFIED_EXEC_PROCESS_LIMIT_WARNING_REGISTRATION: FragmentRegistrationProxy<
@@ -55,6 +58,7 @@ static CONTEXTUAL_USER_FRAGMENTS: &[&dyn FragmentRegistration] = &[
     &TURN_ABORTED_REGISTRATION,
     &SUBAGENT_NOTIFICATION_REGISTRATION,
     &INTERNAL_MODEL_CONTEXT_REGISTRATION,
+    &KIMI_CRON_FIRE_REGISTRATION,
     &RECOMMENDED_PLUGINS_REGISTRATION,
     &LEGACY_UNIFIED_EXEC_PROCESS_LIMIT_WARNING_REGISTRATION,
     &LEGACY_APPLY_PATCH_EXEC_COMMAND_WARNING_REGISTRATION,
@@ -75,7 +79,7 @@ pub(crate) fn is_contextual_user_fragment(content_item: &ContentItem) -> bool {
 }
 
 pub(crate) fn parse_visible_hook_prompt_message(
-    id: Option<&String>,
+    id: Option<&str>,
     content: &[ContentItem],
 ) -> Option<HookPromptItem> {
     let mut fragments = Vec::new();

@@ -38,6 +38,9 @@ on:
 permissions:
   contents: write
 
+env:
+  CODEX_ZSH_RELEASE_TAG: codex-zsh-v0.1.0
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -181,6 +184,15 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
 
+      # rusty_v8 does not publish every target (notably aarch64 musl) at its
+      # default upstream URL. Use the same checksum-verified Codex artifacts as
+      # the full CI release builds so the public release matrix is reproducible.
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        if: runner.os != 'Windows'
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
       - name: Build bwrap and export digest
         if: contains(matrix.target, 'linux')
         shell: bash
@@ -207,7 +219,7 @@ jobs:
           if [[ "$target" == "x86_64-pc-windows-msvc" ]]; then
             export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
           fi
-          build_args=(--bin codex)
+          build_args=(--bin codex --bin codex-code-mode-host)
           if [[ "$target" == *windows* ]]; then
             build_args+=(--bin codex-command-runner --bin codex-windows-sandbox-setup)
           fi
@@ -224,12 +236,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          binary="target/${{ matrix.target }}/release/codex"
-          if [[ "${{ runner.os }}" == "macOS" ]]; then
-            strip -S "$binary"
-          else
-            strip --strip-debug --strip-unneeded "$binary"
-          fi
+          for binary in \
+            "target/${{ matrix.target }}/release/codex" \
+            "target/${{ matrix.target }}/release/codex-code-mode-host"
+          do
+            if [[ "${{ runner.os }}" == "macOS" ]]; then
+              strip -S "$binary"
+            else
+              strip --strip-debug --strip-unneeded "$binary"
+            fi
+          done
 
       - name: Build package archive
         shell: bash

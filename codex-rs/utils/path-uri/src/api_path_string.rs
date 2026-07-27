@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde::Serializer;
 use std::fmt;
+use std::path::Path;
 use thiserror::Error;
 use ts_rs::TS;
 
@@ -18,26 +19,43 @@ use ts_rs::TS;
 ///
 /// When converting from [`PathUri`], "native" refers to the supplied
 /// [`PathConvention`], which may be foreign to the operating system running
-/// this process. The inner string is private so path-producing code must convert
-/// from [`AbsolutePathBuf`] or use [`Self::from_path_uri`] instead of bypassing
-/// the intended conversion boundary. Non-UTF-8 paths are converted to UTF-8
-/// lossily because this API value is serialized as a JSON string.
+/// this process. The inner string is private so path-producing code must use a
+/// path conversion method instead of bypassing the intended conversion
+/// boundary. Non-UTF-8 paths are converted to UTF-8 lossily because this API
+/// value is serialized as a JSON string.
 ///
-/// Deserialization accepts any UTF-8 string without interpreting or validating
-/// it. That unrestricted construction path is intentionally available only to
-/// serde: Codex-internal code cannot construct this type directly from a raw
-/// `String` and is instead encouraged to convert through [`PathUri`] or
-/// [`AbsolutePathBuf`]. Relative path text remains valid until an operation
-/// such as [`Self::to_path_uri`] requires an absolute path.
+/// Deserialization and [`Self::from_string`] accept any UTF-8 string without
+/// interpreting or validating it. Use [`Self::from_string`] when a caller
+/// already owns legacy app-server path text and needs to preserve its wire
+/// spelling; use [`Self::from_path`], [`Self::from_abs_path`], or
+/// [`Self::from_path_uri`] when converting an actual path value. Relative
+/// path text remains valid until an operation such as [`Self::to_path_uri`]
+/// requires an absolute path.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, TS)]
 #[serde(transparent)]
 #[ts(type = "string")]
 pub struct LegacyAppPathString(String);
 
 impl LegacyAppPathString {
+    /// Preserves already-legacy app-server path text without interpreting it
+    /// using the current host.
+    ///
+    /// This is for API-boundary values that are already strings, including
+    /// relative or foreign-platform spellings. Callers with a local
+    /// [`Path`], [`AbsolutePathBuf`], or [`PathUri`] should use the
+    /// corresponding typed constructor instead.
+    pub fn from_string(path: impl Into<String>) -> Self {
+        Self(path.into())
+    }
+
+    /// Preserves path text without interpreting it using the current host.
+    pub fn from_path(path: &Path) -> Self {
+        Self(path.to_string_lossy().into_owned())
+    }
+
     /// Renders an absolute path using the current host's path convention.
     pub fn from_abs_path(path: &AbsolutePathBuf) -> Self {
-        Self(path.to_string_lossy().into_owned())
+        Self::from_path(path.as_path())
     }
 
     /// Renders a path URI using the requested native path convention.
@@ -70,9 +88,30 @@ impl LegacyAppPathString {
         PathUri::from_absolute_native_path(&self.0, convention).ok_or_else(|| {
             LegacyAppPathStringError::InvalidNativePath {
                 path: self.0.clone(),
-                convention,
+                convention: Some(convention),
             }
         })
+    }
+
+    /// Parses this API string as an absolute path using the convention inferred from its spelling.
+    pub fn to_inferred_path_uri(&self) -> Option<PathUri> {
+        PathUri::try_from(self.clone()).ok()
+    }
+
+    /// Renders this API path for display in a user interface.
+    ///
+    /// Absolute paths are normalized using their inferred native convention.
+    /// Strings that cannot be interpreted as absolute paths retain their raw
+    /// API spelling.
+    pub fn render_for_ui(&self) -> String {
+        self.to_inferred_path_uri()
+            .map(|path| path.inferred_native_path_string())
+            .unwrap_or_else(|| self.0.clone())
+    }
+
+    /// Parses this API string as a host-native absolute path.
+    pub fn to_inferred_abs_path(&self) -> Option<AbsolutePathBuf> {
+        AbsolutePathBuf::try_from(self.clone()).ok()
     }
 
     /// Infers the path convention of an absolute API path from its spelling.
@@ -108,6 +147,44 @@ impl LegacyAppPathString {
 impl From<AbsolutePathBuf> for LegacyAppPathString {
     fn from(path: AbsolutePathBuf) -> Self {
         Self::from_abs_path(&path)
+    }
+}
+
+impl From<PathUri> for LegacyAppPathString {
+    fn from(path: PathUri) -> Self {
+        Self(path.inferred_native_path_string())
+    }
+}
+
+impl TryFrom<LegacyAppPathString> for PathUri {
+    type Error = LegacyAppPathStringError;
+
+    fn try_from(path: LegacyAppPathString) -> Result<Self, Self::Error> {
+        let Some(convention) = path.infer_absolute_path_convention() else {
+            return Err(LegacyAppPathStringError::InvalidNativePath {
+                path: path.0,
+                convention: None,
+            });
+        };
+        PathUri::from_absolute_native_path(path.as_str(), convention).ok_or({
+            LegacyAppPathStringError::InvalidNativePath {
+                path: path.0,
+                convention: Some(convention),
+            }
+        })
+    }
+}
+
+impl TryFrom<LegacyAppPathString> for AbsolutePathBuf {
+    type Error = LegacyAppPathStringError;
+
+    fn try_from(path: LegacyAppPathString) -> Result<Self, Self::Error> {
+        AbsolutePathBuf::from_absolute_path_checked(path.as_str()).map_err(|_| {
+            LegacyAppPathStringError::InvalidNativePath {
+                path: path.0,
+                convention: None,
+            }
+        })
     }
 }
 
@@ -279,10 +356,13 @@ pub enum LegacyAppPathStringError {
         path: String,
         convention: PathConvention,
     },
-    #[error("path `{path}` is not absolute using {convention} path syntax")]
+    #[error(
+        "path `{path}` is not absolute{convention}",
+        convention = .convention.map(|convention| format!(" using {convention} path syntax")).unwrap_or_default()
+    )]
     InvalidNativePath {
         path: String,
-        convention: PathConvention,
+        convention: Option<PathConvention>,
     },
 }
 

@@ -1,6 +1,8 @@
 use super::*;
 use crate::config::ConfigBuilder;
+use crate::context::ContextualUserFragment;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::environment_selection::TurnEnvironmentState;
 use crate::session::turn_context::TurnEnvironment;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerStack;
@@ -30,17 +32,40 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tempfile::TempDir;
+use tokio::sync::Notify;
+use tokio::sync::Semaphore;
 
 #[derive(Clone, Copy)]
 enum InjectedFailure {
     Metadata(io::ErrorKind),
+    MetadataBlocked,
+    MetadataBlockedByFilenamePrefix(&'static str),
+    MetadataPending,
     Read(io::ErrorKind),
 }
 
 struct FailingFileSystem {
     path: AbsolutePathBuf,
     failure: InjectedFailure,
+    metadata_calls: Arc<MetadataCallCounts>,
+}
+
+struct MetadataCallCounts {
+    paths: Mutex<Vec<PathUri>>,
+    started: Notify,
+    release: Semaphore,
+}
+
+impl Default for MetadataCallCounts {
+    fn default() -> Self {
+        Self {
+            paths: Mutex::new(Vec::new()),
+            started: Notify::new(),
+            release: Semaphore::new(0),
+        }
+    }
 }
 
 impl FailingFileSystem {
@@ -88,12 +113,49 @@ impl FailingFileSystem {
         path: &PathUri,
         sandbox: Option<&FileSystemSandboxContext>,
     ) -> io::Result<FileMetadata> {
-        if path.to_abs_path()? == self.path
-            && let InjectedFailure::Metadata(kind) = self.failure
-        {
-            return Err(io::Error::new(kind, "injected metadata failure"));
+        let path_abs = path.to_abs_path()?;
+        self.metadata_calls
+            .paths
+            .lock()
+            .expect("metadata paths lock")
+            .push(path.clone());
+        self.metadata_calls.started.notify_one();
+        match self.failure {
+            InjectedFailure::Metadata(kind) if path_abs == self.path => {
+                Err(io::Error::new(kind, "injected metadata failure"))
+            }
+            InjectedFailure::MetadataBlocked if path_abs == self.path => {
+                self.metadata_calls
+                    .release
+                    .acquire()
+                    .await
+                    .expect("metadata release semaphore")
+                    .forget();
+                LOCAL_FS.get_metadata(path, sandbox).await
+            }
+            InjectedFailure::MetadataBlockedByFilenamePrefix(prefix)
+                if path_abs
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(prefix)) =>
+            {
+                self.metadata_calls
+                    .release
+                    .acquire()
+                    .await
+                    .expect("metadata release semaphore")
+                    .forget();
+                LOCAL_FS.get_metadata(path, sandbox).await
+            }
+            InjectedFailure::MetadataPending if path_abs == self.path => {
+                std::future::pending().await
+            }
+            InjectedFailure::Metadata(_)
+            | InjectedFailure::MetadataBlocked
+            | InjectedFailure::MetadataBlockedByFilenamePrefix(_)
+            | InjectedFailure::MetadataPending
+            | InjectedFailure::Read(_) => LOCAL_FS.get_metadata(path, sandbox).await,
         }
-        LOCAL_FS.get_metadata(path, sandbox).await
     }
 
     async fn read_directory(
@@ -250,26 +312,32 @@ async fn load_agents_md(config: &TestConfig) -> Option<LoadedAgentsMd> {
     .await
 }
 
-async fn agents_md_paths(config: &TestConfig) -> std::io::Result<Vec<AbsolutePathBuf>> {
-    super::agents_md_paths(&config.config, &config.cwd, LOCAL_FS.as_ref()).await
+async fn agents_md_paths(config: &TestConfig) -> std::io::Result<Vec<PathUri>> {
+    super::agents_md_paths(
+        &config.config,
+        &PathUri::from_abs_path(&config.cwd),
+        LOCAL_FS.as_ref(),
+    )
+    .await
 }
 
 fn resolved_local_environments<const N: usize>(
     environments: [(&str, AbsolutePathBuf); N],
 ) -> TurnEnvironmentSnapshot {
     TurnEnvironmentSnapshot {
-        turn_environments: environments
+        environments: environments
             .into_iter()
             .map(|(environment_id, cwd)| {
-                TurnEnvironment::new(
+                TurnEnvironmentState::Ready(TurnEnvironment::new(
                     environment_id.to_string(),
                     Arc::new(
                         Environment::create_for_tests(/*exec_server_url*/ None)
                             .expect("local environment"),
                     ),
                     PathUri::from_abs_path(&cwd),
+                    Vec::new(),
                     /*shell*/ None,
-                )
+                ))
             })
             .collect(),
     }
@@ -277,10 +345,99 @@ fn resolved_local_environments<const N: usize>(
 
 fn project_provenance(path: AbsolutePathBuf, cwd: AbsolutePathBuf) -> InstructionProvenance {
     InstructionProvenance::Project {
-        source_path: path,
+        source_path: PathUri::from_abs_path(&path),
         environment_id: "local".to_string(),
-        cwd,
+        cwd: PathUri::from_abs_path(&cwd),
     }
+}
+
+#[test]
+fn foreign_agents_md_uses_environment_native_paths() {
+    let (cwd, rendered_cwd) = if cfg!(windows) {
+        (
+            PathUri::parse("file:///codex%20runtime").expect("POSIX cwd URI"),
+            "/codex runtime",
+        )
+    } else {
+        (
+            PathUri::parse("file:///C:/codex%20runtime").expect("Windows cwd URI"),
+            r"C:\codex runtime",
+        )
+    };
+    let source_path = cwd.join("AGENTS.md").expect("AGENTS.md URI");
+    let loaded = LoadedAgentsMd {
+        user_instructions: None,
+        entries: vec![InstructionEntry {
+            contents: "remote instructions".to_string(),
+            provenance: InstructionProvenance::Project {
+                source_path: source_path.clone(),
+                environment_id: "remote".to_string(),
+                cwd,
+            },
+        }],
+    };
+
+    assert_eq!(
+        loaded.contextual_user_fragment().render(),
+        format!(
+            "# AGENTS.md instructions for {rendered_cwd}
+
+<INSTRUCTIONS>
+remote instructions
+</INSTRUCTIONS>"
+        )
+    );
+    assert_eq!(loaded.sources().collect::<Vec<_>>(), vec![source_path]);
+}
+
+#[test]
+fn multi_environment_agents_md_renders_mixed_path_conventions() {
+    let posix_cwd = PathUri::parse("file:///srv/project").expect("POSIX cwd URI");
+    let windows_cwd = PathUri::parse("file:///C:/workspace").expect("Windows cwd URI");
+    let posix_source = posix_cwd.join("AGENTS.md").expect("POSIX AGENTS.md URI");
+    let windows_source = windows_cwd
+        .join("AGENTS.md")
+        .expect("Windows AGENTS.md URI");
+    let loaded = LoadedAgentsMd {
+        user_instructions: None,
+        entries: vec![
+            InstructionEntry {
+                contents: "POSIX instructions".to_string(),
+                provenance: InstructionProvenance::Project {
+                    source_path: posix_source.clone(),
+                    environment_id: "posix".to_string(),
+                    cwd: posix_cwd,
+                },
+            },
+            InstructionEntry {
+                contents: "Windows instructions".to_string(),
+                provenance: InstructionProvenance::Project {
+                    source_path: windows_source.clone(),
+                    environment_id: "windows".to_string(),
+                    cwd: windows_cwd,
+                },
+            },
+        ],
+    };
+
+    assert_eq!(
+        loaded.contextual_user_fragment().render(),
+        r#"# AGENTS.md instructions
+
+<INSTRUCTIONS>
+for `posix` with root /srv/project
+
+POSIX instructions
+
+for `windows` with root C:\workspace
+
+Windows instructions
+</INSTRUCTIONS>"#
+    );
+    assert_eq!(
+        loaded.sources().collect::<Vec<_>>(),
+        vec![posix_source, windows_source]
+    );
 }
 
 /// Helper that returns a `Config` pointing at `root` and using `limit` as
@@ -505,10 +662,11 @@ async fn read_agents_md_propagates_metadata_errors() {
     let fs = FailingFileSystem {
         path: marker_path,
         failure: InjectedFailure::Metadata(io::ErrorKind::PermissionDenied),
+        metadata_calls: Arc::default(),
     };
 
     let cwd = config.cwd.clone();
-    let err = read_agents_md(&config.config, &fs, "local", &cwd)
+    let err = read_agents_md(&config.config, &fs, "local", &PathUri::from_abs_path(&cwd))
         .await
         .expect_err("metadata error");
 
@@ -523,10 +681,11 @@ async fn read_agents_md_propagates_read_errors() {
     let fs = FailingFileSystem {
         path: config.cwd.join("AGENTS.md"),
         failure: InjectedFailure::Read(io::ErrorKind::PermissionDenied),
+        metadata_calls: Arc::default(),
     };
 
     let cwd = config.cwd.clone();
-    let err = read_agents_md(&config.config, &fs, "local", &cwd)
+    let err = read_agents_md(&config.config, &fs, "local", &PathUri::from_abs_path(&cwd))
         .await
         .expect_err("read error");
 
@@ -541,14 +700,284 @@ async fn read_agents_md_ignores_files_removed_after_discovery() {
     let fs = FailingFileSystem {
         path: config.cwd.join("AGENTS.md"),
         failure: InjectedFailure::Read(io::ErrorKind::NotFound),
+        metadata_calls: Arc::default(),
     };
 
     let cwd = config.cwd.clone();
-    let loaded = read_agents_md(&config.config, &fs, "local", &cwd)
+    let loaded = read_agents_md(&config.config, &fs, "local", &PathUri::from_abs_path(&cwd))
         .await
         .expect("removed file is recoverable");
 
     assert_eq!(loaded, None);
+}
+
+#[tokio::test]
+async fn marker_search_does_not_wait_for_a_higher_ancestor() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(tmp.path().join(".git"), "").unwrap();
+    fs::write(tmp.path().join("AGENTS.md"), "project doc").unwrap();
+    let nested = tmp.path().join("nested");
+    fs::create_dir(&nested).unwrap();
+
+    let mut config = make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await;
+    config.cwd = nested.abs();
+    let pending_marker = tmp
+        .path()
+        .parent()
+        .expect("tempdir parent")
+        .join(".git")
+        .abs();
+    let fs = FailingFileSystem {
+        path: pending_marker,
+        failure: InjectedFailure::MetadataPending,
+        metadata_calls: Arc::default(),
+    };
+    let cwd = PathUri::from_abs_path(&config.cwd);
+
+    let paths = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        super::agents_md_paths(&config.config, &cwd, &fs),
+    )
+    .await
+    .expect("nearest marker should complete")
+    .expect("AGENTS.md discovery");
+
+    assert_eq!(
+        paths,
+        vec![PathUri::from_abs_path(
+            &tmp.path().join(DEFAULT_AGENTS_MD_FILENAME).abs()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn project_root_marker_search_limits_concurrent_probes_and_preserves_order() {
+    const CONCURRENCY_LIMIT: usize = 256;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(tmp.path().join("AGENTS.md"), "project doc").unwrap();
+    let nested = tmp.path().join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("AGENTS.md"), "nested project doc").unwrap();
+
+    let markers = (0..=CONCURRENCY_LIMIT)
+        .map(|index| format!(".project-root-{index}"))
+        .collect::<Vec<_>>();
+    fs::write(
+        tmp.path()
+            .join(markers.last().expect("last project root marker")),
+        "",
+    )
+    .unwrap();
+    let marker_refs = markers.iter().map(String::as_str).collect::<Vec<_>>();
+
+    let mut config = make_config_with_project_root_markers(
+        &tmp,
+        /*limit*/ 4096,
+        /*instructions*/ None,
+        &marker_refs,
+    )
+    .await;
+    config.cwd = nested.abs();
+    let cwd = PathUri::from_abs_path(&config.cwd);
+    let expected_initial_probes = markers
+        .iter()
+        .map(|marker| cwd.join(marker).expect("project root marker path"))
+        .collect::<Vec<_>>();
+    let max_probe_count = markers.len() * config.cwd.ancestors().count();
+    let metadata_calls = Arc::new(MetadataCallCounts::default());
+    let fs = FailingFileSystem {
+        path: config.cwd.join("unused"),
+        failure: InjectedFailure::MetadataBlockedByFilenamePrefix(".project-root-"),
+        metadata_calls: Arc::clone(&metadata_calls),
+    };
+
+    let assertions = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let started = metadata_calls.started.notified();
+                if metadata_calls
+                    .paths
+                    .lock()
+                    .expect("metadata paths lock")
+                    .len()
+                    >= CONCURRENCY_LIMIT
+                {
+                    break;
+                }
+                started.await;
+            }
+        })
+        .await
+        .expect("initial marker window should start");
+        assert_eq!(
+            *metadata_calls.paths.lock().expect("metadata paths lock"),
+            expected_initial_probes[..CONCURRENCY_LIMIT]
+        );
+
+        metadata_calls.release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let started = metadata_calls.started.notified();
+                if metadata_calls
+                    .paths
+                    .lock()
+                    .expect("metadata paths lock")
+                    .len()
+                    > CONCURRENCY_LIMIT
+                {
+                    break;
+                }
+                started.await;
+            }
+        })
+        .await
+        .expect("next marker probe should start");
+        assert_eq!(
+            *metadata_calls.paths.lock().expect("metadata paths lock"),
+            expected_initial_probes
+        );
+
+        metadata_calls.release.add_permits(max_probe_count);
+    };
+    let (paths, ()) = tokio::join!(
+        super::agents_md_paths(&config.config, &cwd, &fs),
+        assertions
+    );
+    let paths = paths.expect("AGENTS.md discovery");
+
+    assert_eq!(
+        paths,
+        vec![
+            PathUri::from_abs_path(&tmp.path().join(DEFAULT_AGENTS_MD_FILENAME).abs()),
+            PathUri::from_abs_path(&nested.join(DEFAULT_AGENTS_MD_FILENAME).abs()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn agents_md_search_starts_all_directory_probes() {
+    const NESTING_DEPTH: usize = 9;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(tmp.path().join(".git"), "").unwrap();
+    fs::write(tmp.path().join("AGENTS.md"), "project doc").unwrap();
+    let mut nested = tmp.path().to_path_buf();
+    for depth in 0..NESTING_DEPTH {
+        nested.push(format!("nested-{depth}"));
+    }
+    fs::create_dir_all(&nested).unwrap();
+
+    let mut config = make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await;
+    config.cwd = nested.abs();
+    let cwd = PathUri::from_abs_path(&config.cwd);
+    let mut search_dirs = config
+        .cwd
+        .ancestors()
+        .take(NESTING_DEPTH + 1)
+        .collect::<Vec<_>>();
+    search_dirs.reverse();
+    let expected_probes = search_dirs
+        .into_iter()
+        .map(|directory| PathUri::from_abs_path(&directory.join(LOCAL_AGENTS_MD_FILENAME)))
+        .collect::<Vec<_>>();
+    let metadata_calls = Arc::new(MetadataCallCounts::default());
+    let fs = FailingFileSystem {
+        path: tmp.path().join(LOCAL_AGENTS_MD_FILENAME).abs(),
+        failure: InjectedFailure::MetadataBlocked,
+        metadata_calls: Arc::clone(&metadata_calls),
+    };
+
+    let search =
+        tokio::spawn(async move { super::agents_md_paths(&config.config, &cwd, &fs).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let started = metadata_calls.started.notified();
+            if expected_probes.iter().all(|candidate| {
+                metadata_calls
+                    .paths
+                    .lock()
+                    .expect("metadata paths lock")
+                    .contains(candidate)
+            }) {
+                break;
+            }
+            started.await;
+        }
+    })
+    .await
+    .expect("all directory probes should start");
+
+    let mut actual_probes = metadata_calls
+        .paths
+        .lock()
+        .expect("metadata paths lock")
+        .iter()
+        .filter(|path| expected_probes.contains(path))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    actual_probes.sort();
+    let mut expected_probes = expected_probes
+        .into_iter()
+        .map(|path| path.to_string())
+        .collect::<Vec<_>>();
+    expected_probes.sort();
+    assert_eq!(actual_probes, expected_probes);
+
+    metadata_calls.release.add_permits(1);
+    let paths = tokio::time::timeout(std::time::Duration::from_secs(5), search)
+        .await
+        .expect("AGENTS.md search should complete")
+        .expect("AGENTS.md search task")
+        .expect("AGENTS.md discovery");
+
+    assert_eq!(
+        paths,
+        vec![PathUri::from_abs_path(
+            &tmp.path().join(DEFAULT_AGENTS_MD_FILENAME).abs()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn empty_project_root_markers_only_probe_cwd_candidates() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(tmp.path().join("AGENTS.md"), "parent doc").unwrap();
+    let nested = tmp.path().join("nested");
+    fs::create_dir(&nested).unwrap();
+    fs::write(nested.join("AGENTS.md"), "cwd doc").unwrap();
+
+    let mut config = make_config_with_project_root_markers(
+        &tmp,
+        /*limit*/ 4096,
+        /*instructions*/ None,
+        &[],
+    )
+    .await;
+    config.cwd = nested.abs();
+    let metadata_calls = Arc::new(MetadataCallCounts::default());
+    let fs = FailingFileSystem {
+        path: config.cwd.join("unused"),
+        failure: InjectedFailure::Read(io::ErrorKind::PermissionDenied),
+        metadata_calls: Arc::clone(&metadata_calls),
+    };
+    let cwd = PathUri::from_abs_path(&config.cwd);
+
+    let paths = super::agents_md_paths(&config.config, &cwd, &fs)
+        .await
+        .expect("AGENTS.md discovery");
+
+    let override_path = cwd.join(LOCAL_AGENTS_MD_FILENAME).expect("override path");
+    let agents_path = cwd.join(DEFAULT_AGENTS_MD_FILENAME).expect("agents path");
+    assert_eq!(paths, vec![agents_path.clone()]);
+    assert_eq!(
+        metadata_calls
+            .paths
+            .lock()
+            .expect("metadata paths lock")
+            .clone(),
+        vec![override_path, agents_path]
+    );
 }
 
 /// When `cwd` is nested inside a repo, the search should locate AGENTS.md
@@ -657,19 +1086,23 @@ secondary doc"#,
 {inner}
 </INSTRUCTIONS>"#
     );
-    assert_eq!(loaded.render(), expected_fragment);
     assert_eq!(
-        loaded.sources().cloned().collect::<Vec<_>>(),
+        loaded.contextual_user_fragment().render(),
+        expected_fragment
+    );
+    assert_eq!(
+        loaded.sources().collect::<Vec<_>>(),
         vec![
-            config
-                .user_instructions
-                .as_ref()
-                .expect("global instructions")
-                .source
-                .clone(),
-            primary.path().join("AGENTS.md").abs(),
-            primary_nested.join("AGENTS.md").abs(),
-            secondary.path().join("AGENTS.md").abs(),
+            PathUri::from_abs_path(
+                &config
+                    .user_instructions
+                    .as_ref()
+                    .expect("global instructions")
+                    .source,
+            ),
+            PathUri::from_abs_path(&primary.path().join("AGENTS.md").abs()),
+            PathUri::from_abs_path(&primary_nested.join("AGENTS.md").abs()),
+            PathUri::from_abs_path(&secondary.path().join("AGENTS.md").abs()),
         ]
     );
 }
@@ -697,7 +1130,10 @@ async fn secondary_only_project_doc_uses_single_contributor_layout() {
         "# AGENTS.md instructions for {}\n\n<INSTRUCTIONS>\n{inner}\n</INSTRUCTIONS>",
         secondary.path().display()
     );
-    assert_eq!(loaded.render(), expected_fragment);
+    assert_eq!(
+        loaded.contextual_user_fragment().render(),
+        expected_fragment
+    );
 }
 
 #[tokio::test]
@@ -723,7 +1159,10 @@ async fn primary_only_project_doc_preserves_legacy_layout_with_multiple_bound_en
         "# AGENTS.md instructions for {}\n\n<INSTRUCTIONS>\n{inner}\n</INSTRUCTIONS>",
         primary.path().display()
     );
-    assert_eq!(loaded.render(), expected_fragment);
+    assert_eq!(
+        loaded.contextual_user_fragment().render(),
+        expected_fragment
+    );
 }
 
 #[tokio::test]
@@ -814,32 +1253,6 @@ async fn secondary_environment_invalid_utf8_does_not_suppress_other_docs() {
     assert!(loaded.text().contains("secondary\u{FFFD}doc"));
 }
 
-#[tokio::test]
-async fn child_agents_guidance_is_appended_once_after_environment_groups() {
-    let primary = tempfile::tempdir().expect("primary tempdir");
-    let secondary = tempfile::tempdir().expect("secondary tempdir");
-    fs::write(primary.path().join("AGENTS.md"), "primary doc").unwrap();
-    fs::write(secondary.path().join("AGENTS.md"), "secondary doc").unwrap();
-    let mut config = make_config(&primary, /*limit*/ 4096, /*instructions*/ None).await;
-    config.features.enable(Feature::ChildAgentsMd).unwrap();
-    let environments = resolved_local_environments([
-        ("primary", config.cwd.clone()),
-        ("secondary", secondary.abs()),
-    ]);
-
-    let loaded = load_project_instructions(
-        &config.config,
-        /*user_instructions*/ None,
-        &environments,
-    )
-    .await
-    .expect("instructions expected");
-    let text = loaded.text();
-
-    assert_eq!(text.matches(HIERARCHICAL_AGENTS_MESSAGE).count(), 1);
-    assert!(text.ends_with(HIERARCHICAL_AGENTS_MESSAGE));
-}
-
 /// If there are existing system instructions but AGENTS.md docs are
 /// missing we expect the original instructions to be returned unchanged.
 #[tokio::test]
@@ -898,7 +1311,10 @@ async fn concatenates_root_and_cwd_docs() {
     assert_eq!(loaded.text(), "root doc\n\ncrate doc");
     assert_eq!(
         loaded.sources().collect::<Vec<_>>(),
-        vec![&root_agents, &crate_agents]
+        vec![
+            PathUri::from_abs_path(&root_agents),
+            PathUri::from_abs_path(&crate_agents),
+        ]
     );
 }
 
@@ -925,8 +1341,8 @@ async fn project_root_markers_are_honored_for_agents_discovery() {
     let expected_parent = root.path().join("AGENTS.md").abs();
     let expected_child = cfg.cwd.join("AGENTS.md");
     assert_eq!(discovery.len(), 2);
-    assert_eq!(discovery[0], expected_parent);
-    assert_eq!(discovery[1], expected_child);
+    assert_eq!(discovery[0], PathUri::from_abs_path(&expected_parent));
+    assert_eq!(discovery[1], PathUri::from_abs_path(&expected_child));
 
     let res = get_user_instructions(&cfg).await.expect("doc expected");
     assert_eq!(res, "parent doc\n\nchild doc");
@@ -971,8 +1387,8 @@ async fn project_layers_do_not_override_project_root_markers() {
     assert_eq!(
         discovery,
         vec![
-            root.path().join("AGENTS.md").abs(),
-            config.cwd.join("AGENTS.md"),
+            PathUri::from_abs_path(&root.path().join("AGENTS.md").abs()),
+            PathUri::from_abs_path(&config.cwd.join("AGENTS.md")),
         ]
     );
 }
@@ -991,36 +1407,13 @@ async fn agents_md_paths_preserve_symlinked_cwd() {
     cfg.cwd = linked_cwd.abs();
 
     let discovery = agents_md_paths(&cfg).await.expect("discover paths");
-    assert_eq!(discovery, vec![cfg.cwd.join("AGENTS.md")]);
+    assert_eq!(
+        discovery,
+        vec![PathUri::from_abs_path(&cfg.cwd.join("AGENTS.md"))]
+    );
 
     let res = get_user_instructions(&cfg).await.expect("doc expected");
     assert_eq!(res, "project doc");
-}
-
-#[tokio::test]
-async fn child_agents_message_after_global_instructions_uses_plain_separator() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let mut cfg = make_config(&tmp, /*limit*/ 4096, Some("global doc")).await;
-    cfg.features.enable(Feature::ChildAgentsMd).unwrap();
-
-    let loaded = load_agents_md(&cfg).await.expect("instructions expected");
-    let global_agents = cfg.codex_home.join(DEFAULT_AGENTS_MD_FILENAME);
-    let expected = LoadedAgentsMd {
-        user_instructions: Some(UserInstructions {
-            text: "global doc".to_string(),
-            source: global_agents,
-        }),
-        entries: vec![InstructionEntry {
-            contents: HIERARCHICAL_AGENTS_MESSAGE.to_string(),
-            provenance: InstructionProvenance::Internal,
-        }],
-    };
-
-    assert_eq!(loaded, expected);
-    assert_eq!(
-        loaded.text(),
-        format!("global doc\n\n{HIERARCHICAL_AGENTS_MESSAGE}")
-    );
 }
 
 #[tokio::test]
@@ -1047,55 +1440,16 @@ async fn instruction_sources_include_global_before_agents_md_docs() {
         }],
     };
     assert_eq!(loaded, expected);
-    assert_eq!(loaded.user_instructions(), cfg.user_instructions.as_ref());
     assert_eq!(
         loaded.sources().collect::<Vec<_>>(),
-        vec![&global_agents, &project_agents]
+        vec![
+            PathUri::from_abs_path(&global_agents),
+            PathUri::from_abs_path(&project_agents),
+        ]
     );
     assert_eq!(
         loaded.text(),
         format!("global doc{AGENTS_MD_SEPARATOR}project doc")
-    );
-}
-
-#[tokio::test]
-async fn child_agents_message_after_project_docs_is_not_an_instruction_source() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    fs::write(tmp.path().join("AGENTS.md"), "project doc").unwrap();
-
-    let mut cfg = make_config(&tmp, /*limit*/ 4096, Some("global doc")).await;
-    cfg.features.enable(Feature::ChildAgentsMd).unwrap();
-    let global_agents = cfg.codex_home.join(DEFAULT_AGENTS_MD_FILENAME);
-    fs::create_dir_all(&cfg.codex_home).unwrap();
-    fs::write(&global_agents, "global doc").unwrap();
-
-    let loaded = load_agents_md(&cfg).await.expect("instructions expected");
-    let project_agents = cfg.cwd.join("AGENTS.md");
-
-    let expected = LoadedAgentsMd {
-        user_instructions: Some(UserInstructions {
-            text: "global doc".to_string(),
-            source: global_agents.clone(),
-        }),
-        entries: vec![
-            InstructionEntry {
-                contents: "project doc".to_string(),
-                provenance: project_provenance(project_agents.clone(), cfg.cwd.clone()),
-            },
-            InstructionEntry {
-                contents: HIERARCHICAL_AGENTS_MESSAGE.to_string(),
-                provenance: InstructionProvenance::Internal,
-            },
-        ],
-    };
-    assert_eq!(loaded, expected);
-    assert_eq!(
-        loaded.sources().collect::<Vec<_>>(),
-        vec![&global_agents, &project_agents]
-    );
-    assert_eq!(
-        loaded.text(),
-        format!("global doc{AGENTS_MD_SEPARATOR}project doc\n\n{HIERARCHICAL_AGENTS_MESSAGE}")
     );
 }
 
@@ -1117,8 +1471,8 @@ async fn agents_local_md_preferred() {
     let discovery = agents_md_paths(&cfg).await.expect("discover paths");
     assert_eq!(discovery.len(), 1);
     assert_eq!(
-        discovery[0].file_name().unwrap().to_string_lossy(),
-        LOCAL_AGENTS_MD_FILENAME
+        discovery[0].basename().as_deref(),
+        Some(LOCAL_AGENTS_MD_FILENAME)
     );
 }
 
@@ -1166,12 +1520,9 @@ async fn agents_md_preferred_over_fallbacks() {
 
     let discovery = agents_md_paths(&cfg).await.expect("discover paths");
     assert_eq!(discovery.len(), 1);
-    assert!(
-        discovery[0]
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .eq(DEFAULT_AGENTS_MD_FILENAME)
+    assert_eq!(
+        discovery[0].basename().as_deref(),
+        Some(DEFAULT_AGENTS_MD_FILENAME)
     );
 }
 
@@ -1186,7 +1537,7 @@ async fn agents_md_directory_is_ignored() {
     assert_eq!(res, None);
 
     let discovery = agents_md_paths(&cfg).await.expect("discover paths");
-    assert_eq!(discovery, Vec::<AbsolutePathBuf>::new());
+    assert_eq!(discovery, Vec::<PathUri>::new());
 }
 
 #[cfg(unix)]
@@ -1209,7 +1560,7 @@ async fn agents_md_special_file_is_ignored() {
     assert_eq!(res, None);
 
     let discovery = agents_md_paths(&cfg).await.expect("discover paths");
-    assert_eq!(discovery, Vec::<AbsolutePathBuf>::new());
+    assert_eq!(discovery, Vec::<PathUri>::new());
 }
 
 #[tokio::test]
@@ -1228,11 +1579,8 @@ async fn override_directory_falls_back_to_agents_md_file() {
     let discovery = agents_md_paths(&cfg).await.expect("discover paths");
     assert_eq!(discovery.len(), 1);
     assert_eq!(
-        discovery[0]
-            .file_name()
-            .expect("file name")
-            .to_string_lossy(),
-        DEFAULT_AGENTS_MD_FILENAME
+        discovery[0].basename().as_deref(),
+        Some(DEFAULT_AGENTS_MD_FILENAME)
     );
 }
 

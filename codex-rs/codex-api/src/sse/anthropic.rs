@@ -4,6 +4,7 @@ use crate::error::ApiError;
 use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
 use codex_client::StreamResponse;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
@@ -48,6 +49,8 @@ struct AnthropicStreamState {
     cache_read_input_tokens: i64,
     output_tokens: i64,
     pending_blocks: BTreeMap<i64, PendingBlock>,
+    completed_blocks: BTreeMap<i64, ResponseItem>,
+    next_completed_block_index: i64,
 }
 
 #[derive(Debug)]
@@ -219,6 +222,9 @@ async fn process_anthropic_event(
     match event.kind.as_str() {
         "message_start" => {
             if let Some(message) = event.message {
+                state.pending_blocks.clear();
+                state.completed_blocks.clear();
+                state.next_completed_block_index = 0;
                 state.message_id = Some(message.id.clone());
                 state.server_model = message.model.clone();
                 update_usage(state, message.usage.as_ref());
@@ -258,7 +264,7 @@ async fn process_anthropic_event(
                                 text: String::new(),
                             }],
                             phase: None,
-                            metadata: None,
+                            internal_chat_message_metadata_passthrough: None,
                         })))
                         .await
                         .is_err()
@@ -278,13 +284,15 @@ async fn process_anthropic_event(
                     if tx_event
                         .send(Ok(ResponseEvent::OutputItemAdded(
                             ResponseItem::Reasoning {
-                                id: Some(format!("anthropic-thinking-{index}")),
+                                id: Some(ResponseItemId::from_server(format!(
+                                    "anthropic-thinking-{index}"
+                                ))),
                                 summary: vec![],
                                 content: Some(vec![ReasoningItemContent::ReasoningText {
                                     text: String::new(),
                                 }]),
                                 encrypted_content: None,
-                                metadata: None,
+                                internal_chat_message_metadata_passthrough: None,
                             },
                         )))
                         .await
@@ -376,18 +384,18 @@ async fn process_anthropic_event(
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText { text }],
                     phase: None,
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 PendingBlock::Thinking {
                     id,
                     text,
                     signature,
                 } => ResponseItem::Reasoning {
-                    id: Some(id),
+                    id: Some(ResponseItemId::from_server(id)),
                     summary: vec![],
                     content: Some(vec![ReasoningItemContent::ReasoningText { text }]),
                     encrypted_content: signature,
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 PendingBlock::ToolUse {
                     id,
@@ -399,14 +407,11 @@ async fn process_anthropic_event(
                     namespace: None,
                     arguments: normalize_tool_arguments(&input_json)?,
                     call_id: id,
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             };
-            if tx_event
-                .send(Ok(ResponseEvent::OutputItemDone(item)))
-                .await
-                .is_err()
-            {
+            state.completed_blocks.insert(index, item);
+            if flush_completed_blocks(state, tx_event).await? {
                 return Ok(true);
             }
         }
@@ -440,6 +445,26 @@ async fn process_anthropic_event(
         }
     }
 
+    Ok(false)
+}
+
+async fn flush_completed_blocks(
+    state: &mut AnthropicStreamState,
+    tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
+) -> Result<bool, ApiError> {
+    while let Some(item) = state
+        .completed_blocks
+        .remove(&state.next_completed_block_index)
+    {
+        state.next_completed_block_index += 1;
+        if tx_event
+            .send(Ok(ResponseEvent::OutputItemDone(item)))
+            .await
+            .is_err()
+        {
+            return Ok(true);
+        }
+    }
     Ok(false)
 }
 
@@ -481,6 +506,7 @@ fn build_token_usage(state: &AnthropicStreamState) -> Option<TokenUsage> {
     Some(TokenUsage {
         input_tokens: state.input_tokens,
         cached_input_tokens: state.cache_read_input_tokens,
+        cache_write_input_tokens: state.cache_creation_input_tokens,
         output_tokens: state.output_tokens,
         reasoning_output_tokens: 0,
         total_tokens,
@@ -519,7 +545,7 @@ mod tests {
             Box::pin(stream),
             tx,
             Duration::from_secs(5),
-            None,
+            /*telemetry*/ None,
         ));
         let mut events = Vec::new();
         while let Some(event) = rx.recv().await {
@@ -602,6 +628,7 @@ mod tests {
                     &Some(TokenUsage {
                         input_tokens: 12,
                         cached_input_tokens: 0,
+                        cache_write_input_tokens: 0,
                         output_tokens: 3,
                         reasoning_output_tokens: 0,
                         total_tokens: 15,
@@ -657,6 +684,7 @@ mod tests {
                     &Some(TokenUsage {
                         input_tokens: 20,
                         cached_input_tokens: 0,
+                        cache_write_input_tokens: 0,
                         output_tokens: 7,
                         reasoning_output_tokens: 0,
                         total_tokens: 27,
@@ -712,6 +740,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emits_completed_tool_blocks_in_content_index_order() {
+        let events = collect_events(&[
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_4\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"Checking.\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_first\",\"name\":\"Bash\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\\\"first\\\"}\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_second\",\"name\":\"Bash\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\\\"second\\\"}\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ])
+        .await;
+
+        let done_items = events
+            .iter()
+            .filter_map(|event| match event.as_ref().expect("event") {
+                ResponseEvent::OutputItemDone(item) => Some(item),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(done_items.len(), 3);
+        assert!(matches!(
+            done_items[0],
+            ResponseItem::Message { content, .. }
+                if content == &vec![ContentItem::OutputText {
+                    text: "Checking.".to_string(),
+                }]
+        ));
+        assert!(matches!(
+            done_items[1],
+            ResponseItem::FunctionCall { call_id, arguments, .. }
+                if call_id == "toolu_first" && arguments == "{\"command\":\"first\"}"
+        ));
+        assert!(matches!(
+            done_items[2],
+            ResponseItem::FunctionCall { call_id, arguments, .. }
+                if call_id == "toolu_second" && arguments == "{\"command\":\"second\"}"
+        ));
+    }
+
+    #[tokio::test]
     async fn parses_captured_edit_tool_use_stream() {
         let events = collect_events(&[r###"event: message_start
 data: {"type":"message_start","message":{"model":"claude-sonnet-4-6","id":"msg_01D2KUE7AyuS2vMBQo8ZDZY5","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":1,"cache_creation_input_tokens":287,"cache_read_input_tokens":4914,"cache_creation":{"ephemeral_5m_input_tokens":287,"ephemeral_1h_input_tokens":0},"output_tokens":63,"service_tier":"standard","inference_geo":"global"}} }
@@ -735,10 +807,10 @@ event: content_block_delta
 data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"aude-cor"}         }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"e-ga"}        }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"e-sc"}        }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"untlet"}   }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"enario"}   }
 
 event: content_block_delta
 data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"-run-v"}   }
@@ -750,16 +822,16 @@ event: content_block_delta
 data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"tool"}             }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"-gauntlet/"}         }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"-scenario/"}         }
 
 event: content_block_delta
 data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"workspace/"}         }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"gaunt"}     }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"scen"}     }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"let.txt\""}        }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"ario.txt\""}        }
 
 event: content_block_delta
 data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":", \"old_stri"}    }
@@ -829,7 +901,7 @@ data: {"type":"message_stop"   }
                 assert_eq!(
                     serde_json::from_str::<serde_json::Value>(arguments).expect("arguments json"),
                     serde_json::json!({
-                        "file_path": "/tmp/claude-core-gauntlet-run-v6/tui-core-tool-gauntlet/workspace/gauntlet.txt",
+                        "file_path": "/tmp/claude-core-scenario-run-v6/tui-core-tool-scenario/workspace/scenario.txt",
                         "new_string": "TOKEN_NEW",
                         "old_string": "TOKEN_OLD",
                         "replace_all": true,
@@ -845,6 +917,7 @@ data: {"type":"message_stop"   }
                 token_usage: Some(TokenUsage {
                     input_tokens: 1,
                     cached_input_tokens: 4914,
+                    cache_write_input_tokens: 287,
                     output_tokens: 63,
                     reasoning_output_tokens: 0,
                     total_tokens: 5265,
@@ -861,7 +934,11 @@ data: {"type":"message_stop"   }
             headers: HeaderMap::new(),
             bytes: Box::pin(stream::empty()),
         };
-        let response_stream = spawn_anthropic_response_stream(stream, Duration::from_secs(5), None);
+        let response_stream = spawn_anthropic_response_stream(
+            stream,
+            Duration::from_secs(5),
+            /*telemetry*/ None,
+        );
         assert_eq!(response_stream.rx_event.capacity(), 1600);
     }
 }

@@ -2,6 +2,7 @@
   "generated_from": [
     "https://models.dev/api.json",
     "https://api.moonshot.ai/v1/models",
+    "https://api.z.ai/api/paas/v4/models",
     "https://api.groq.com/openai/v1/models"
   ],
   "providers": [
@@ -316,6 +317,304 @@
       ]
     },
     {
+      "id": "google",
+      "name": "Google",
+      "env_key": "GEMINI_API_KEY",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "wire_api": "chat",
+      "sort_priority": 3,
+      "models": [
+        {
+          "id": "gemini-2.5-computer-use-preview-10-2025",
+          "display_name": "Gemini 2.5 Computer Use Preview 10-2025",
+          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 131072,
+          "priority": 0
+        },
+        {
+          "id": "deep-research-preview-04-2026",
+          "display_name": "Deep Research Preview (Apr-21-2026)",
+          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 131072,
+          "priority": 1
+        },
+        {
+          "id": "gemini-flash-latest",
+          "display_name": "Gemini Flash Latest",
+          "description": "gemini-flash \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 3
+        },
+        {
+          "id": "gemini-3.5-flash",
+          "display_name": "Gemini 3.5 Flash",
+          "description": "gemini-flash \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 6
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "display_name": "Gemini 2.5 Flash",
+          "description": "gemini-flash \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 7
+        },
+        {
+          "id": "gemini-3.5-flash-lite",
+          "display_name": "Gemini 3.5 Flash Lite",
+          "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 8
+        },
+        {
+          "id": "deep-research-max-preview-04-2026",
+          "display_name": "Deep Research Max Preview (Apr-21-2026)",
+          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 131072,
+          "priority": 12
+        },
+        {
+          "id": "gemini-3.1-flash-lite-preview",
+          "display_name": "Gemini 3.1 Flash Lite Preview",
+          "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 14
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "display_name": "Gemini 3 Flash Preview",
+          "description": "gemini-flash \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 16
+        },
+        {
+          "id": "gemini-3.1-pro-preview-customtools",
+          "display_name": "Gemini 3.1 Pro Preview Custom Tools",
+          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 17
+        },
+        {
+          "id": "gemini-3.1-flash-lite-image",
+          "display_name": "Nano Banana 2 Lite",
+          "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 65536,
+          "priority": 18
+        },
+        {
+          "id": "gemini-robotics-er-1.6-preview",
+          "display_name": "Gemini Robotics-ER 1.6 Preview",
+          "description": "gemini \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 131072,
+          "priority": 20
+        },
+        {
+          "id": "gemma-4-26b-a4b-it",
+          "display_name": "Gemma 4 26B A4B IT",
+          "description": "gemma \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 21
+        },
+        {
+          "id": "gemini-2.0-flash",
+          "display_name": "Gemini 2.0 Flash",
+          "description": "gemini-flash \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": false,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 24
+        },
+        {
+          "id": "gemini-3.6-flash",
+          "display_name": "Gemini 3.6 Flash",
+          "description": "gemini-flash \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 25
+        },
+        {
+          "id": "gemini-3.1-flash-lite",
+          "display_name": "Gemini 3.1 Flash Lite",
+          "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 27
+        },
+        {
+          "id": "gemma-4-31b-it",
+          "display_name": "Gemma 4 31B IT",
+          "description": "gemma \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 28
+        },
+        {
+          "id": "gemini-3.1-pro-preview",
+          "display_name": "Gemini 3.1 Pro Preview",
+          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 33
+        },
+        {
+          "id": "gemini-flash-lite-latest",
+          "display_name": "Gemini Flash-Lite Latest",
+          "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 34
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "display_name": "Gemini 2.5 Pro",
+          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 35
+        },
+        {
+          "id": "gemini-3-pro-preview",
+          "display_name": "Gemini 3 Pro Preview",
+          "description": "gemini-pro \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 36
+        },
+        {
+          "id": "gemini-2.5-flash-lite",
+          "display_name": "Gemini 2.5 Flash-Lite",
+          "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 37
+        },
+        {
+          "id": "gemini-2.0-flash-lite",
+          "display_name": "Gemini 2.0 Flash-Lite",
+          "description": "gemini-flash-lite \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": false,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": 39
+        },
+        {
+          "id": "gemini-3.1-flash-live-preview",
+          "display_name": "Gemini 3.1 Flash Live Preview",
+          "description": "gemini-flash \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 131072,
+          "priority": 40
+        }
+      ]
+    },
+    {
       "id": "openrouter",
       "name": "OpenRouter",
       "env_key": "OPENROUTER_API_KEY",
@@ -387,7 +686,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 7
+          "priority": 6
         },
         {
           "id": "meta-llama/llama-4-maverick",
@@ -399,7 +698,7 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 9
+          "priority": 8
         },
         {
           "id": "meta-llama/llama-3.3-70b-instruct:free",
@@ -410,7 +709,7 @@
             "text"
           ],
           "context_window": 65536,
-          "priority": 11
+          "priority": 10
         },
         {
           "id": "meta-llama/llama-3.3-70b-instruct",
@@ -421,7 +720,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 12
+          "priority": 11
         },
         {
           "id": "meta-llama/llama-4-scout",
@@ -433,7 +732,7 @@
             "image"
           ],
           "context_window": 327680,
-          "priority": 16
+          "priority": 15
         },
         {
           "id": "~anthropic/claude-haiku-latest",
@@ -445,7 +744,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 18
+          "priority": 17
         },
         {
           "id": "~anthropic/claude-fable-latest",
@@ -457,7 +756,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 19
+          "priority": 18
         },
         {
           "id": "~anthropic/claude-sonnet-latest",
@@ -469,7 +768,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 20
+          "priority": 19
         },
         {
           "id": "~anthropic/claude-opus-latest",
@@ -481,7 +780,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 21
+          "priority": 20
         },
         {
           "id": "moonshotai/kimi-k2",
@@ -492,7 +791,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 22
+          "priority": 21
         },
         {
           "id": "moonshotai/kimi-k2.7-code",
@@ -504,7 +803,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 23
+          "priority": 22
         },
         {
           "id": "moonshotai/kimi-k2-thinking",
@@ -515,7 +814,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 24
+          "priority": 23
         },
         {
           "id": "moonshotai/kimi-k2.5",
@@ -527,7 +826,7 @@
             "image"
           ],
           "context_window": 256000,
-          "priority": 25
+          "priority": 24
         },
         {
           "id": "moonshotai/kimi-k2.6",
@@ -539,7 +838,7 @@
             "image"
           ],
           "context_window": 262142,
-          "priority": 26
+          "priority": 25
         },
         {
           "id": "moonshotai/kimi-k2-0905",
@@ -550,7 +849,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 27
+          "priority": 26
         },
         {
           "id": "google/gemini-3.1-flash-lite",
@@ -562,7 +861,7 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 30
+          "priority": 29
         },
         {
           "id": "google/gemma-4-26b-a4b-it:free",
@@ -573,7 +872,7 @@
             "text",
             "image"
           ],
-          "context_window": 262144,
+          "context_window": 131072,
           "priority": 32
         },
         {
@@ -757,6 +1056,18 @@
           "priority": 53
         },
         {
+          "id": "google/gemini-3-pro-image",
+          "display_name": "Nano Banana Pro (Gemini 3 Pro Image)",
+          "description": "gemini \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 65536,
+          "priority": 55
+        },
+        {
           "id": "google/gemini-3.1-flash-lite-preview",
           "display_name": "Gemini 3.1 Flash Lite Preview",
           "description": "gemini-flash-lite \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
@@ -766,7 +1077,18 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 55
+          "priority": 56
+        },
+        {
+          "id": "liquid/lfm-2.5-1.2b-thinking:free",
+          "display_name": "LFM2.5-1.2B-Thinking (free)",
+          "description": "liquid \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 32768,
+          "priority": 57
         },
         {
           "id": "x-ai/grok-4.20",
@@ -778,7 +1100,7 @@
             "image"
           ],
           "context_window": 2000000,
-          "priority": 59
+          "priority": 60
         },
         {
           "id": "x-ai/grok-4.3",
@@ -790,7 +1112,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 60
+          "priority": 61
         },
         {
           "id": "x-ai/grok-build-0.1",
@@ -802,7 +1124,7 @@
             "image"
           ],
           "context_window": 256000,
-          "priority": 62
+          "priority": 63
         },
         {
           "id": "~google/gemini-pro-latest",
@@ -814,7 +1136,7 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 63
+          "priority": 64
         },
         {
           "id": "~google/gemini-flash-latest",
@@ -826,7 +1148,18 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 64
+          "priority": 65
+        },
+        {
+          "id": "poolside/laguna-xs.2",
+          "display_name": "Laguna XS.2",
+          "description": "Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 262144,
+          "priority": 69
         },
         {
           "id": "poolside/laguna-xs.2:free",
@@ -837,7 +1170,18 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 68
+          "priority": 70
+        },
+        {
+          "id": "poolside/laguna-m.1",
+          "display_name": "Laguna M.1",
+          "description": "Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 262144,
+          "priority": 71
         },
         {
           "id": "poolside/laguna-m.1:free",
@@ -848,7 +1192,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 69
+          "priority": 72
         },
         {
           "id": "z-ai/glm-4.7",
@@ -859,7 +1203,7 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 71
+          "priority": 74
         },
         {
           "id": "z-ai/glm-4.5v",
@@ -871,7 +1215,7 @@
             "image"
           ],
           "context_window": 65536,
-          "priority": 72
+          "priority": 75
         },
         {
           "id": "z-ai/glm-4.5",
@@ -882,7 +1226,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 73
+          "priority": 76
         },
         {
           "id": "z-ai/glm-5.1",
@@ -893,7 +1237,7 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 74
+          "priority": 77
         },
         {
           "id": "z-ai/glm-4.6",
@@ -904,7 +1248,18 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 75
+          "priority": 78
+        },
+        {
+          "id": "z-ai/glm-5.2",
+          "display_name": "GLM-5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 1048576,
+          "priority": 79
         },
         {
           "id": "z-ai/glm-4.6v",
@@ -916,7 +1271,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 76
+          "priority": 80
         },
         {
           "id": "z-ai/glm-4.5-air",
@@ -926,8 +1281,8 @@
           "input_modalities": [
             "text"
           ],
-          "context_window": 131070,
-          "priority": 77
+          "context_window": 131072,
+          "priority": 81
         },
         {
           "id": "z-ai/glm-4.7-flash",
@@ -938,7 +1293,7 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 78
+          "priority": 82
         },
         {
           "id": "z-ai/glm-5",
@@ -949,7 +1304,7 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 79
+          "priority": 83
         },
         {
           "id": "z-ai/glm-5-turbo",
@@ -960,7 +1315,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 80
+          "priority": 84
         },
         {
           "id": "openai/gpt-4o-mini-2024-07-18",
@@ -972,7 +1327,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 81
+          "priority": 85
         },
         {
           "id": "openai/gpt-oss-safeguard-20b",
@@ -983,7 +1338,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 82
+          "priority": 86
         },
         {
           "id": "openai/gpt-5.2-chat",
@@ -995,7 +1350,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 84
+          "priority": 88
         },
         {
           "id": "openai/o3",
@@ -1007,7 +1362,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 85
+          "priority": 89
         },
         {
           "id": "openai/o4-mini-high",
@@ -1019,7 +1374,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 86
+          "priority": 90
         },
         {
           "id": "openai/gpt-audio",
@@ -1030,7 +1385,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 87
+          "priority": 91
         },
         {
           "id": "openai/gpt-5.2-pro",
@@ -1042,7 +1397,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 88
+          "priority": 92
         },
         {
           "id": "openai/gpt-5",
@@ -1054,7 +1409,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 90
+          "priority": 94
         },
         {
           "id": "openai/gpt-3.5-turbo",
@@ -1065,7 +1420,7 @@
             "text"
           ],
           "context_window": 16385,
-          "priority": 92
+          "priority": 96
         },
         {
           "id": "openai/gpt-5-pro",
@@ -1077,7 +1432,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 93
+          "priority": 97
         },
         {
           "id": "openai/gpt-4o",
@@ -1089,7 +1444,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 94
+          "priority": 98
         },
         {
           "id": "openai/gpt-4",
@@ -1100,7 +1455,7 @@
             "text"
           ],
           "context_window": 8191,
-          "priority": 95
+          "priority": 99
         },
         {
           "id": "openai/o4-mini",
@@ -1112,7 +1467,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 96
+          "priority": 100
         },
         {
           "id": "openai/gpt-3.5-turbo-16k",
@@ -1123,7 +1478,7 @@
             "text"
           ],
           "context_window": 16385,
-          "priority": 97
+          "priority": 101
         },
         {
           "id": "openai/o3-pro",
@@ -1135,7 +1490,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 98
+          "priority": 102
         },
         {
           "id": "openai/gpt-5.1-chat",
@@ -1147,7 +1502,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 99
+          "priority": 103
         },
         {
           "id": "openai/gpt-4o-2024-05-13",
@@ -1159,7 +1514,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 100
+          "priority": 104
         },
         {
           "id": "openai/gpt-5.4-nano",
@@ -1171,7 +1526,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 101
+          "priority": 105
         },
         {
           "id": "openai/gpt-5.3-chat",
@@ -1183,7 +1538,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 102
+          "priority": 106
         },
         {
           "id": "openai/gpt-3.5-turbo-0613",
@@ -1194,7 +1549,7 @@
             "text"
           ],
           "context_window": 4095,
-          "priority": 103
+          "priority": 107
         },
         {
           "id": "openai/gpt-5.1-codex",
@@ -1206,7 +1561,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 105
+          "priority": 109
         },
         {
           "id": "openai/gpt-5.1-codex-max",
@@ -1218,7 +1573,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 106
+          "priority": 110
         },
         {
           "id": "openai/gpt-oss-120b:free",
@@ -1229,7 +1584,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 107
+          "priority": 111
         },
         {
           "id": "openai/gpt-4o-2024-08-06",
@@ -1241,7 +1596,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 108
+          "priority": 112
         },
         {
           "id": "openai/o3-mini",
@@ -1252,7 +1607,7 @@
             "text"
           ],
           "context_window": 200000,
-          "priority": 109
+          "priority": 113
         },
         {
           "id": "openai/gpt-5.2",
@@ -1264,7 +1619,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 110
+          "priority": 114
         },
         {
           "id": "openai/gpt-5.3-codex",
@@ -1276,7 +1631,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 111
+          "priority": 115
         },
         {
           "id": "openai/gpt-audio-mini",
@@ -1287,7 +1642,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 112
+          "priority": 116
         },
         {
           "id": "openai/gpt-5.1-codex-mini",
@@ -1299,7 +1654,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 113
+          "priority": 117
         },
         {
           "id": "openai/o4-mini-deep-research",
@@ -1311,7 +1666,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 114
+          "priority": 118
         },
         {
           "id": "openai/gpt-4.1-nano",
@@ -1323,7 +1678,7 @@
             "image"
           ],
           "context_window": 1047576,
-          "priority": 115
+          "priority": 119
         },
         {
           "id": "openai/gpt-oss-120b",
@@ -1334,7 +1689,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 116
+          "priority": 120
         },
         {
           "id": "openai/gpt-4o-2024-11-20",
@@ -1346,7 +1701,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 117
+          "priority": 121
         },
         {
           "id": "openai/o1",
@@ -1358,7 +1713,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 118
+          "priority": 122
         },
         {
           "id": "openai/gpt-chat-latest",
@@ -1370,7 +1725,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 120
+          "priority": 124
         },
         {
           "id": "openai/gpt-5.4",
@@ -1382,7 +1737,7 @@
             "image"
           ],
           "context_window": 1050000,
-          "priority": 122
+          "priority": 126
         },
         {
           "id": "openai/gpt-5.4-mini",
@@ -1394,7 +1749,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 123
+          "priority": 127
         },
         {
           "id": "openai/gpt-4.1",
@@ -1406,7 +1761,7 @@
             "image"
           ],
           "context_window": 1047576,
-          "priority": 124
+          "priority": 128
         },
         {
           "id": "openai/o3-deep-research",
@@ -1418,7 +1773,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 125
+          "priority": 129
         },
         {
           "id": "openai/gpt-4-turbo-preview",
@@ -1429,7 +1784,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 126
+          "priority": 130
         },
         {
           "id": "openai/gpt-5-mini",
@@ -1441,7 +1796,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 127
+          "priority": 131
         },
         {
           "id": "openai/gpt-4.1-mini",
@@ -1453,7 +1808,7 @@
             "image"
           ],
           "context_window": 1047576,
-          "priority": 128
+          "priority": 132
         },
         {
           "id": "openai/gpt-4-turbo",
@@ -1465,7 +1820,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 129
+          "priority": 133
         },
         {
           "id": "openai/gpt-5-nano",
@@ -1477,7 +1832,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 130
+          "priority": 134
         },
         {
           "id": "openai/gpt-5.4-pro",
@@ -1489,7 +1844,7 @@
             "image"
           ],
           "context_window": 1050000,
-          "priority": 131
+          "priority": 135
         },
         {
           "id": "openai/o3-mini-high",
@@ -1500,7 +1855,7 @@
             "text"
           ],
           "context_window": 200000,
-          "priority": 132
+          "priority": 136
         },
         {
           "id": "openai/gpt-5.5-pro",
@@ -1512,7 +1867,7 @@
             "image"
           ],
           "context_window": 1050000,
-          "priority": 135
+          "priority": 139
         },
         {
           "id": "openai/gpt-4o-mini",
@@ -1524,7 +1879,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 136
+          "priority": 140
         },
         {
           "id": "openai/gpt-oss-20b",
@@ -1535,7 +1890,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 137
+          "priority": 141
         },
         {
           "id": "openai/gpt-5-codex",
@@ -1547,7 +1902,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 138
+          "priority": 142
         },
         {
           "id": "openai/gpt-5.2-codex",
@@ -1559,7 +1914,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 139
+          "priority": 143
         },
         {
           "id": "openai/gpt-oss-20b:free",
@@ -1570,7 +1925,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 140
+          "priority": 144
         },
         {
           "id": "openai/gpt-5.1",
@@ -1582,7 +1937,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 141
+          "priority": 145
         },
         {
           "id": "openai/gpt-5.5",
@@ -1594,7 +1949,7 @@
             "image"
           ],
           "context_window": 1050000,
-          "priority": 142
+          "priority": 146
         },
         {
           "id": "thedrummer/unslopnemo-12b",
@@ -1605,7 +1960,7 @@
             "text"
           ],
           "context_window": 32768,
-          "priority": 145
+          "priority": 149
         },
         {
           "id": "thedrummer/rocinante-12b",
@@ -1616,7 +1971,7 @@
             "text"
           ],
           "context_window": 32768,
-          "priority": 146
+          "priority": 150
         },
         {
           "id": "rekaai/reka-edge",
@@ -1628,7 +1983,7 @@
             "image"
           ],
           "context_window": 16384,
-          "priority": 149
+          "priority": 153
         },
         {
           "id": "mistralai/mistral-large-2407",
@@ -1639,7 +1994,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 150
+          "priority": 154
         },
         {
           "id": "mistralai/mistral-small-3.2-24b-instruct",
@@ -1651,7 +2006,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 151
+          "priority": 155
         },
         {
           "id": "mistralai/mistral-nemo",
@@ -1662,7 +2017,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 152
+          "priority": 156
         },
         {
           "id": "mistralai/mistral-medium-3-5",
@@ -1674,7 +2029,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 153
+          "priority": 157
         },
         {
           "id": "mistralai/ministral-8b-2512",
@@ -1686,7 +2041,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 154
+          "priority": 158
         },
         {
           "id": "mistralai/mistral-saba",
@@ -1697,7 +2052,7 @@
             "text"
           ],
           "context_window": 32768,
-          "priority": 156
+          "priority": 160
         },
         {
           "id": "mistralai/mistral-large",
@@ -1708,7 +2063,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 157
+          "priority": 161
         },
         {
           "id": "mistralai/mistral-medium-3.1",
@@ -1720,7 +2075,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 158
+          "priority": 162
         },
         {
           "id": "mistralai/ministral-3b-2512",
@@ -1732,7 +2087,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 160
+          "priority": 164
         },
         {
           "id": "mistralai/mistral-small-2603",
@@ -1744,7 +2099,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 161
+          "priority": 165
         },
         {
           "id": "mistralai/ministral-14b-2512",
@@ -1756,7 +2111,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 162
+          "priority": 166
         },
         {
           "id": "mistralai/devstral-2512",
@@ -1767,7 +2122,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 163
+          "priority": 167
         },
         {
           "id": "mistralai/mixtral-8x22b-instruct",
@@ -1778,7 +2133,7 @@
             "text"
           ],
           "context_window": 65536,
-          "priority": 164
+          "priority": 168
         },
         {
           "id": "mistralai/mistral-medium-3",
@@ -1790,7 +2145,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 165
+          "priority": 169
         },
         {
           "id": "mistralai/voxtral-small-24b-2507",
@@ -1801,7 +2156,7 @@
             "text"
           ],
           "context_window": 32000,
-          "priority": 166
+          "priority": 170
         },
         {
           "id": "mistralai/mistral-large-2512",
@@ -1813,7 +2168,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 167
+          "priority": 171
         },
         {
           "id": "mistralai/codestral-2508",
@@ -1824,7 +2179,7 @@
             "text"
           ],
           "context_window": 256000,
-          "priority": 168
+          "priority": 172
         },
         {
           "id": "bytedance-seed/seed-1.6-flash",
@@ -1836,7 +2191,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 171
+          "priority": 175
         },
         {
           "id": "bytedance-seed/seed-1.6",
@@ -1848,7 +2203,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 172
+          "priority": 176
         },
         {
           "id": "bytedance-seed/seed-2.0-mini",
@@ -1860,7 +2215,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 173
+          "priority": 177
         },
         {
           "id": "bytedance-seed/seed-2.0-lite",
@@ -1872,7 +2227,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 174
+          "priority": 178
         },
         {
           "id": "nvidia/nemotron-3-nano-30b-a3b:free",
@@ -1883,7 +2238,7 @@
             "text"
           ],
           "context_window": 256000,
-          "priority": 176
+          "priority": 180
         },
         {
           "id": "nvidia/nemotron-nano-9b-v2:free",
@@ -1894,7 +2249,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 177
+          "priority": 181
         },
         {
           "id": "nvidia/nemotron-nano-12b-v2-vl:free",
@@ -1906,7 +2261,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 178
+          "priority": 182
         },
         {
           "id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
@@ -1918,7 +2273,7 @@
             "image"
           ],
           "context_window": 256000,
-          "priority": 179
+          "priority": 183
         },
         {
           "id": "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -1929,7 +2284,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 180
+          "priority": 184
         },
         {
           "id": "nvidia/nemotron-3-ultra-550b-a55b",
@@ -1940,7 +2295,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 181
+          "priority": 185
         },
         {
           "id": "nvidia/nemotron-3-nano-30b-a3b",
@@ -1951,7 +2306,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 183
+          "priority": 187
         },
         {
           "id": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
@@ -1962,7 +2317,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 184
+          "priority": 188
         },
         {
           "id": "nvidia/nemotron-3-super-120b-a12b:free",
@@ -1973,7 +2328,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 185
+          "priority": 189
         },
         {
           "id": "nvidia/nemotron-3-super-120b-a12b",
@@ -1984,7 +2339,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 186
+          "priority": 190
         },
         {
           "id": "xiaomi/mimo-v2.5",
@@ -1996,18 +2351,7 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 188
-        },
-        {
-          "id": "xiaomi/mimo-v2-flash",
-          "display_name": "MiMo-V2-Flash",
-          "description": "mimo \u2022 Reasoning \u2022 Tool calling",
-          "reasoning": true,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 262144,
-          "priority": 189
+          "priority": 192
         },
         {
           "id": "xiaomi/mimo-v2.5-pro",
@@ -2018,7 +2362,7 @@
             "text"
           ],
           "context_window": 1048576,
-          "priority": 190
+          "priority": 193
         },
         {
           "id": "inception/mercury-2",
@@ -2029,7 +2373,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 191
+          "priority": 194
         },
         {
           "id": "anthropic/claude-3.5-haiku",
@@ -2041,7 +2385,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 192
+          "priority": 195
         },
         {
           "id": "anthropic/claude-sonnet-4.5",
@@ -2053,7 +2397,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 193
+          "priority": 196
         },
         {
           "id": "anthropic/claude-sonnet-4",
@@ -2065,7 +2409,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 194
+          "priority": 197
         },
         {
           "id": "anthropic/claude-opus-4.6-fast",
@@ -2077,7 +2421,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 195
+          "priority": 198
         },
         {
           "id": "anthropic/claude-haiku-4.5",
@@ -2089,7 +2433,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 196
+          "priority": 199
         },
         {
           "id": "anthropic/claude-opus-4.7-fast",
@@ -2101,7 +2445,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 197
+          "priority": 200
         },
         {
           "id": "anthropic/claude-opus-4.7",
@@ -2113,7 +2457,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 198
+          "priority": 201
         },
         {
           "id": "anthropic/claude-opus-4.8",
@@ -2125,19 +2469,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 199
-        },
-        {
-          "id": "anthropic/claude-fable-5",
-          "display_name": "Claude Fable 5",
-          "description": "claude-fable \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
-          "reasoning": true,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 1000000,
-          "priority": 200
+          "priority": 202
         },
         {
           "id": "anthropic/claude-opus-4.1",
@@ -2149,7 +2481,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 201
+          "priority": 203
         },
         {
           "id": "anthropic/claude-opus-4.5",
@@ -2161,7 +2493,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 202
+          "priority": 204
         },
         {
           "id": "anthropic/claude-sonnet-4.6",
@@ -2173,7 +2505,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 203
+          "priority": 205
         },
         {
           "id": "anthropic/claude-3-haiku",
@@ -2185,7 +2517,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 204
+          "priority": 206
         },
         {
           "id": "anthropic/claude-opus-4",
@@ -2197,7 +2529,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 205
+          "priority": 207
         },
         {
           "id": "anthropic/claude-opus-4.8-fast",
@@ -2209,7 +2541,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 206
+          "priority": 208
         },
         {
           "id": "anthropic/claude-opus-4.6",
@@ -2221,7 +2553,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 207
+          "priority": 209
         },
         {
           "id": "tencent/hy3-preview",
@@ -2232,7 +2564,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 209
+          "priority": 211
         },
         {
           "id": "cohere/command-r-08-2024",
@@ -2243,7 +2575,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 212
+          "priority": 214
         },
         {
           "id": "cohere/command-r-plus-08-2024",
@@ -2254,7 +2586,18 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 214
+          "priority": 216
+        },
+        {
+          "id": "cohere/north-mini-code:free",
+          "display_name": "North Mini Code (free)",
+          "description": "north \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 256000,
+          "priority": 217
         },
         {
           "id": "stepfun/step-3.7-flash",
@@ -2266,7 +2609,7 @@
             "image"
           ],
           "context_window": 256000,
-          "priority": 216
+          "priority": 219
         },
         {
           "id": "stepfun/step-3.5-flash",
@@ -2277,7 +2620,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 217
+          "priority": 220
         },
         {
           "id": "prime-intellect/intellect-3",
@@ -2288,19 +2631,19 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 218
+          "priority": 221
         },
         {
           "id": "nex-agi/nex-n2-pro:free",
           "display_name": "Nex-N2-Pro (free)",
-          "description": "Reasoning \u2022 Tool calling \u2022 Image input",
+          "description": "agi \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
           "reasoning": true,
           "input_modalities": [
             "text",
             "image"
           ],
           "context_window": 262144,
-          "priority": 219
+          "priority": 222
         },
         {
           "id": "~openai/gpt-mini-latest",
@@ -2312,7 +2655,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 221
+          "priority": 224
         },
         {
           "id": "~openai/gpt-latest",
@@ -2324,7 +2667,7 @@
             "image"
           ],
           "context_window": 1050000,
-          "priority": 222
+          "priority": 225
         },
         {
           "id": "~moonshotai/kimi-latest",
@@ -2336,7 +2679,7 @@
             "image"
           ],
           "context_window": 262142,
-          "priority": 223
+          "priority": 226
         },
         {
           "id": "relace/relace-search",
@@ -2347,7 +2690,7 @@
             "text"
           ],
           "context_window": 256000,
-          "priority": 224
+          "priority": 227
         },
         {
           "id": "ai21/jamba-large-1.7",
@@ -2358,7 +2701,7 @@
             "text"
           ],
           "context_window": 256000,
-          "priority": 226
+          "priority": 229
         },
         {
           "id": "arcee-ai/virtuoso-large",
@@ -2369,7 +2712,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 228
+          "priority": 231
         },
         {
           "id": "arcee-ai/trinity-large-thinking",
@@ -2380,7 +2723,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 229
+          "priority": 232
         },
         {
           "id": "arcee-ai/trinity-mini",
@@ -2391,7 +2734,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 230
+          "priority": 233
         },
         {
           "id": "openrouter/free",
@@ -2403,7 +2746,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 239
+          "priority": 242
         },
         {
           "id": "openrouter/owl-alpha",
@@ -2414,7 +2757,7 @@
             "text"
           ],
           "context_window": 1048756,
-          "priority": 241
+          "priority": 244
         },
         {
           "id": "openrouter/auto",
@@ -2426,7 +2769,7 @@
             "image"
           ],
           "context_window": 2000000,
-          "priority": 243
+          "priority": 246
         },
         {
           "id": "qwen/qwen3.5-plus-20260420",
@@ -2438,7 +2781,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 244
+          "priority": 247
         },
         {
           "id": "qwen/qwen3-next-80b-a3b-instruct:free",
@@ -2449,7 +2792,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 245
+          "priority": 248
         },
         {
           "id": "qwen/qwen3-vl-235b-a22b-thinking",
@@ -2461,7 +2804,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 246
+          "priority": 249
         },
         {
           "id": "qwen/qwen3-vl-30b-a3b-thinking",
@@ -2473,7 +2816,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 247
+          "priority": 250
         },
         {
           "id": "qwen/qwen3-coder-plus",
@@ -2484,7 +2827,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 248
+          "priority": 251
         },
         {
           "id": "qwen/qwen-plus",
@@ -2495,7 +2838,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 249
+          "priority": 252
         },
         {
           "id": "qwen/qwen3-coder-30b-a3b-instruct",
@@ -2506,7 +2849,7 @@
             "text"
           ],
           "context_window": 160000,
-          "priority": 250
+          "priority": 253
         },
         {
           "id": "qwen/qwen3-32b",
@@ -2517,7 +2860,7 @@
             "text"
           ],
           "context_window": 40960,
-          "priority": 251
+          "priority": 254
         },
         {
           "id": "qwen/qwen3-next-80b-a3b-instruct",
@@ -2528,7 +2871,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 252
+          "priority": 255
         },
         {
           "id": "qwen/qwen3-vl-8b-instruct",
@@ -2540,7 +2883,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 253
+          "priority": 256
         },
         {
           "id": "qwen/qwen3.7-plus",
@@ -2552,7 +2895,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 254
+          "priority": 257
         },
         {
           "id": "qwen/qwen3.6-35b-a3b",
@@ -2564,7 +2907,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 255
+          "priority": 258
         },
         {
           "id": "qwen/qwen3.7-max",
@@ -2575,7 +2918,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 256
+          "priority": 259
         },
         {
           "id": "qwen/qwen3-max",
@@ -2586,7 +2929,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 257
+          "priority": 260
         },
         {
           "id": "qwen/qwen3-8b",
@@ -2597,7 +2940,7 @@
             "text"
           ],
           "context_window": 40960,
-          "priority": 258
+          "priority": 261
         },
         {
           "id": "qwen/qwen-plus-2025-07-28",
@@ -2608,7 +2951,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 259
+          "priority": 262
         },
         {
           "id": "qwen/qwen3.5-flash-02-23",
@@ -2620,7 +2963,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 260
+          "priority": 263
         },
         {
           "id": "qwen/qwen3-coder:free",
@@ -2631,7 +2974,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 261
+          "priority": 264
         },
         {
           "id": "qwen/qwen3-30b-a3b-instruct-2507",
@@ -2642,7 +2985,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 262
+          "priority": 265
         },
         {
           "id": "qwen/qwen3-next-80b-a3b-thinking",
@@ -2653,7 +2996,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 264
+          "priority": 267
         },
         {
           "id": "qwen/qwen3-235b-a22b-thinking-2507",
@@ -2664,7 +3007,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 265
+          "priority": 268
         },
         {
           "id": "qwen/qwen3-vl-32b-instruct",
@@ -2676,7 +3019,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 266
+          "priority": 269
         },
         {
           "id": "qwen/qwen3-coder",
@@ -2687,7 +3030,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 267
+          "priority": 270
         },
         {
           "id": "qwen/qwen3.6-flash",
@@ -2699,7 +3042,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 268
+          "priority": 271
         },
         {
           "id": "qwen/qwen3.5-plus-02-15",
@@ -2711,7 +3054,18 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 269
+          "priority": 272
+        },
+        {
+          "id": "qwen/qwen-2.5-7b-instruct",
+          "display_name": "Qwen2.5 7B Instruct",
+          "description": "qwen \u2022 Tool calling",
+          "reasoning": false,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 32768,
+          "priority": 273
         },
         {
           "id": "qwen/qwen3-vl-8b-thinking",
@@ -2723,7 +3077,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 271
+          "priority": 274
         },
         {
           "id": "qwen/qwen3-max-thinking",
@@ -2734,7 +3088,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 272
+          "priority": 275
         },
         {
           "id": "qwen/qwen3-30b-a3b-thinking-2507",
@@ -2745,7 +3099,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 273
+          "priority": 276
         },
         {
           "id": "qwen/qwen3.5-27b",
@@ -2757,7 +3111,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 275
+          "priority": 278
         },
         {
           "id": "qwen/qwen3-235b-a22b",
@@ -2768,7 +3122,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 276
+          "priority": 279
         },
         {
           "id": "qwen/qwen-2.5-72b-instruct",
@@ -2779,7 +3133,7 @@
             "text"
           ],
           "context_window": 32768,
-          "priority": 277
+          "priority": 280
         },
         {
           "id": "qwen/qwen-plus-2025-07-28:thinking",
@@ -2790,7 +3144,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 278
+          "priority": 281
         },
         {
           "id": "qwen/qwen3-coder-next",
@@ -2801,7 +3155,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 279
+          "priority": 282
         },
         {
           "id": "qwen/qwen3.6-27b",
@@ -2813,7 +3167,7 @@
             "image"
           ],
           "context_window": 262140,
-          "priority": 280
+          "priority": 283
         },
         {
           "id": "qwen/qwen3.5-35b-a3b",
@@ -2825,19 +3179,19 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 281
+          "priority": 284
         },
         {
           "id": "qwen/qwen3.5-9b",
-          "display_name": "Qwen3.5-9B",
-          "description": "qwen3.5 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "display_name": "Qwen3.5 9B",
+          "description": "qwen \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
           "reasoning": true,
           "input_modalities": [
             "text",
             "image"
           ],
           "context_window": 262144,
-          "priority": 282
+          "priority": 285
         },
         {
           "id": "qwen/qwen3.5-397b-a17b",
@@ -2848,8 +3202,8 @@
             "text",
             "image"
           ],
-          "context_window": 262144,
-          "priority": 283
+          "context_window": 131072,
+          "priority": 286
         },
         {
           "id": "qwen/qwen3-vl-30b-a3b-instruct",
@@ -2861,7 +3215,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 284
+          "priority": 287
         },
         {
           "id": "qwen/qwen3-235b-a22b-2507",
@@ -2872,7 +3226,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 285
+          "priority": 288
         },
         {
           "id": "qwen/qwen3-coder-flash",
@@ -2883,7 +3237,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 286
+          "priority": 289
         },
         {
           "id": "qwen/qwen3-14b",
@@ -2894,7 +3248,7 @@
             "text"
           ],
           "context_window": 40960,
-          "priority": 287
+          "priority": 290
         },
         {
           "id": "qwen/qwen3-vl-235b-a22b-instruct",
@@ -2906,7 +3260,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 288
+          "priority": 291
         },
         {
           "id": "qwen/qwen3-30b-a3b",
@@ -2917,7 +3271,7 @@
             "text"
           ],
           "context_window": 40960,
-          "priority": 289
+          "priority": 292
         },
         {
           "id": "qwen/qwen3.6-max-preview",
@@ -2928,7 +3282,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 290
+          "priority": 293
         },
         {
           "id": "qwen/qwen3.5-122b-a10b",
@@ -2940,7 +3294,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 291
+          "priority": 294
         },
         {
           "id": "qwen/qwen3.6-plus",
@@ -2952,7 +3306,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 292
+          "priority": 295
         },
         {
           "id": "amazon/nova-lite-v1",
@@ -2964,7 +3318,7 @@
             "image"
           ],
           "context_window": 300000,
-          "priority": 293
+          "priority": 296
         },
         {
           "id": "amazon/nova-premier-v1",
@@ -2976,7 +3330,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 294
+          "priority": 297
         },
         {
           "id": "amazon/nova-pro-v1",
@@ -2988,7 +3342,7 @@
             "image"
           ],
           "context_window": 300000,
-          "priority": 295
+          "priority": 298
         },
         {
           "id": "amazon/nova-micro-v1",
@@ -2999,7 +3353,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 296
+          "priority": 299
         },
         {
           "id": "amazon/nova-2-lite-v1",
@@ -3011,7 +3365,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 297
+          "priority": 300
         },
         {
           "id": "sao10k/l3.1-euryale-70b",
@@ -3022,7 +3376,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 304
+          "priority": 307
         },
         {
           "id": "upstage/solar-pro-3",
@@ -3033,7 +3387,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 308
+          "priority": 311
         },
         {
           "id": "essentialai/rnj-1-instruct",
@@ -3044,7 +3398,7 @@
             "text"
           ],
           "context_window": 32768,
-          "priority": 310
+          "priority": 313
         },
         {
           "id": "deepseek/deepseek-r1-0528",
@@ -3055,7 +3409,7 @@
             "text"
           ],
           "context_window": 163840,
-          "priority": 311
+          "priority": 314
         },
         {
           "id": "deepseek/deepseek-v4-flash",
@@ -3066,7 +3420,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 312
+          "priority": 315
         },
         {
           "id": "deepseek/deepseek-v3.1-terminus",
@@ -3077,7 +3431,7 @@
             "text"
           ],
           "context_window": 163840,
-          "priority": 313
+          "priority": 316
         },
         {
           "id": "deepseek/deepseek-v4-pro",
@@ -3088,7 +3442,7 @@
             "text"
           ],
           "context_window": 1048576,
-          "priority": 315
+          "priority": 318
         },
         {
           "id": "deepseek/deepseek-r1",
@@ -3099,7 +3453,7 @@
             "text"
           ],
           "context_window": 64000,
-          "priority": 316
+          "priority": 319
         },
         {
           "id": "deepseek/deepseek-v3.2-exp",
@@ -3110,7 +3464,7 @@
             "text"
           ],
           "context_window": 163840,
-          "priority": 317
+          "priority": 320
         },
         {
           "id": "deepseek/deepseek-chat-v3-0324",
@@ -3121,7 +3475,7 @@
             "text"
           ],
           "context_window": 163840,
-          "priority": 318
+          "priority": 321
         },
         {
           "id": "deepseek/deepseek-chat",
@@ -3132,7 +3486,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 320
+          "priority": 322
         },
         {
           "id": "deepseek/deepseek-v3.2",
@@ -3143,7 +3497,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 321
+          "priority": 323
         },
         {
           "id": "deepseek/deepseek-chat-v3.1",
@@ -3154,7 +3508,7 @@
             "text"
           ],
           "context_window": 163840,
-          "priority": 322
+          "priority": 324
         },
         {
           "id": "minimax/minimax-m2.5",
@@ -3165,7 +3519,7 @@
             "text"
           ],
           "context_window": 196608,
-          "priority": 323
+          "priority": 325
         },
         {
           "id": "minimax/minimax-m2.1",
@@ -3176,7 +3530,7 @@
             "text"
           ],
           "context_window": 196608,
-          "priority": 324
+          "priority": 326
         },
         {
           "id": "minimax/minimax-m3",
@@ -3188,7 +3542,7 @@
             "image"
           ],
           "context_window": 524288,
-          "priority": 326
+          "priority": 328
         },
         {
           "id": "minimax/minimax-m2",
@@ -3199,7 +3553,7 @@
             "text"
           ],
           "context_window": 196608,
-          "priority": 327
+          "priority": 329
         },
         {
           "id": "minimax/minimax-m2.7",
@@ -3210,7 +3564,7 @@
             "text"
           ],
           "context_window": 196608,
-          "priority": 329
+          "priority": 331
         },
         {
           "id": "minimax/minimax-m1",
@@ -3221,7 +3575,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 330
+          "priority": 332
         },
         {
           "id": "kwaipilot/kat-coder-pro-v2",
@@ -3232,7 +3586,7 @@
             "text"
           ],
           "context_window": 256000,
-          "priority": 331
+          "priority": 333
         }
       ]
     },
@@ -4795,6 +5149,17 @@
           "priority": 6
         },
         {
+          "id": "glm-5.2",
+          "display_name": "GLM-5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 1000000,
+          "priority": 7
+        },
+        {
           "id": "minimax-m3",
           "display_name": "MiniMax M3 (3x usage)",
           "description": "minimax-m3 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
@@ -4804,7 +5169,7 @@
             "image"
           ],
           "context_window": 512000,
-          "priority": 7
+          "priority": 8
         },
         {
           "id": "qwen3.5-plus",
@@ -4816,7 +5181,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 8
+          "priority": 9
         },
         {
           "id": "minimax-m2.7",
@@ -4827,7 +5192,7 @@
             "text"
           ],
           "context_window": 204800,
-          "priority": 9
+          "priority": 10
         },
         {
           "id": "kimi-k2.5",
@@ -4839,7 +5204,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 10
+          "priority": 11
         },
         {
           "id": "mimo-v2.5",
@@ -4851,7 +5216,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 11
+          "priority": 12
         },
         {
           "id": "mimo-v2-omni",
@@ -4863,7 +5228,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 12
+          "priority": 13
         },
         {
           "id": "kimi-k2.6",
@@ -4875,7 +5240,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 13
+          "priority": 14
         },
         {
           "id": "mimo-v2-pro",
@@ -4886,7 +5251,7 @@
             "text"
           ],
           "context_window": 1048576,
-          "priority": 14
+          "priority": 15
         },
         {
           "id": "mimo-v2.5-pro",
@@ -4897,7 +5262,7 @@
             "text"
           ],
           "context_window": 1048576,
-          "priority": 15
+          "priority": 16
         },
         {
           "id": "glm-5",
@@ -4908,7 +5273,7 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 16
+          "priority": 17
         },
         {
           "id": "qwen3.6-plus",
@@ -4920,7 +5285,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 17
+          "priority": 18
         }
       ]
     },
@@ -4933,18 +5298,6 @@
       "sort_priority": 28,
       "models": [
         {
-          "id": "raptor-mini",
-          "display_name": "Raptor mini",
-          "description": "gpt-mini \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
-          "reasoning": true,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 400000,
-          "priority": 0
-        },
-        {
           "id": "claude-sonnet-4.5",
           "display_name": "Claude Sonnet 4.5 (latest)",
           "description": "claude-sonnet \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
@@ -4954,7 +5307,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 1
+          "priority": 0
         },
         {
           "id": "claude-sonnet-4",
@@ -4966,7 +5319,7 @@
             "image"
           ],
           "context_window": 216000,
-          "priority": 2
+          "priority": 1
         },
         {
           "id": "gemini-2.5-pro",
@@ -4978,7 +5331,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 3
+          "priority": 2
         },
         {
           "id": "claude-haiku-4.5",
@@ -4990,7 +5343,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 4
+          "priority": 3
         },
         {
           "id": "gemini-3.5-flash",
@@ -5002,7 +5355,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 5
+          "priority": 4
         },
         {
           "id": "gpt-5.4-nano",
@@ -5014,7 +5367,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 6
+          "priority": 5
         },
         {
           "id": "claude-opus-4.7",
@@ -5026,7 +5379,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 7
+          "priority": 6
         },
         {
           "id": "gpt-5.2",
@@ -5038,7 +5391,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 8
+          "priority": 7
         },
         {
           "id": "gpt-5.3-codex",
@@ -5050,7 +5403,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 9
+          "priority": 8
         },
         {
           "id": "claude-opus-4.8",
@@ -5062,7 +5415,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 10
+          "priority": 9
         },
         {
           "id": "claude-fable-5",
@@ -5074,7 +5427,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 11
+          "priority": 10
         },
         {
           "id": "claude-opus-4.5",
@@ -5086,7 +5439,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 12
+          "priority": 11
         },
         {
           "id": "gpt-5.4",
@@ -5098,7 +5451,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 13
+          "priority": 12
         },
         {
           "id": "gpt-5.4-mini",
@@ -5110,7 +5463,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 14
+          "priority": 13
         },
         {
           "id": "gpt-4.1",
@@ -5122,7 +5475,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 15
+          "priority": 14
         },
         {
           "id": "gemini-3.1-pro-preview",
@@ -5134,7 +5487,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 16
+          "priority": 15
         },
         {
           "id": "claude-sonnet-4.6",
@@ -5146,7 +5499,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 17
+          "priority": 16
         },
         {
           "id": "gpt-5-mini",
@@ -5158,7 +5511,7 @@
             "image"
           ],
           "context_window": 264000,
-          "priority": 18
+          "priority": 17
         },
         {
           "id": "gemini-3-flash-preview",
@@ -5170,7 +5523,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 19
+          "priority": 18
         },
         {
           "id": "claude-opus-4.6",
@@ -5182,7 +5535,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 20
+          "priority": 19
         },
         {
           "id": "gpt-5.2-codex",
@@ -5194,7 +5547,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 21
+          "priority": 20
         },
         {
           "id": "gpt-5.5",
@@ -5206,7 +5559,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 22
+          "priority": 21
         }
       ]
     },
@@ -7181,19 +7534,20 @@
           "priority": 1000
         },
         {
-          "id": "kimi-k2-thinking-turbo",
-          "display_name": "Kimi K2 Thinking Turbo",
-          "description": "kimi-thinking \u2022 Reasoning \u2022 Tool calling",
+          "id": "kimi-k2.7-code",
+          "display_name": "Kimi K2.7 Code",
+          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
           "reasoning": true,
           "input_modalities": [
-            "text"
+            "text",
+            "image"
           ],
           "context_window": 262144,
           "priority": 1
         },
         {
-          "id": "kimi-k2.7-code",
-          "display_name": "Kimi K2.7 Code",
+          "id": "kimi-k2.7-code-highspeed",
+          "display_name": "Kimi K2.7 Code HighSpeed",
           "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
           "reasoning": true,
           "input_modalities": [
@@ -7204,6 +7558,19 @@
           "priority": 2
         },
         {
+          "id": "kimi-k3",
+          "display_name": "Kimi K3",
+          "description": "kimi-k3 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": -1,
+          "thinking_toggle": true
+        },
+        {
           "id": "kimi-k2-thinking",
           "display_name": "Kimi K2 Thinking",
           "description": "kimi-thinking \u2022 Reasoning \u2022 Tool calling",
@@ -7212,42 +7579,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 3
-        },
-        {
-          "id": "kimi-k2-0711-preview",
-          "display_name": "Kimi K2 0711",
-          "description": "kimi-k2 \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 131072,
           "priority": 4
-        },
-        {
-          "id": "kimi-k2-turbo-preview",
-          "display_name": "Kimi K2 Turbo",
-          "description": "kimi-k2 \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 262144,
-          "priority": 5
-        },
-        {
-          "id": "kimi-k2.5",
-          "display_name": "Kimi K2.5",
-          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
-          "reasoning": true,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 262144,
-          "priority": 6,
-          "thinking_toggle": true
         },
         {
           "id": "kimi-k2.6",
@@ -7262,25 +7594,49 @@
           "priority": -1
         },
         {
-          "id": "moonshot-v1-32k-vision-preview",
-          "display_name": "Moonshot V1 32K Vision Preview",
-          "description": "Live provider model",
+          "id": "kimi-k2-turbo-preview",
+          "display_name": "Kimi K2 Turbo",
+          "description": "kimi-k2 \u2022 Tool calling",
           "reasoning": false,
           "input_modalities": [
             "text"
           ],
-          "context_window": null,
+          "context_window": 262144,
+          "priority": 6
+        },
+        {
+          "id": "kimi-k2.5",
+          "display_name": "Kimi K2.5",
+          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 7,
+          "thinking_toggle": true
+        },
+        {
+          "id": "kimi-k2-0711-preview",
+          "display_name": "Kimi K2 0711",
+          "description": "kimi-k2 \u2022 Tool calling",
+          "reasoning": false,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 131072,
           "priority": 8
         },
         {
-          "id": "moonshot-v1-128k",
-          "display_name": "Moonshot V1 128K",
-          "description": "Live provider model",
-          "reasoning": false,
+          "id": "kimi-k2-thinking-turbo",
+          "display_name": "Kimi K2 Thinking Turbo",
+          "description": "kimi-thinking \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
           "input_modalities": [
             "text"
           ],
-          "context_window": null,
+          "context_window": 262144,
           "priority": 9
         },
         {
@@ -7295,8 +7651,8 @@
           "priority": 10
         },
         {
-          "id": "moonshot-v1-128k-vision-preview",
-          "display_name": "Moonshot V1 128K Vision Preview",
+          "id": "moonshot-v1-8k",
+          "display_name": "Moonshot V1 8K",
           "description": "Live provider model",
           "reasoning": false,
           "input_modalities": [
@@ -7306,8 +7662,8 @@
           "priority": 11
         },
         {
-          "id": "moonshot-v1-32k",
-          "display_name": "Moonshot V1 32K",
+          "id": "moonshot-v1-128k-vision-preview",
+          "display_name": "Moonshot V1 128K Vision Preview",
           "description": "Live provider model",
           "reasoning": false,
           "input_modalities": [
@@ -7315,17 +7671,6 @@
           ],
           "context_window": null,
           "priority": 12
-        },
-        {
-          "id": "kimi-k2.7-code-highspeed",
-          "display_name": "Kimi K2.7 Code Highspeed",
-          "description": "Live provider model",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": null,
-          "priority": 13
         },
         {
           "id": "moonshot-v1-8k-vision-preview",
@@ -7336,11 +7681,22 @@
             "text"
           ],
           "context_window": null,
+          "priority": 13
+        },
+        {
+          "id": "moonshot-v1-32k",
+          "display_name": "Moonshot V1 32K",
+          "description": "Live provider model",
+          "reasoning": false,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": null,
           "priority": 14
         },
         {
-          "id": "moonshot-v1-8k",
-          "display_name": "Moonshot V1 8K",
+          "id": "moonshot-v1-128k",
+          "display_name": "Moonshot V1 128K",
           "description": "Live provider model",
           "reasoning": false,
           "input_modalities": [
@@ -7348,6 +7704,17 @@
           ],
           "context_window": null,
           "priority": 15
+        },
+        {
+          "id": "moonshot-v1-32k-vision-preview",
+          "display_name": "Moonshot V1 32K Vision Preview",
+          "description": "Live provider model",
+          "reasoning": false,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": null,
+          "priority": 16
         }
       ]
     },
@@ -7360,6 +7727,18 @@
       "sort_priority": 34,
       "models": [
         {
+          "id": "kimi-k2.7-code-highspeed",
+          "display_name": "Kimi K2.7 Code HighSpeed",
+          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 0
+        },
+        {
           "id": "kimi-k2.6",
           "display_name": "Kimi K2.6",
           "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
@@ -7369,7 +7748,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 0
+          "priority": 1
         },
         {
           "id": "kimi-k2.5",
@@ -7381,7 +7760,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 1,
+          "priority": 2,
           "thinking_toggle": true
         },
         {
@@ -7393,7 +7772,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 2
+          "priority": 3
         },
         {
           "id": "kimi-k2-0711-preview",
@@ -7404,7 +7783,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 3
+          "priority": 4
         },
         {
           "id": "kimi-k2-thinking",
@@ -7415,7 +7794,19 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 4
+          "priority": 5
+        },
+        {
+          "id": "kimi-k2.7-code",
+          "display_name": "Kimi K2.7 Code",
+          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 6
         },
         {
           "id": "kimi-k2-thinking-turbo",
@@ -7426,7 +7817,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 5
+          "priority": 7
         },
         {
           "id": "kimi-k2-0905-preview",
@@ -7437,7 +7828,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 6
+          "priority": 8
         }
       ]
     },
@@ -7461,6 +7852,17 @@
           "priority": 0
         },
         {
+          "id": "glm-5.2",
+          "display_name": "GLM-5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 1000000,
+          "priority": 1
+        },
+        {
           "id": "glm-5v-turbo",
           "display_name": "GLM-5V-Turbo",
           "description": "glm \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
@@ -7470,7 +7872,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 1
+          "priority": 2
         },
         {
           "id": "glm-5",
@@ -7481,7 +7883,7 @@
             "text"
           ],
           "context_window": 204800,
-          "priority": 2
+          "priority": 3
         },
         {
           "id": "glm-4.5-flash",
@@ -7492,7 +7894,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 3
+          "priority": 4
         },
         {
           "id": "glm-4.7-flash",
@@ -7503,7 +7905,7 @@
             "text"
           ],
           "context_window": 200000,
-          "priority": 4
+          "priority": 5
         },
         {
           "id": "glm-4.5-air",
@@ -7514,7 +7916,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 5
+          "priority": 6
         },
         {
           "id": "glm-4.6v",
@@ -7526,7 +7928,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 6
+          "priority": 7
         },
         {
           "id": "glm-4.6",
@@ -7537,7 +7939,7 @@
             "text"
           ],
           "context_window": 204800,
-          "priority": 7
+          "priority": 8
         },
         {
           "id": "glm-4.7-flashx",
@@ -7548,7 +7950,7 @@
             "text"
           ],
           "context_window": 200000,
-          "priority": 8
+          "priority": 9
         },
         {
           "id": "glm-4.5",
@@ -7559,7 +7961,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 9
+          "priority": 10
         },
         {
           "id": "glm-4.5v",
@@ -7571,7 +7973,7 @@
             "image"
           ],
           "context_window": 64000,
-          "priority": 10
+          "priority": 11
         },
         {
           "id": "glm-4.7",
@@ -7582,14 +7984,14 @@
             "text"
           ],
           "context_window": 204800,
-          "priority": 11
+          "priority": 12
         }
       ]
     },
     {
       "id": "zai",
       "name": "Z.AI",
-      "env_key": "ZHIPU_API_KEY",
+      "env_key": "ZAI_API_KEY",
       "base_url": "https://api.z.ai/api/paas/v4",
       "wire_api": "chat",
       "sort_priority": 36,
@@ -7739,6 +8141,17 @@
           ],
           "context_window": 200000,
           "priority": 12
+        },
+        {
+          "id": "glm-5.2",
+          "display_name": "Glm 5.2",
+          "description": "Live provider model",
+          "reasoning": false,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": null,
+          "priority": 13
         }
       ]
     },
@@ -7751,50 +8164,6 @@
       "sort_priority": 37,
       "models": [
         {
-          "id": "THUDM/GLM-Z1-32B-0414",
-          "display_name": "THUDM/GLM-Z1-32B-0414",
-          "description": "glm-z \u2022 Reasoning \u2022 Tool calling",
-          "reasoning": true,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 131000,
-          "priority": 0
-        },
-        {
-          "id": "THUDM/GLM-4-32B-0414",
-          "display_name": "THUDM/GLM-4-32B-0414",
-          "description": "glm \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 33000,
-          "priority": 1
-        },
-        {
-          "id": "THUDM/GLM-4-9B-0414",
-          "display_name": "THUDM/GLM-4-9B-0414",
-          "description": "glm \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 33000,
-          "priority": 2
-        },
-        {
-          "id": "THUDM/GLM-Z1-9B-0414",
-          "display_name": "THUDM/GLM-Z1-9B-0414",
-          "description": "glm-z \u2022 Reasoning \u2022 Tool calling",
-          "reasoning": true,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 131000,
-          "priority": 3
-        },
-        {
           "id": "moonshotai/Kimi-K2-Thinking",
           "display_name": "moonshotai/Kimi-K2-Thinking",
           "description": "kimi-thinking \u2022 Reasoning \u2022 Tool calling",
@@ -7803,7 +8172,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 4
+          "priority": 0
         },
         {
           "id": "moonshotai/Kimi-K2-Instruct-0905",
@@ -7814,7 +8183,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 5
+          "priority": 1
         },
         {
           "id": "moonshotai/Kimi-K2-Instruct",
@@ -7825,7 +8194,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 6
+          "priority": 2
         },
         {
           "id": "moonshotai/Kimi-K2.6",
@@ -7837,7 +8206,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 7
+          "priority": 3
         },
         {
           "id": "moonshotai/Kimi-K2.5",
@@ -7849,7 +8218,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 8
+          "priority": 4
         },
         {
           "id": "baidu/ERNIE-4.5-300B-A47B",
@@ -7860,7 +8229,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 9
+          "priority": 5
         },
         {
           "id": "ByteDance-Seed/Seed-OSS-36B-Instruct",
@@ -7871,7 +8240,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 10
+          "priority": 6
         },
         {
           "id": "stepfun-ai/Step-3.5-Flash",
@@ -7882,7 +8251,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 11
+          "priority": 7
         },
         {
           "id": "google/gemma-4-31B-it",
@@ -7893,7 +8262,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 12
+          "priority": 8
         },
         {
           "id": "google/gemma-4-26B-A4B-it",
@@ -7904,7 +8273,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 13
+          "priority": 9
         },
         {
           "id": "inclusionAI/Ling-flash-2.0",
@@ -7915,7 +8284,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 14
+          "priority": 10
         },
         {
           "id": "Qwen/Qwen3-Omni-30B-A3B-Thinking",
@@ -7927,7 +8296,7 @@
             "image"
           ],
           "context_window": 66000,
-          "priority": 15
+          "priority": 11
         },
         {
           "id": "Qwen/Qwen2.5-VL-72B-Instruct",
@@ -7939,7 +8308,7 @@
             "image"
           ],
           "context_window": 131000,
-          "priority": 16
+          "priority": 12
         },
         {
           "id": "Qwen/Qwen2.5-VL-32B-Instruct",
@@ -7951,7 +8320,7 @@
             "image"
           ],
           "context_window": 131000,
-          "priority": 17
+          "priority": 13
         },
         {
           "id": "Qwen/Qwen3-30B-A3B-Thinking-2507",
@@ -7962,7 +8331,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 18
+          "priority": 14
         },
         {
           "id": "Qwen/Qwen2.5-7B-Instruct",
@@ -7973,7 +8342,7 @@
             "text"
           ],
           "context_window": 33000,
-          "priority": 19
+          "priority": 15
         },
         {
           "id": "Qwen/Qwen3-VL-235B-A22B-Instruct",
@@ -7985,7 +8354,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 20
+          "priority": 16
         },
         {
           "id": "Qwen/Qwen2.5-32B-Instruct",
@@ -7996,7 +8365,7 @@
             "text"
           ],
           "context_window": 33000,
-          "priority": 21
+          "priority": 17
         },
         {
           "id": "Qwen/Qwen3-Next-80B-A3B-Instruct",
@@ -8007,7 +8376,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 22
+          "priority": 18
         },
         {
           "id": "Qwen/Qwen3-235B-A22B-Thinking-2507",
@@ -8018,7 +8387,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 23
+          "priority": 19
         },
         {
           "id": "Qwen/Qwen2.5-72B-Instruct-128K",
@@ -8029,7 +8398,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 24
+          "priority": 20
         },
         {
           "id": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
@@ -8040,7 +8409,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 25
+          "priority": 21
         },
         {
           "id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
@@ -8051,7 +8420,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 26
+          "priority": 22
         },
         {
           "id": "Qwen/Qwen3-30B-A3B-Instruct-2507",
@@ -8062,7 +8431,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 27
+          "priority": 23
         },
         {
           "id": "Qwen/Qwen3-VL-30B-A3B-Thinking",
@@ -8074,7 +8443,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 28
+          "priority": 24
         },
         {
           "id": "Qwen/Qwen3-VL-8B-Thinking",
@@ -8086,7 +8455,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 29
+          "priority": 25
         },
         {
           "id": "Qwen/Qwen3-VL-8B-Instruct",
@@ -8098,7 +8467,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 30
+          "priority": 26
         },
         {
           "id": "Qwen/QwQ-32B",
@@ -8109,7 +8478,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 31
+          "priority": 27
         },
         {
           "id": "Qwen/Qwen3-Omni-30B-A3B-Captioner",
@@ -8120,7 +8489,7 @@
             "text"
           ],
           "context_window": 66000,
-          "priority": 32
+          "priority": 28
         },
         {
           "id": "Qwen/Qwen3-VL-235B-A22B-Thinking",
@@ -8132,7 +8501,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 33
+          "priority": 29
         },
         {
           "id": "Qwen/Qwen3-Next-80B-A3B-Thinking",
@@ -8143,7 +8512,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 34
+          "priority": 30
         },
         {
           "id": "Qwen/Qwen2.5-Coder-32B-Instruct",
@@ -8154,7 +8523,7 @@
             "text"
           ],
           "context_window": 33000,
-          "priority": 35
+          "priority": 31
         },
         {
           "id": "Qwen/Qwen2.5-VL-7B-Instruct",
@@ -8166,7 +8535,7 @@
             "image"
           ],
           "context_window": 33000,
-          "priority": 36
+          "priority": 32
         },
         {
           "id": "Qwen/Qwen3-8B",
@@ -8177,7 +8546,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 37
+          "priority": 33
         },
         {
           "id": "Qwen/Qwen3-235B-A22B-Instruct-2507",
@@ -8188,7 +8557,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 38
+          "priority": 34
         },
         {
           "id": "Qwen/Qwen3-32B",
@@ -8199,7 +8568,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 39
+          "priority": 35
         },
         {
           "id": "Qwen/Qwen3-VL-32B-Instruct",
@@ -8211,7 +8580,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 40
+          "priority": 36
         },
         {
           "id": "Qwen/Qwen2.5-14B-Instruct",
@@ -8222,7 +8591,7 @@
             "text"
           ],
           "context_window": 33000,
-          "priority": 41
+          "priority": 37
         },
         {
           "id": "Qwen/Qwen3-14B",
@@ -8233,7 +8602,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 42
+          "priority": 38
         },
         {
           "id": "Qwen/Qwen3-235B-A22B",
@@ -8244,7 +8613,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 43
+          "priority": 39
         },
         {
           "id": "Qwen/Qwen2.5-72B-Instruct",
@@ -8255,7 +8624,7 @@
             "text"
           ],
           "context_window": 33000,
-          "priority": 44
+          "priority": 40
         },
         {
           "id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
@@ -8267,7 +8636,7 @@
             "image"
           ],
           "context_window": 66000,
-          "priority": 45
+          "priority": 41
         },
         {
           "id": "Qwen/Qwen3-VL-30B-A3B-Instruct",
@@ -8279,7 +8648,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 46
+          "priority": 42
         },
         {
           "id": "Qwen/Qwen3-VL-32B-Thinking",
@@ -8291,7 +8660,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 47
+          "priority": 43
         },
         {
           "id": "openai/gpt-oss-120b",
@@ -8302,7 +8671,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 48
+          "priority": 44
         },
         {
           "id": "openai/gpt-oss-20b",
@@ -8313,29 +8682,29 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 49
+          "priority": 45
         },
         {
-          "id": "tencent/Hunyuan-MT-7B",
-          "display_name": "tencent/Hunyuan-MT-7B",
-          "description": "hunyuan \u2022 Tool calling",
-          "reasoning": false,
+          "id": "tencent/Hy3-preview",
+          "display_name": "Hy3 preview",
+          "description": "Hy \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
           "input_modalities": [
             "text"
           ],
-          "context_window": 33000,
-          "priority": 50
+          "context_window": 262144,
+          "priority": 46
         },
         {
           "id": "tencent/Hunyuan-A13B-Instruct",
           "display_name": "tencent/Hunyuan-A13B-Instruct",
-          "description": "hunyuan \u2022 Tool calling",
-          "reasoning": false,
+          "description": "hunyuan \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
           "input_modalities": [
             "text"
           ],
           "context_window": 131000,
-          "priority": 51
+          "priority": 47
         },
         {
           "id": "zai-org/GLM-5V-Turbo",
@@ -8347,7 +8716,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 52
+          "priority": 48
         },
         {
           "id": "zai-org/GLM-4.6",
@@ -8358,7 +8727,7 @@
             "text"
           ],
           "context_window": 205000,
-          "priority": 53
+          "priority": 49
         },
         {
           "id": "zai-org/GLM-4.6V",
@@ -8370,7 +8739,7 @@
             "image"
           ],
           "context_window": 131000,
-          "priority": 54
+          "priority": 50
         },
         {
           "id": "zai-org/GLM-5",
@@ -8381,7 +8750,7 @@
             "text"
           ],
           "context_window": 205000,
-          "priority": 55
+          "priority": 51
         },
         {
           "id": "zai-org/GLM-4.7",
@@ -8392,7 +8761,7 @@
             "text"
           ],
           "context_window": 205000,
-          "priority": 56
+          "priority": 52
         },
         {
           "id": "zai-org/GLM-4.5V",
@@ -8404,7 +8773,18 @@
             "image"
           ],
           "context_window": 66000,
-          "priority": 57
+          "priority": 53
+        },
+        {
+          "id": "zai-org/GLM-5.2",
+          "display_name": "GLM-5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 205000,
+          "priority": 54
         },
         {
           "id": "zai-org/GLM-4.5-Air",
@@ -8415,7 +8795,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 58
+          "priority": 55
         },
         {
           "id": "zai-org/GLM-5.1",
@@ -8426,7 +8806,7 @@
             "text"
           ],
           "context_window": 205000,
-          "priority": 59
+          "priority": 56
         },
         {
           "id": "zai-org/GLM-4.5",
@@ -8437,7 +8817,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 60
+          "priority": 57
         },
         {
           "id": "deepseek-ai/deepseek-v4-flash",
@@ -8448,7 +8828,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 61
+          "priority": 58
         },
         {
           "id": "deepseek-ai/DeepSeek-R1",
@@ -8459,7 +8839,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 62
+          "priority": 59
         },
         {
           "id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
@@ -8470,7 +8850,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 63
+          "priority": 60
         },
         {
           "id": "deepseek-ai/DeepSeek-V3.1-Terminus",
@@ -8481,7 +8861,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 64
+          "priority": 61
         },
         {
           "id": "deepseek-ai/deepseek-v4-pro",
@@ -8492,7 +8872,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 65
+          "priority": 62
         },
         {
           "id": "deepseek-ai/DeepSeek-V3.1",
@@ -8503,7 +8883,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 66
+          "priority": 63
         },
         {
           "id": "deepseek-ai/DeepSeek-V3.2-Exp",
@@ -8514,7 +8894,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 67
+          "priority": 64
         },
         {
           "id": "deepseek-ai/deepseek-vl2",
@@ -8526,7 +8906,7 @@
             "image"
           ],
           "context_window": 4000,
-          "priority": 68
+          "priority": 65
         },
         {
           "id": "deepseek-ai/DeepSeek-V3.2",
@@ -8537,7 +8917,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 69
+          "priority": 66
         },
         {
           "id": "deepseek-ai/DeepSeek-V3",
@@ -8548,7 +8928,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 70
+          "priority": 67
         },
         {
           "id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
@@ -8559,7 +8939,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 71
+          "priority": 68
         },
         {
           "id": "MiniMaxAI/MiniMax-M2.5",
@@ -8570,7 +8950,7 @@
             "text"
           ],
           "context_window": 197000,
-          "priority": 72
+          "priority": 69
         }
       ]
     },
@@ -8583,50 +8963,6 @@
       "sort_priority": 38,
       "models": [
         {
-          "id": "THUDM/GLM-Z1-9B-0414",
-          "display_name": "THUDM/GLM-Z1-9B-0414",
-          "description": "glm-z \u2022 Reasoning \u2022 Tool calling",
-          "reasoning": true,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 131000,
-          "priority": 0
-        },
-        {
-          "id": "THUDM/GLM-4-9B-0414",
-          "display_name": "THUDM/GLM-4-9B-0414",
-          "description": "glm \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 33000,
-          "priority": 1
-        },
-        {
-          "id": "THUDM/GLM-4-32B-0414",
-          "display_name": "THUDM/GLM-4-32B-0414",
-          "description": "glm \u2022 Tool calling",
-          "reasoning": false,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 33000,
-          "priority": 2
-        },
-        {
-          "id": "THUDM/GLM-Z1-32B-0414",
-          "display_name": "THUDM/GLM-Z1-32B-0414",
-          "description": "glm-z \u2022 Reasoning \u2022 Tool calling",
-          "reasoning": true,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 131000,
-          "priority": 3
-        },
-        {
           "id": "moonshotai/Kimi-K2-Instruct-0905",
           "display_name": "moonshotai/Kimi-K2-Instruct-0905",
           "description": "kimi-k2 \u2022 Tool calling",
@@ -8635,7 +8971,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 4
+          "priority": 0
         },
         {
           "id": "moonshotai/Kimi-K2-Thinking",
@@ -8646,7 +8982,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 5
+          "priority": 1
         },
         {
           "id": "baidu/ERNIE-4.5-300B-A47B",
@@ -8657,7 +8993,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 6
+          "priority": 2
         },
         {
           "id": "ByteDance-Seed/Seed-OSS-36B-Instruct",
@@ -8668,7 +9004,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 7
+          "priority": 3
         },
         {
           "id": "stepfun-ai/Step-3.5-Flash",
@@ -8679,7 +9015,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 8
+          "priority": 4
         },
         {
           "id": "inclusionAI/Ling-flash-2.0",
@@ -8690,7 +9026,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 9
+          "priority": 5
         },
         {
           "id": "Pro/moonshotai/Kimi-K2-Thinking",
@@ -8701,7 +9037,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 10
+          "priority": 6
         },
         {
           "id": "Pro/moonshotai/Kimi-K2-Instruct-0905",
@@ -8712,7 +9048,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 11
+          "priority": 7
         },
         {
           "id": "Pro/moonshotai/Kimi-K2.6",
@@ -8724,7 +9060,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 12
+          "priority": 8
         },
         {
           "id": "Pro/moonshotai/Kimi-K2.5",
@@ -8736,7 +9072,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 13
+          "priority": 9
         },
         {
           "id": "Pro/zai-org/GLM-5",
@@ -8747,7 +9083,7 @@
             "text"
           ],
           "context_window": 205000,
-          "priority": 14
+          "priority": 10
         },
         {
           "id": "Pro/zai-org/GLM-4.7",
@@ -8758,7 +9094,7 @@
             "text"
           ],
           "context_window": 205000,
-          "priority": 15
+          "priority": 11
         },
         {
           "id": "Pro/zai-org/GLM-5.1",
@@ -8769,7 +9105,7 @@
             "text"
           ],
           "context_window": 205000,
-          "priority": 16
+          "priority": 12
         },
         {
           "id": "Pro/deepseek-ai/DeepSeek-R1",
@@ -8780,7 +9116,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 17
+          "priority": 13
         },
         {
           "id": "Pro/deepseek-ai/DeepSeek-V3.1-Terminus",
@@ -8791,7 +9127,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 18
+          "priority": 14
         },
         {
           "id": "Pro/deepseek-ai/DeepSeek-V3.2",
@@ -8802,7 +9138,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 19
+          "priority": 15
         },
         {
           "id": "Pro/deepseek-ai/DeepSeek-V3",
@@ -8813,7 +9149,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 20
+          "priority": 16
         },
         {
           "id": "Pro/MiniMaxAI/MiniMax-M2.1",
@@ -8824,7 +9160,7 @@
             "text"
           ],
           "context_window": 197000,
-          "priority": 21
+          "priority": 17
         },
         {
           "id": "Pro/MiniMaxAI/MiniMax-M2.5",
@@ -8835,7 +9171,7 @@
             "text"
           ],
           "context_window": 192000,
-          "priority": 22
+          "priority": 18
         },
         {
           "id": "Qwen/Qwen3.6-35B-A3B",
@@ -8847,7 +9183,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 23
+          "priority": 19
         },
         {
           "id": "Qwen/Qwen3.5-397B-A17B",
@@ -8859,7 +9195,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 24
+          "priority": 20
         },
         {
           "id": "Qwen/Qwen3.5-122B-A10B",
@@ -8871,7 +9207,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 25
+          "priority": 21
         },
         {
           "id": "Qwen/Qwen3.5-27B",
@@ -8883,7 +9219,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 26
+          "priority": 22
         },
         {
           "id": "Qwen/Qwen3.5-4B",
@@ -8895,7 +9231,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 27
+          "priority": 23
         },
         {
           "id": "Qwen/Qwen3.5-9B",
@@ -8907,7 +9243,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 28
+          "priority": 24
         },
         {
           "id": "Qwen/Qwen3.5-35B-A3B",
@@ -8919,7 +9255,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 29
+          "priority": 25
         },
         {
           "id": "Qwen/Qwen3-VL-32B-Thinking",
@@ -8931,7 +9267,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 30
+          "priority": 26
         },
         {
           "id": "Qwen/Qwen3-VL-30B-A3B-Instruct",
@@ -8943,7 +9279,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 31
+          "priority": 27
         },
         {
           "id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
@@ -8955,7 +9291,7 @@
             "image"
           ],
           "context_window": 66000,
-          "priority": 32
+          "priority": 28
         },
         {
           "id": "Qwen/Qwen2.5-72B-Instruct",
@@ -8966,7 +9302,7 @@
             "text"
           ],
           "context_window": 33000,
-          "priority": 33
+          "priority": 29
         },
         {
           "id": "Qwen/Qwen3-14B",
@@ -8977,7 +9313,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 34
+          "priority": 30
         },
         {
           "id": "Qwen/Qwen2.5-14B-Instruct",
@@ -8988,7 +9324,7 @@
             "text"
           ],
           "context_window": 33000,
-          "priority": 35
+          "priority": 31
         },
         {
           "id": "Qwen/Qwen3-VL-32B-Instruct",
@@ -9000,7 +9336,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 36
+          "priority": 32
         },
         {
           "id": "Qwen/Qwen3-32B",
@@ -9011,7 +9347,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 37
+          "priority": 33
         },
         {
           "id": "Qwen/Qwen3-235B-A22B-Instruct-2507",
@@ -9022,7 +9358,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 38
+          "priority": 34
         },
         {
           "id": "Qwen/Qwen3-8B",
@@ -9033,7 +9369,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 39
+          "priority": 35
         },
         {
           "id": "Qwen/Qwen2.5-Coder-32B-Instruct",
@@ -9044,7 +9380,7 @@
             "text"
           ],
           "context_window": 33000,
-          "priority": 40
+          "priority": 36
         },
         {
           "id": "Qwen/Qwen3-Next-80B-A3B-Thinking",
@@ -9055,7 +9391,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 41
+          "priority": 37
         },
         {
           "id": "Qwen/Qwen3-VL-235B-A22B-Thinking",
@@ -9067,7 +9403,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 42
+          "priority": 38
         },
         {
           "id": "Qwen/Qwen3-Omni-30B-A3B-Captioner",
@@ -9078,7 +9414,7 @@
             "text"
           ],
           "context_window": 66000,
-          "priority": 43
+          "priority": 39
         },
         {
           "id": "Qwen/QwQ-32B",
@@ -9089,7 +9425,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 44
+          "priority": 40
         },
         {
           "id": "Qwen/Qwen3-VL-8B-Instruct",
@@ -9101,7 +9437,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 45
+          "priority": 41
         },
         {
           "id": "Qwen/Qwen3-VL-8B-Thinking",
@@ -9113,7 +9449,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 46
+          "priority": 42
         },
         {
           "id": "Qwen/Qwen3-VL-30B-A3B-Thinking",
@@ -9125,7 +9461,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 47
+          "priority": 43
         },
         {
           "id": "Qwen/Qwen3-30B-A3B-Instruct-2507",
@@ -9136,7 +9472,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 48
+          "priority": 44
         },
         {
           "id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
@@ -9147,7 +9483,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 49
+          "priority": 45
         },
         {
           "id": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
@@ -9158,7 +9494,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 50
+          "priority": 46
         },
         {
           "id": "Qwen/Qwen2.5-72B-Instruct-128K",
@@ -9169,7 +9505,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 51
+          "priority": 47
         },
         {
           "id": "Qwen/Qwen3-235B-A22B-Thinking-2507",
@@ -9180,7 +9516,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 52
+          "priority": 48
         },
         {
           "id": "Qwen/Qwen3-Next-80B-A3B-Instruct",
@@ -9191,7 +9527,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 53
+          "priority": 49
         },
         {
           "id": "Qwen/Qwen2.5-32B-Instruct",
@@ -9202,7 +9538,7 @@
             "text"
           ],
           "context_window": 33000,
-          "priority": 54
+          "priority": 50
         },
         {
           "id": "Qwen/Qwen3-VL-235B-A22B-Instruct",
@@ -9214,7 +9550,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 55
+          "priority": 51
         },
         {
           "id": "Qwen/Qwen2.5-7B-Instruct",
@@ -9225,7 +9561,7 @@
             "text"
           ],
           "context_window": 33000,
-          "priority": 56
+          "priority": 52
         },
         {
           "id": "Qwen/Qwen3-30B-A3B-Thinking-2507",
@@ -9236,7 +9572,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 57
+          "priority": 53
         },
         {
           "id": "Qwen/Qwen2.5-VL-32B-Instruct",
@@ -9248,7 +9584,7 @@
             "image"
           ],
           "context_window": 131000,
-          "priority": 58
+          "priority": 54
         },
         {
           "id": "Qwen/Qwen2.5-VL-72B-Instruct",
@@ -9260,7 +9596,7 @@
             "image"
           ],
           "context_window": 131000,
-          "priority": 59
+          "priority": 55
         },
         {
           "id": "Qwen/Qwen3-Omni-30B-A3B-Thinking",
@@ -9272,29 +9608,29 @@
             "image"
           ],
           "context_window": 66000,
-          "priority": 60
+          "priority": 56
         },
         {
           "id": "tencent/Hunyuan-A13B-Instruct",
           "display_name": "tencent/Hunyuan-A13B-Instruct",
-          "description": "hunyuan \u2022 Tool calling",
-          "reasoning": false,
+          "description": "hunyuan \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
           "input_modalities": [
             "text"
           ],
           "context_window": 131000,
-          "priority": 62
+          "priority": 58
         },
         {
-          "id": "tencent/Hunyuan-MT-7B",
-          "display_name": "tencent/Hunyuan-MT-7B",
-          "description": "hunyuan \u2022 Tool calling",
-          "reasoning": false,
+          "id": "zai-org/GLM-5.2",
+          "display_name": "GLM-5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
           "input_modalities": [
             "text"
           ],
-          "context_window": 33000,
-          "priority": 63
+          "context_window": 205000,
+          "priority": 59
         },
         {
           "id": "zai-org/GLM-4.5-Air",
@@ -9305,7 +9641,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 64
+          "priority": 60
         },
         {
           "id": "zai-org/GLM-4.5V",
@@ -9317,7 +9653,7 @@
             "image"
           ],
           "context_window": 66000,
-          "priority": 65
+          "priority": 61
         },
         {
           "id": "zai-org/GLM-4.6V",
@@ -9329,7 +9665,7 @@
             "image"
           ],
           "context_window": 131000,
-          "priority": 66
+          "priority": 62
         },
         {
           "id": "zai-org/GLM-4.6",
@@ -9340,7 +9676,7 @@
             "text"
           ],
           "context_window": 205000,
-          "priority": 67
+          "priority": 63
         },
         {
           "id": "deepseek-ai/DeepSeek-V4-Pro",
@@ -9351,7 +9687,7 @@
             "text"
           ],
           "context_window": 1049000,
-          "priority": 68
+          "priority": 64
         },
         {
           "id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
@@ -9362,7 +9698,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 70
+          "priority": 66
         },
         {
           "id": "deepseek-ai/DeepSeek-V3",
@@ -9373,7 +9709,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 71
+          "priority": 67
         },
         {
           "id": "deepseek-ai/DeepSeek-V3.2",
@@ -9384,7 +9720,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 72
+          "priority": 68
         },
         {
           "id": "deepseek-ai/deepseek-vl2",
@@ -9396,7 +9732,7 @@
             "image"
           ],
           "context_window": 4000,
-          "priority": 73
+          "priority": 69
         },
         {
           "id": "deepseek-ai/DeepSeek-V3.1-Terminus",
@@ -9407,7 +9743,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 74
+          "priority": 70
         },
         {
           "id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
@@ -9418,7 +9754,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 75
+          "priority": 71
         },
         {
           "id": "deepseek-ai/DeepSeek-R1",
@@ -9429,7 +9765,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 76
+          "priority": 72
         },
         {
           "id": "Kwaipilot/KAT-Dev",
@@ -9440,7 +9776,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 77
+          "priority": 73
         }
       ]
     },
@@ -14646,6 +14982,17 @@
           "priority": 10
         },
         {
+          "id": "accounts/fireworks/models/glm-5p2",
+          "display_name": "GLM 5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 1048576,
+          "priority": 11
+        },
+        {
           "id": "accounts/fireworks/models/gpt-oss-120b",
           "display_name": "GPT OSS 120B",
           "description": "gpt-oss \u2022 Reasoning \u2022 Tool calling",
@@ -14654,7 +15001,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 11
+          "priority": 12
         },
         {
           "id": "accounts/fireworks/models/gpt-oss-20b",
@@ -14665,7 +15012,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 12
+          "priority": 13
         },
         {
           "id": "accounts/fireworks/models/kimi-k2p7-code",
@@ -14677,7 +15024,7 @@
             "image"
           ],
           "context_window": 262000,
-          "priority": 13
+          "priority": 14
         }
       ]
     },
@@ -15990,6 +16337,17 @@
           "priority": 16
         },
         {
+          "id": "glm-5.2",
+          "display_name": "GLM-5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 976000,
+          "priority": 17
+        },
+        {
           "id": "minimax-m3",
           "display_name": "minimax-m3",
           "description": "minimax-m3 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
@@ -15999,7 +16357,7 @@
             "image"
           ],
           "context_window": 512000,
-          "priority": 17
+          "priority": 18
         },
         {
           "id": "minimax-m2",
@@ -16010,7 +16368,7 @@
             "text"
           ],
           "context_window": 204800,
-          "priority": 18
+          "priority": 19
         },
         {
           "id": "qwen3-next:80b",
@@ -16021,7 +16379,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 19
+          "priority": 20
         },
         {
           "id": "qwen3-coder:480b",
@@ -16032,7 +16390,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 20
+          "priority": 21
         },
         {
           "id": "kimi-k2:1t",
@@ -16043,7 +16401,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 21
+          "priority": 22
         },
         {
           "id": "minimax-m2.7",
@@ -16054,7 +16412,7 @@
             "text"
           ],
           "context_window": 196608,
-          "priority": 22
+          "priority": 23
         },
         {
           "id": "deepseek-v3.1:671b",
@@ -16065,7 +16423,7 @@
             "text"
           ],
           "context_window": 163840,
-          "priority": 23
+          "priority": 24
         },
         {
           "id": "kimi-k2.5",
@@ -16077,7 +16435,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 24
+          "priority": 25
         },
         {
           "id": "gemma4:31b",
@@ -16089,7 +16447,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 25
+          "priority": 26
         },
         {
           "id": "ministral-3:3b",
@@ -16101,7 +16459,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 26
+          "priority": 27
         },
         {
           "id": "qwen3.5:397b",
@@ -16113,7 +16471,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 29
+          "priority": 30
         },
         {
           "id": "kimi-k2.6",
@@ -16125,7 +16483,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 30
+          "priority": 31
         },
         {
           "id": "qwen3-coder-next",
@@ -16136,7 +16494,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 31
+          "priority": 32
         },
         {
           "id": "qwen3-vl:235b-instruct",
@@ -16148,7 +16506,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 32
+          "priority": 33
         },
         {
           "id": "mistral-large-3:675b",
@@ -16160,7 +16518,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 33
+          "priority": 34
         },
         {
           "id": "qwen3-vl:235b",
@@ -16172,7 +16530,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 35
+          "priority": 36
         },
         {
           "id": "nemotron-3-ultra",
@@ -16183,7 +16541,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 36
+          "priority": 37
         },
         {
           "id": "gemini-3-flash-preview",
@@ -16195,7 +16553,7 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 37
+          "priority": 38
         },
         {
           "id": "gpt-oss:20b",
@@ -16206,7 +16564,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 38
+          "priority": 39
         },
         {
           "id": "glm-5",
@@ -16217,7 +16575,7 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 39
+          "priority": 40
         },
         {
           "id": "deepseek-v3.2",
@@ -16228,7 +16586,7 @@
             "text"
           ],
           "context_window": 163840,
-          "priority": 40
+          "priority": 41
         },
         {
           "id": "devstral-2:123b",
@@ -16239,7 +16597,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 41
+          "priority": 42
         }
       ]
     },
@@ -17616,6 +17974,18 @@
           "priority": 2
         },
         {
+          "id": "kimi-k2.7-code",
+          "display_name": "Kimi K2.7 Code",
+          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 3
+        },
+        {
           "id": "glm-5.1",
           "display_name": "GLM-5.1",
           "description": "glm \u2022 Reasoning \u2022 Tool calling",
@@ -17624,7 +17994,7 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 3
+          "priority": 4
         },
         {
           "id": "deepseek-v4-pro",
@@ -17635,7 +18005,18 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 4
+          "priority": 5
+        },
+        {
+          "id": "glm-5.2",
+          "display_name": "GLM-5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 1000000,
+          "priority": 7
         },
         {
           "id": "qwen3.6-flash",
@@ -17647,7 +18028,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 6
+          "priority": 8
         },
         {
           "id": "kimi-k2.5",
@@ -17659,7 +18040,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 7
+          "priority": 9
         },
         {
           "id": "MiniMax-M2.5",
@@ -17670,7 +18051,7 @@
             "text"
           ],
           "context_window": 196608,
-          "priority": 9
+          "priority": 11
         },
         {
           "id": "kimi-k2.6",
@@ -17682,7 +18063,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 10
+          "priority": 12
         },
         {
           "id": "glm-5",
@@ -17693,7 +18074,7 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 13
+          "priority": 15
         },
         {
           "id": "deepseek-v3.2",
@@ -17704,7 +18085,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 14
+          "priority": 16
         },
         {
           "id": "qwen3.6-plus",
@@ -17716,7 +18097,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 15
+          "priority": 17
         }
       ]
     },
@@ -17763,6 +18144,18 @@
           "priority": 2
         },
         {
+          "id": "kimi-k2.7-code",
+          "display_name": "Kimi K2.7 Code",
+          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 3
+        },
+        {
           "id": "glm-5.1",
           "display_name": "GLM-5.1",
           "description": "glm \u2022 Reasoning \u2022 Tool calling",
@@ -17771,7 +18164,7 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 3
+          "priority": 4
         },
         {
           "id": "deepseek-v4-pro",
@@ -17782,7 +18175,18 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 4
+          "priority": 5
+        },
+        {
+          "id": "glm-5.2",
+          "display_name": "GLM-5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 1000000,
+          "priority": 7
         },
         {
           "id": "qwen3.6-flash",
@@ -17794,7 +18198,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 6
+          "priority": 8
         },
         {
           "id": "kimi-k2.5",
@@ -17806,7 +18210,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 7
+          "priority": 9
         },
         {
           "id": "MiniMax-M2.5",
@@ -17817,7 +18221,7 @@
             "text"
           ],
           "context_window": 196608,
-          "priority": 9
+          "priority": 11
         },
         {
           "id": "kimi-k2.6",
@@ -17829,7 +18233,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 10
+          "priority": 12
         },
         {
           "id": "glm-5",
@@ -17840,7 +18244,7 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 13
+          "priority": 15
         },
         {
           "id": "deepseek-v3.2",
@@ -17851,7 +18255,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 14
+          "priority": 16
         },
         {
           "id": "qwen3.6-plus",
@@ -17863,7 +18267,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 15
+          "priority": 17
         }
       ]
     },
@@ -17876,9 +18280,9 @@
       "sort_priority": 100,
       "models": [
         {
-          "id": "moonshotai/kimi-k2.6",
-          "display_name": "Kimi K2.6",
-          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "id": "moonshotai/kimi-k2.7-code",
+          "display_name": "Kimi K2.7 Code",
+          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
           "reasoning": true,
           "input_modalities": [
             "text",
@@ -17888,15 +18292,27 @@
           "priority": 0
         },
         {
+          "id": "moonshotai/kimi-k2.6",
+          "display_name": "Kimi K2.6",
+          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 1
+        },
+        {
           "id": "zai-org/GLM-5.1-FP8",
-          "display_name": "GLM-5.1",
+          "display_name": "GLM 5.1",
           "description": "glm \u2022 Reasoning \u2022 Tool calling",
           "reasoning": true,
           "input_modalities": [
             "text"
           ],
           "context_window": 202752,
-          "priority": 1
+          "priority": 2
         }
       ]
     },
@@ -18478,6 +18894,18 @@
           "priority": 1
         },
         {
+          "id": "moonshotai/Kimi-K2.7-Code",
+          "display_name": "Kimi K2.7 Code",
+          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262000,
+          "priority": 2
+        },
+        {
           "id": "openai/gpt-oss-120b",
           "display_name": "OpenAI GPT 120B",
           "description": "gpt-oss \u2022 Reasoning \u2022 Tool calling",
@@ -18486,7 +18914,7 @@
             "text"
           ],
           "context_window": 128072,
-          "priority": 2
+          "priority": 3
         },
         {
           "id": "nvidia/Nemotron-120B-A12B",
@@ -18497,7 +18925,7 @@
             "text"
           ],
           "context_window": 202800,
-          "priority": 3
+          "priority": 4
         },
         {
           "id": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B",
@@ -18508,7 +18936,7 @@
             "text"
           ],
           "context_window": 202800,
-          "priority": 4
+          "priority": 5
         },
         {
           "id": "zai-org/GLM-5",
@@ -18519,7 +18947,7 @@
             "text"
           ],
           "context_window": 202800,
-          "priority": 5
+          "priority": 6
         },
         {
           "id": "zai-org/GLM-4.7",
@@ -18530,7 +18958,18 @@
             "text"
           ],
           "context_window": 200000,
-          "priority": 6
+          "priority": 7
+        },
+        {
+          "id": "zai-org/GLM-5.2",
+          "display_name": "GLM 5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 131072,
+          "priority": 8
         },
         {
           "id": "zai-org/GLM-5.1",
@@ -18541,7 +18980,7 @@
             "text"
           ],
           "context_window": 202800,
-          "priority": 7
+          "priority": 9
         },
         {
           "id": "deepseek-ai/DeepSeek-V3.1",
@@ -18552,7 +18991,7 @@
             "text"
           ],
           "context_window": 164000,
-          "priority": 8
+          "priority": 10
         },
         {
           "id": "deepseek-ai/DeepSeek-V4-Pro",
@@ -18563,7 +19002,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 9
+          "priority": 11
         },
         {
           "id": "MiniMaxAI/MiniMax-M2.5",
@@ -18574,7 +19013,7 @@
             "text"
           ],
           "context_window": 204000,
-          "priority": 10
+          "priority": 12
         }
       ]
     },
@@ -18810,6 +19249,18 @@
           ],
           "context_window": 256000,
           "priority": 0
+        },
+        {
+          "id": "claudius",
+          "display_name": "Claudius",
+          "description": "Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 256000,
+          "priority": 1
         }
       ]
     },
@@ -19022,6 +19473,18 @@
           "priority": 11
         },
         {
+          "id": "llama-4-maverick",
+          "display_name": "Llama 4 Maverick 17B Instruct",
+          "description": "llama \u2022 Tool calling \u2022 Image input",
+          "reasoning": false,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1000000,
+          "priority": 12
+        },
+        {
           "id": "gemini-2.5-pro",
           "display_name": "Gemini 2.5 Pro",
           "description": "gemini-pro \u2022 Tool calling \u2022 Image input",
@@ -19031,7 +19494,7 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 12
+          "priority": 13
         },
         {
           "id": "claude-4-5-sonnet",
@@ -19043,7 +19506,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 13
+          "priority": 14
         },
         {
           "id": "glm-4.5",
@@ -19054,7 +19517,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 15
+          "priority": 16
         },
         {
           "id": "kimi-k2-instruct",
@@ -19065,7 +19528,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 16
+          "priority": 17
         },
         {
           "id": "llama-3.3-70b-instruct",
@@ -19076,7 +19539,7 @@
             "text"
           ],
           "context_window": 131000,
-          "priority": 17
+          "priority": 18
         },
         {
           "id": "claude-opus4-8",
@@ -19088,19 +19551,19 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 18
+          "priority": 19
         },
         {
-          "id": "devstral-small-2512",
-          "display_name": "Devstral Small 2 2512",
-          "description": "Tool calling \u2022 Image input",
-          "reasoning": false,
+          "id": "kimi-k2.7-code",
+          "display_name": "Kimi K2.7 Code",
+          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
           "input_modalities": [
             "text",
             "image"
           ],
-          "context_window": 262000,
-          "priority": 19
+          "context_window": 262144,
+          "priority": 20
         },
         {
           "id": "glm-5.1",
@@ -19111,7 +19574,7 @@
             "text"
           ],
           "context_window": 204800,
-          "priority": 20
+          "priority": 21
         },
         {
           "id": "deepseek-v4-pro",
@@ -19122,7 +19585,7 @@
             "text"
           ],
           "context_window": 1048576,
-          "priority": 21
+          "priority": 22
         },
         {
           "id": "qwen3-next-80b-a3b-thinking",
@@ -19133,7 +19596,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 22
+          "priority": 23
         },
         {
           "id": "kimi-k2-thinking",
@@ -19144,7 +19607,30 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 23
+          "priority": 24
+        },
+        {
+          "id": "glm-5.2",
+          "display_name": "GLM-5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 1000000,
+          "priority": 25
+        },
+        {
+          "id": "minimax-m3",
+          "display_name": "MiniMax-M3",
+          "description": "minimax \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 512000,
+          "priority": 26
         },
         {
           "id": "minimax-m2",
@@ -19155,7 +19641,7 @@
             "text"
           ],
           "context_window": 400000,
-          "priority": 24
+          "priority": 27
         },
         {
           "id": "minimax-m2.7",
@@ -19166,7 +19652,7 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 25
+          "priority": 28
         },
         {
           "id": "kimi-k2.5",
@@ -19178,7 +19664,7 @@
             "image"
           ],
           "context_window": 256000,
-          "priority": 26
+          "priority": 29
         },
         {
           "id": "gpt-oss-120b",
@@ -19189,7 +19675,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 27
+          "priority": 30
         },
         {
           "id": "qwen-2.5-72b-instruct",
@@ -19200,7 +19686,7 @@
             "text"
           ],
           "context_window": 33000,
-          "priority": 28
+          "priority": 31
         },
         {
           "id": "hermes-4-70b",
@@ -19211,7 +19697,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 29
+          "priority": 32
         },
         {
           "id": "claude-haiku-4-5",
@@ -19223,7 +19709,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 30
+          "priority": 33
         },
         {
           "id": "gpt-5.4",
@@ -19235,7 +19721,7 @@
             "image"
           ],
           "context_window": 1050000,
-          "priority": 31
+          "priority": 34
         },
         {
           "id": "kimi-k2.6",
@@ -19247,7 +19733,7 @@
             "image"
           ],
           "context_window": 256000,
-          "priority": 32
+          "priority": 35
         },
         {
           "id": "gpt-4.1",
@@ -19259,7 +19745,7 @@
             "image"
           ],
           "context_window": 1047576,
-          "priority": 33
+          "priority": 36
         },
         {
           "id": "nova-pro-v1",
@@ -19271,7 +19757,7 @@
             "image"
           ],
           "context_window": 300000,
-          "priority": 34
+          "priority": 37
         },
         {
           "id": "qwen3-coder-next",
@@ -19282,7 +19768,7 @@
             "text"
           ],
           "context_window": 256000,
-          "priority": 35
+          "priority": 38
         },
         {
           "id": "claude-opus4-5",
@@ -19294,7 +19780,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 36
+          "priority": 39
         },
         {
           "id": "qwen3-coder-480b-a35b-instruct",
@@ -19305,7 +19791,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 37
+          "priority": 40
         },
         {
           "id": "devstral-2512",
@@ -19316,7 +19802,7 @@
             "text"
           ],
           "context_window": 262000,
-          "priority": 38
+          "priority": 41
         },
         {
           "id": "qwen3.5-397b-a17b",
@@ -19327,7 +19813,19 @@
             "text"
           ],
           "context_window": 250000,
-          "priority": 39
+          "priority": 42
+        },
+        {
+          "id": "glm-5v-turbo",
+          "display_name": "GLM-5V-Turbo",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 200000,
+          "priority": 43
         },
         {
           "id": "glm-4.5-air",
@@ -19338,7 +19836,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 40
+          "priority": 44
         },
         {
           "id": "glm-4.7-flash",
@@ -19349,7 +19847,7 @@
             "text"
           ],
           "context_window": 203000,
-          "priority": 41
+          "priority": 45
         },
         {
           "id": "intellect-3",
@@ -19360,7 +19858,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 42
+          "priority": 46
         },
         {
           "id": "llama-3.1-405b-instruct",
@@ -19371,7 +19869,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 43
+          "priority": 47
         },
         {
           "id": "glm-5",
@@ -19382,7 +19880,7 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 44
+          "priority": 48
         },
         {
           "id": "mistral-large-2512",
@@ -19394,7 +19892,7 @@
             "image"
           ],
           "context_window": 256000,
-          "priority": 45
+          "priority": 49
         },
         {
           "id": "deepseek-v3.2",
@@ -19405,7 +19903,7 @@
             "text"
           ],
           "context_window": 163840,
-          "priority": 46
+          "priority": 50
         },
         {
           "id": "codestral-2508",
@@ -19416,7 +19914,7 @@
             "text"
           ],
           "context_window": 256000,
-          "priority": 47
+          "priority": 51
         },
         {
           "id": "qwen3.5-122b-a10b",
@@ -19427,7 +19925,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 48
+          "priority": 52
         },
         {
           "id": "nemotron-3-super-120b-a12b",
@@ -19438,7 +19936,18 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 49
+          "priority": 53
+        },
+        {
+          "id": "glm-5-turbo",
+          "display_name": "GLM-5-Turbo",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 200000,
+          "priority": 54
         },
         {
           "id": "claude-opus4-6",
@@ -19450,7 +19959,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 50
+          "priority": 55
         }
       ]
     },
@@ -19493,11 +20002,11 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 2
+          "priority": 3
         },
         {
           "id": "deepseek-v4-pro-lightning",
-          "display_name": "DeepSeek V4 Pro",
+          "display_name": "DeepSeek V4 Pro Lightning",
           "description": "deepseek-thinking \u2022 Reasoning \u2022 Tool calling",
           "reasoning": true,
           "input_modalities": [
@@ -19517,6 +20026,18 @@
           ],
           "context_window": 262144,
           "priority": 6
+        },
+        {
+          "id": "kimi-k2.7-code",
+          "display_name": "Kimi K2.7 Code",
+          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 7
         },
         {
           "id": "glm-5.1",
@@ -19541,6 +20062,17 @@
           "priority": 9
         },
         {
+          "id": "glm-5.2",
+          "display_name": "GLM-5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 1000000,
+          "priority": 10
+        },
+        {
           "id": "kimi-k2.5-lightning",
           "display_name": "Kimi K2.5 (Lightning)",
           "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
@@ -19550,7 +20082,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 10
+          "priority": 12
         },
         {
           "id": "kimi-k2.5",
@@ -19562,7 +20094,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 11
+          "priority": 13
         },
         {
           "id": "kimi-k2.6",
@@ -19574,7 +20106,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 12
+          "priority": 14
         },
         {
           "id": "qwen3.6-27b",
@@ -19586,7 +20118,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 13
+          "priority": 15
         },
         {
           "id": "qwen3.5-9b",
@@ -19598,7 +20130,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 14
+          "priority": 16
         },
         {
           "id": "qwen3.5-397b-a17b",
@@ -19610,7 +20142,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 15
+          "priority": 17
         },
         {
           "id": "glm-4.7-flash",
@@ -19621,7 +20153,7 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 16
+          "priority": 18
         },
         {
           "id": "mimo-v2.5-pro",
@@ -19632,7 +20164,7 @@
             "text"
           ],
           "context_window": 1048576,
-          "priority": 17
+          "priority": 19
         },
         {
           "id": "glm-5",
@@ -19643,7 +20175,7 @@
             "text"
           ],
           "context_window": 202752,
-          "priority": 18
+          "priority": 20
         },
         {
           "id": "deepseek-v3.2",
@@ -19654,7 +20186,7 @@
             "text"
           ],
           "context_window": 163840,
-          "priority": 19
+          "priority": 21
         }
       ]
     },
@@ -20977,28 +21509,6 @@
           ],
           "context_window": 204800,
           "priority": 44
-        }
-      ]
-    },
-    {
-      "id": "firepass",
-      "name": "Fireworks (Firepass)",
-      "env_key": "FIREPASS_API_KEY",
-      "base_url": "https://api.fireworks.ai/inference/v1/",
-      "wire_api": "chat",
-      "sort_priority": 100,
-      "models": [
-        {
-          "id": "accounts/fireworks/routers/kimi-k2p6-turbo",
-          "display_name": "Kimi K2.6 Turbo",
-          "description": "kimi-thinking \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
-          "reasoning": true,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 262000,
-          "priority": 0
         }
       ]
     },
@@ -23621,7 +24131,7 @@
           "input_modalities": [
             "text"
           ],
-          "context_window": 131072,
+          "context_window": 262144,
           "priority": 74
         },
         {
@@ -23632,7 +24142,7 @@
           "input_modalities": [
             "text"
           ],
-          "context_window": 131072,
+          "context_window": 262144,
           "priority": 75
         },
         {
@@ -26062,6 +26572,18 @@
       "sort_priority": 100,
       "models": [
         {
+          "id": "k2p5",
+          "display_name": "Kimi K2.5",
+          "description": "kimi-thinking \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 0
+        },
+        {
           "id": "k2p7",
           "display_name": "Kimi K2.7 Code",
           "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
@@ -26071,7 +26593,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 0
+          "priority": 1
         },
         {
           "id": "kimi-k2-thinking",
@@ -26082,19 +26604,32 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 1
+          "priority": 2
         },
         {
-          "id": "k2p5",
-          "display_name": "Kimi K2.5",
-          "description": "kimi-thinking \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "id": "kimi-for-coding-highspeed",
+          "display_name": "Kimi For Coding HighSpeed",
+          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
           "reasoning": true,
           "input_modalities": [
             "text",
             "image"
           ],
           "context_window": 262144,
-          "priority": 2
+          "priority": 3
+        },
+        {
+          "id": "k3",
+          "display_name": "Kimi K3",
+          "description": "kimi-k3 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 1048576,
+          "priority": -1,
+          "thinking_toggle": true
         },
         {
           "id": "k2p6",
@@ -26106,7 +26641,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 3
+          "priority": 5
         }
       ]
     },
@@ -26749,6 +27284,18 @@
           "priority": 56
         },
         {
+          "id": "gemma-4-31b-it",
+          "display_name": "Gemma 4 31B IT",
+          "description": "gemma \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 57
+        },
+        {
           "id": "grok-4-3",
           "display_name": "Grok 4.3",
           "description": "grok \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 PDF input",
@@ -26758,7 +27305,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 57
+          "priority": 58
         },
         {
           "id": "llama-3.3-70b-instruct",
@@ -26769,7 +27316,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 59
+          "priority": 60
         },
         {
           "id": "gemini-2.0-flash",
@@ -26781,7 +27328,7 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 61
+          "priority": 62
         },
         {
           "id": "grok-4-20-non-reasoning",
@@ -26793,7 +27340,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 62
+          "priority": 63
         },
         {
           "id": "glm-4.7-flashx",
@@ -26804,7 +27351,7 @@
             "text"
           ],
           "context_window": 200000,
-          "priority": 63
+          "priority": 64
         },
         {
           "id": "qwen3-30b-a3b-instruct-2507",
@@ -26815,7 +27362,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 64
+          "priority": 65
         },
         {
           "id": "kimi-k2.7-code",
@@ -26827,7 +27374,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 65
+          "priority": 66
         },
         {
           "id": "glm-5.1",
@@ -26838,7 +27385,7 @@
             "text"
           ],
           "context_window": 200000,
-          "priority": 66
+          "priority": 67
         },
         {
           "id": "deepseek-v4-pro",
@@ -26849,7 +27396,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 67
+          "priority": 68
         },
         {
           "id": "qwen3-next-80b-a3b-thinking",
@@ -26860,7 +27407,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 68
+          "priority": 69
         },
         {
           "id": "glm-4.6",
@@ -26871,7 +27418,7 @@
             "text"
           ],
           "context_window": 204800,
-          "priority": 69
+          "priority": 70
         },
         {
           "id": "qwen35-397b-a17b",
@@ -26883,7 +27430,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 70
+          "priority": 71
         },
         {
           "id": "qwen3-235b-a22b-thinking-2507",
@@ -26894,7 +27441,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 71
+          "priority": 72
         },
         {
           "id": "kimi-k2-thinking",
@@ -26905,7 +27452,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 72
+          "priority": 73
         },
         {
           "id": "claude-sonnet-4-5",
@@ -26917,7 +27464,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 73
+          "priority": 74
         },
         {
           "id": "gemini-pro-latest",
@@ -26929,7 +27476,7 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 74
+          "priority": 75
         },
         {
           "id": "glm-4.5-x",
@@ -26940,7 +27487,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 76
+          "priority": 77
         },
         {
           "id": "claude-opus-4-7",
@@ -26952,7 +27499,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 77
+          "priority": 78
         },
         {
           "id": "gpt-5.4-nano",
@@ -26964,7 +27511,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 78
+          "priority": 79
         },
         {
           "id": "grok-4-20-beta-0309-reasoning",
@@ -26976,7 +27523,18 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 79
+          "priority": 80
+        },
+        {
+          "id": "glm-5.2",
+          "display_name": "GLM-5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 1000000,
+          "priority": 81
         },
         {
           "id": "glm-4.5-airx",
@@ -26987,7 +27545,7 @@
             "text"
           ],
           "context_window": 128000,
-          "priority": 80
+          "priority": 82
         },
         {
           "id": "qwen2-5-vl-72b-instruct",
@@ -26999,7 +27557,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 83
+          "priority": 85
         },
         {
           "id": "glm-4.6v-flashx",
@@ -27011,7 +27569,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 84
+          "priority": 86
         },
         {
           "id": "minimax-m3",
@@ -27023,7 +27581,7 @@
             "image"
           ],
           "context_window": 512000,
-          "priority": 85
+          "priority": 87
         },
         {
           "id": "qwen3-vl-plus",
@@ -27035,7 +27593,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 86
+          "priority": 88
         },
         {
           "id": "claude-opus-4-5-20251101",
@@ -27047,7 +27605,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 87
+          "priority": 89
         },
         {
           "id": "gpt-5.1-codex",
@@ -27059,7 +27617,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 88
+          "priority": 90
         },
         {
           "id": "minimax-m2",
@@ -27070,7 +27628,7 @@
             "text"
           ],
           "context_window": 196608,
-          "priority": 89
+          "priority": 91
         },
         {
           "id": "claude-3-5-sonnet-20241022",
@@ -27082,7 +27640,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 90
+          "priority": 92
         },
         {
           "id": "claude-opus-4-8",
@@ -27094,7 +27652,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 91
+          "priority": 93
         },
         {
           "id": "claude-opus-4-20250514",
@@ -27106,7 +27664,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 92
+          "priority": 94
         },
         {
           "id": "qwen3-max-2026-01-23",
@@ -27118,7 +27676,7 @@
             "image"
           ],
           "context_window": 256000,
-          "priority": 93
+          "priority": 95
         },
         {
           "id": "gpt-5.3-chat-latest",
@@ -27130,7 +27688,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 94
+          "priority": 96
         },
         {
           "id": "claude-3-opus",
@@ -27142,7 +27700,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 95
+          "priority": 97
         },
         {
           "id": "qwen-omni-turbo",
@@ -27154,7 +27712,7 @@
             "image"
           ],
           "context_window": 32768,
-          "priority": 96
+          "priority": 98
         },
         {
           "id": "o3-mini",
@@ -27165,7 +27723,7 @@
             "text"
           ],
           "context_window": 200000,
-          "priority": 97
+          "priority": 99
         },
         {
           "id": "qwen3-32b-fp8",
@@ -27176,7 +27734,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 98
+          "priority": 100
         },
         {
           "id": "claude-3-5-haiku",
@@ -27187,7 +27745,7 @@
             "text"
           ],
           "context_window": 200000,
-          "priority": 99
+          "priority": 101
         },
         {
           "id": "gpt-5.2",
@@ -27199,7 +27757,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 100
+          "priority": 102
         },
         {
           "id": "gpt-5.3-codex",
@@ -27211,7 +27769,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 102
+          "priority": 104
         },
         {
           "id": "grok-4-0709",
@@ -27222,7 +27780,7 @@
             "text"
           ],
           "context_window": 256000,
-          "priority": 103
+          "priority": 105
         },
         {
           "id": "minimax-m2.7",
@@ -27233,7 +27791,7 @@
             "text"
           ],
           "context_window": 204800,
-          "priority": 104
+          "priority": 106
         },
         {
           "id": "qwen-flash",
@@ -27244,7 +27802,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 105
+          "priority": 107
         },
         {
           "id": "qwen3-4b-fp8",
@@ -27255,7 +27813,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 106
+          "priority": 108
         },
         {
           "id": "gemini-2.5-flash-lite",
@@ -27267,7 +27825,7 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 107
+          "priority": 109
         },
         {
           "id": "qwen2-5-vl-32b-instruct",
@@ -27279,7 +27837,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 108
+          "priority": 110
         },
         {
           "id": "claude-sonnet-4-20250514",
@@ -27291,7 +27849,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 109
+          "priority": 111
         },
         {
           "id": "gpt-5.1-codex-mini",
@@ -27303,7 +27861,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 110
+          "priority": 112
         },
         {
           "id": "qwen3-30b-a3b-thinking-2507",
@@ -27314,7 +27872,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 111
+          "priority": 113
         },
         {
           "id": "kimi-k2.5",
@@ -27326,7 +27884,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 112
+          "priority": 114
         },
         {
           "id": "seed-1-6-250915",
@@ -27338,7 +27896,7 @@
             "image"
           ],
           "context_window": 256000,
-          "priority": 113
+          "priority": 115
         },
         {
           "id": "gpt-5.2-chat-latest",
@@ -27350,7 +27908,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 114
+          "priority": 116
         },
         {
           "id": "grok-4-fast-reasoning",
@@ -27362,7 +27920,7 @@
             "image"
           ],
           "context_window": 2000000,
-          "priority": 116
+          "priority": 118
         },
         {
           "id": "gpt-4.1-nano",
@@ -27374,7 +27932,7 @@
             "image"
           ],
           "context_window": 1047576,
-          "priority": 117
+          "priority": 119
         },
         {
           "id": "gpt-oss-120b",
@@ -27385,7 +27943,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 118
+          "priority": 120
         },
         {
           "id": "qwen-vl-max",
@@ -27397,7 +27955,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 119
+          "priority": 121
         },
         {
           "id": "qwen3-30b-a3b-fp8",
@@ -27408,7 +27966,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 121
+          "priority": 123
         },
         {
           "id": "qwen-max",
@@ -27419,7 +27977,7 @@
             "text"
           ],
           "context_window": 32768,
-          "priority": 123
+          "priority": 125
         },
         {
           "id": "claude-3-7-sonnet-20250219",
@@ -27431,7 +27989,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 124
+          "priority": 126
         },
         {
           "id": "o1",
@@ -27443,7 +28001,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 125
+          "priority": 127
         },
         {
           "id": "minimax-m2.5-highspeed",
@@ -27454,7 +28012,7 @@
             "text"
           ],
           "context_window": 204800,
-          "priority": 126
+          "priority": 128
         },
         {
           "id": "deepseek-v3.1",
@@ -27466,7 +28024,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 127
+          "priority": 129
         },
         {
           "id": "llama-4-scout",
@@ -27477,7 +28035,7 @@
             "text"
           ],
           "context_window": 32768,
-          "priority": 128
+          "priority": 130
         },
         {
           "id": "glm-4.6v",
@@ -27489,7 +28047,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 131
+          "priority": 133
         },
         {
           "id": "claude-haiku-4-5",
@@ -27501,7 +28059,7 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 132
+          "priority": 134
         },
         {
           "id": "gpt-5.4",
@@ -27513,7 +28071,7 @@
             "image"
           ],
           "context_window": 1050000,
-          "priority": 134
+          "priority": 136
         },
         {
           "id": "mimo-v2.5",
@@ -27525,7 +28083,7 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 135
+          "priority": 137
         },
         {
           "id": "mimo-v2-omni",
@@ -27537,7 +28095,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 136
+          "priority": 138
         },
         {
           "id": "gpt-5.4-mini",
@@ -27549,7 +28107,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 137
+          "priority": 139
         },
         {
           "id": "kimi-k2.6",
@@ -27561,7 +28119,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 138
+          "priority": 140
         },
         {
           "id": "gpt-4.1",
@@ -27573,7 +28131,7 @@
             "image"
           ],
           "context_window": 1047576,
-          "priority": 139
+          "priority": 141
         },
         {
           "id": "gemini-3.1-pro-preview",
@@ -27585,7 +28143,7 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 140
+          "priority": 142
         },
         {
           "id": "claude-opus-4-6",
@@ -27597,7 +28155,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 141
+          "priority": 143
         },
         {
           "id": "qwen3-coder-next",
@@ -27608,7 +28166,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 142
+          "priority": 144
         },
         {
           "id": "qwen3-coder-480b-a35b-instruct",
@@ -27619,7 +28177,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 144
+          "priority": 146
         },
         {
           "id": "devstral-2512",
@@ -27630,7 +28188,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 145
+          "priority": 147
         },
         {
           "id": "claude-sonnet-4-5-20250929",
@@ -27642,7 +28200,30 @@
             "image"
           ],
           "context_window": 200000,
-          "priority": 146
+          "priority": 148
+        },
+        {
+          "id": "gemma-4-26b-a4b-it",
+          "display_name": "Gemma 4 26B A4B IT",
+          "description": "gemma \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 149
+        },
+        {
+          "id": "qwen3.5-9b",
+          "display_name": "Qwen3.5 9B",
+          "description": "qwen \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 262144,
+          "priority": 150
         },
         {
           "id": "qwq-plus",
@@ -27653,7 +28234,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 147
+          "priority": 151
         },
         {
           "id": "grok-4-1-fast-reasoning",
@@ -27665,7 +28246,7 @@
             "image"
           ],
           "context_window": 2000000,
-          "priority": 148
+          "priority": 152
         },
         {
           "id": "qwen3-vl-30b-a3b-instruct",
@@ -27677,7 +28258,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 149
+          "priority": 153
         },
         {
           "id": "qwen3-vl-flash",
@@ -27689,7 +28270,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 150
+          "priority": 154
         },
         {
           "id": "gpt-5-mini",
@@ -27701,7 +28282,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 151
+          "priority": 155
         },
         {
           "id": "mimo-v2-flash",
@@ -27712,7 +28293,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 152
+          "priority": 156
         },
         {
           "id": "gpt-4.1-mini",
@@ -27724,7 +28305,7 @@
             "image"
           ],
           "context_window": 1047576,
-          "priority": 153
+          "priority": 157
         },
         {
           "id": "gpt-4-turbo",
@@ -27736,7 +28317,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 155
+          "priority": 159
         },
         {
           "id": "qwen3-coder-flash",
@@ -27747,7 +28328,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 156
+          "priority": 160
         },
         {
           "id": "grok-build-0-1",
@@ -27759,7 +28340,7 @@
             "image"
           ],
           "context_window": 256000,
-          "priority": 158
+          "priority": 162
         },
         {
           "id": "gpt-5-nano",
@@ -27771,7 +28352,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 159
+          "priority": 163
         },
         {
           "id": "gpt-5.4-pro",
@@ -27783,7 +28364,7 @@
             "image"
           ],
           "context_window": 1050000,
-          "priority": 161
+          "priority": 165
         },
         {
           "id": "glm-4.6v-flash",
@@ -27795,7 +28376,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 162
+          "priority": 166
         },
         {
           "id": "glm-4.5-air",
@@ -27806,7 +28387,19 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 163
+          "priority": 167
+        },
+        {
+          "id": "kimi-k2.7-code-highspeed",
+          "display_name": "Kimi K2.7 Code Highspeed",
+          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 168
         },
         {
           "id": "claude-sonnet-4-6",
@@ -27818,7 +28411,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 164
+          "priority": 169
         },
         {
           "id": "gemini-3-flash-preview",
@@ -27830,7 +28423,7 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 165
+          "priority": 170
         },
         {
           "id": "glm-4.7-flash",
@@ -27841,7 +28434,7 @@
             "text"
           ],
           "context_window": 200000,
-          "priority": 166
+          "priority": 171
         },
         {
           "id": "qwen3-vl-235b-a22b-instruct",
@@ -27853,7 +28446,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 167
+          "priority": 172
         },
         {
           "id": "mimo-v2-pro",
@@ -27864,7 +28457,7 @@
             "text"
           ],
           "context_window": 1048576,
-          "priority": 168
+          "priority": 173
         },
         {
           "id": "mimo-v2.5-pro",
@@ -27875,7 +28468,7 @@
             "text"
           ],
           "context_window": 1048576,
-          "priority": 171
+          "priority": 176
         },
         {
           "id": "gpt-5.5-pro",
@@ -27887,7 +28480,7 @@
             "image"
           ],
           "context_window": 1050000,
-          "priority": 172
+          "priority": 177
         },
         {
           "id": "gpt-4o-mini",
@@ -27899,7 +28492,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 173
+          "priority": 178
         },
         {
           "id": "gpt-oss-20b",
@@ -27910,7 +28503,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 174
+          "priority": 179
         },
         {
           "id": "glm-4.5-flash",
@@ -27921,7 +28514,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 175
+          "priority": 180
         },
         {
           "id": "glm-5",
@@ -27932,7 +28525,7 @@
             "text"
           ],
           "context_window": 204800,
-          "priority": 176
+          "priority": 181
         },
         {
           "id": "qwen-max-latest",
@@ -27944,7 +28537,7 @@
             "image"
           ],
           "context_window": 32768,
-          "priority": 177
+          "priority": 182
         },
         {
           "id": "mistral-large-2512",
@@ -27956,7 +28549,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 178
+          "priority": 183
         },
         {
           "id": "qwen-turbo",
@@ -27967,7 +28560,7 @@
             "text"
           ],
           "context_window": 1000000,
-          "priority": 179
+          "priority": 184
         },
         {
           "id": "custom",
@@ -27979,7 +28572,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 180
+          "priority": 185
         },
         {
           "id": "grok-4-20-reasoning",
@@ -27991,7 +28584,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 181
+          "priority": 186
         },
         {
           "id": "deepseek-v3.2",
@@ -28003,7 +28596,7 @@
             "image"
           ],
           "context_window": 163840,
-          "priority": 182
+          "priority": 187
         },
         {
           "id": "qwen3.6-max-preview",
@@ -28014,7 +28607,7 @@
             "text"
           ],
           "context_window": 262144,
-          "priority": 183
+          "priority": 188
         },
         {
           "id": "auto",
@@ -28026,7 +28619,7 @@
             "image"
           ],
           "context_window": 128000,
-          "priority": 184
+          "priority": 189
         },
         {
           "id": "gemini-3.1-flash-lite-preview",
@@ -28038,7 +28631,7 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 185
+          "priority": 190
         },
         {
           "id": "qwen3-235b-a22b-fp8",
@@ -28049,7 +28642,7 @@
             "text"
           ],
           "context_window": 131072,
-          "priority": 187
+          "priority": 192
         },
         {
           "id": "gpt-5.2-codex",
@@ -28061,7 +28654,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 188
+          "priority": 193
         },
         {
           "id": "qwen-vl-plus",
@@ -28073,7 +28666,7 @@
             "image"
           ],
           "context_window": 131072,
-          "priority": 189
+          "priority": 194
         },
         {
           "id": "qwen3.6-plus",
@@ -28085,7 +28678,7 @@
             "image"
           ],
           "context_window": 1000000,
-          "priority": 190
+          "priority": 195
         },
         {
           "id": "gemini-2.0-flash-lite",
@@ -28097,7 +28690,7 @@
             "image"
           ],
           "context_window": 1048576,
-          "priority": 191
+          "priority": 196
         },
         {
           "id": "gpt-5.1",
@@ -28109,7 +28702,7 @@
             "image"
           ],
           "context_window": 400000,
-          "priority": 192
+          "priority": 197
         },
         {
           "id": "gpt-5.5",
@@ -28121,7 +28714,7 @@
             "image"
           ],
           "context_window": 1050000,
-          "priority": 193
+          "priority": 198
         }
       ]
     },
@@ -28149,9 +28742,9 @@
     },
     {
       "id": "lucidquery",
-      "name": "LucidQuery AI",
+      "name": "LucidQuery",
       "env_key": "LUCIDQUERY_API_KEY",
-      "base_url": "https://lucidquery.com/api/v1",
+      "base_url": "https://api.lucidquery.com/v1",
       "wire_api": "chat",
       "sort_priority": 100,
       "models": [
@@ -28176,6 +28769,30 @@
           ],
           "context_window": 250000,
           "priority": 1
+        },
+        {
+          "id": "lucidquery-agi-01-swift",
+          "display_name": "AGI-01 Swift",
+          "description": "agi \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 300000,
+          "priority": 2
+        },
+        {
+          "id": "lucidquery-agi-01-frontier",
+          "display_name": "AGI-01 Frontier",
+          "description": "agi \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 300000,
+          "priority": 3
         }
       ]
     },
@@ -31797,6 +32414,17 @@
           "priority": 1
         },
         {
+          "id": "glm-5.2",
+          "display_name": "GLM 5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling",
+          "reasoning": true,
+          "input_modalities": [
+            "text"
+          ],
+          "context_window": 1048560,
+          "priority": 2
+        },
+        {
           "id": "qwen3.5-397b-fast",
           "display_name": "Qwen3.5 397B Fast",
           "description": "qwen \u2022 Tool calling",
@@ -31805,7 +32433,7 @@
             "text"
           ],
           "context_window": 262128,
-          "priority": 2
+          "priority": 3
         },
         {
           "id": "glm-5.1-fast",
@@ -31816,7 +32444,7 @@
             "text"
           ],
           "context_window": 202736,
-          "priority": 3
+          "priority": 4
         },
         {
           "id": "kimi-k2.6-fast",
@@ -31828,7 +32456,7 @@
             "image"
           ],
           "context_window": 262128,
-          "priority": 4
+          "priority": 5
         },
         {
           "id": "qwen3.6-35b-fast",
@@ -31840,7 +32468,7 @@
             "image"
           ],
           "context_window": 131056,
-          "priority": 5
+          "priority": 6
         },
         {
           "id": "moonshotai/Kimi-K2.6",
@@ -31852,7 +32480,7 @@
             "image"
           ],
           "context_window": 262128,
-          "priority": 6
+          "priority": 7
         },
         {
           "id": "moonshotai/Kimi-K2.5",
@@ -31864,7 +32492,19 @@
             "image"
           ],
           "context_window": 262128,
-          "priority": 7
+          "priority": 8
+        },
+        {
+          "id": "moonshotai/Kimi-K2.7-Code",
+          "display_name": "Kimi K2.7 Code",
+          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 262144,
+          "priority": 9
         },
         {
           "id": "Qwen/Qwen3.6-35B-A3B",
@@ -31876,7 +32516,7 @@
             "image"
           ],
           "context_window": 131056,
-          "priority": 8
+          "priority": 10
         },
         {
           "id": "Qwen/Qwen3.5-397B-A17B-FP8",
@@ -31885,29 +32525,6 @@
           "reasoning": true,
           "input_modalities": [
             "text"
-          ],
-          "context_window": 262128,
-          "priority": 9
-        },
-        {
-          "id": "openai/gpt-oss-20b",
-          "display_name": "GPT OSS 20B",
-          "description": "gpt-oss \u2022 Reasoning \u2022 Tool calling",
-          "reasoning": true,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 16368,
-          "priority": 10
-        },
-        {
-          "id": "mistralai/Devstral-Small-2-24B-Instruct-2512",
-          "display_name": "Devstral Small 2 24B Instruct 2512",
-          "description": "devstral \u2022 Tool calling \u2022 Image input",
-          "reasoning": false,
-          "input_modalities": [
-            "text",
-            "image"
           ],
           "context_window": 262128,
           "priority": 11
@@ -31922,17 +32539,6 @@
           ],
           "context_window": 202736,
           "priority": 12
-        },
-        {
-          "id": "MiniMaxAI/MiniMax-M2.5",
-          "display_name": "MiniMax M2.5",
-          "description": "minimax \u2022 Reasoning \u2022 Tool calling",
-          "reasoning": true,
-          "input_modalities": [
-            "text"
-          ],
-          "context_window": 196592,
-          "priority": 13
         }
       ]
     },
@@ -33040,7 +33646,7 @@
           "input_modalities": [
             "text"
           ],
-          "context_window": 131040,
+          "context_window": 262144,
           "priority": 0
         },
         {
@@ -33051,7 +33657,7 @@
           "input_modalities": [
             "text"
           ],
-          "context_window": 131040,
+          "context_window": 262144,
           "priority": 1
         }
       ]
@@ -34635,18 +35241,6 @@
           "priority": 0
         },
         {
-          "id": "umans-kimi-k2.6",
-          "display_name": "Kimi K2.6",
-          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
-          "reasoning": true,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 262144,
-          "priority": 1
-        },
-        {
           "id": "umans-glm-5.1",
           "display_name": "GLM 5.1",
           "description": "glm \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
@@ -34656,7 +35250,7 @@
             "image"
           ],
           "context_window": 204800,
-          "priority": 2
+          "priority": 1
         },
         {
           "id": "umans-coder",
@@ -34668,7 +35262,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 3
+          "priority": 2
         },
         {
           "id": "umans-flash",
@@ -34680,6 +35274,18 @@
             "image"
           ],
           "context_window": 262144,
+          "priority": 3
+        },
+        {
+          "id": "umans-glm-5.2",
+          "display_name": "GLM 5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 405504,
           "priority": 4
         }
       ]
@@ -34705,18 +35311,6 @@
           "priority": 0
         },
         {
-          "id": "umans-kimi-k2.6",
-          "display_name": "Kimi K2.6",
-          "description": "kimi-k2 \u2022 Reasoning \u2022 Tool calling \u2022 Image input \u2022 Video input",
-          "reasoning": true,
-          "input_modalities": [
-            "text",
-            "image"
-          ],
-          "context_window": 262144,
-          "priority": 1
-        },
-        {
           "id": "umans-glm-5.1",
           "display_name": "GLM 5.1",
           "description": "glm \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
@@ -34726,7 +35320,7 @@
             "image"
           ],
           "context_window": 204800,
-          "priority": 2
+          "priority": 1
         },
         {
           "id": "umans-coder",
@@ -34738,7 +35332,7 @@
             "image"
           ],
           "context_window": 262144,
-          "priority": 3
+          "priority": 2
         },
         {
           "id": "umans-flash",
@@ -34750,6 +35344,18 @@
             "image"
           ],
           "context_window": 262144,
+          "priority": 3
+        },
+        {
+          "id": "umans-glm-5.2",
+          "display_name": "GLM 5.2",
+          "description": "glm \u2022 Reasoning \u2022 Tool calling \u2022 Image input",
+          "reasoning": true,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "context_window": 405504,
           "priority": 4
         },
         {
@@ -35511,7 +36117,7 @@
     {
       "id": "zai-coding-plan",
       "name": "Z.AI Coding Plan",
-      "env_key": "ZHIPU_API_KEY",
+      "env_key": "ZAI_API_KEY",
       "base_url": "https://api.z.ai/api/coding/paas/v4",
       "wire_api": "chat",
       "sort_priority": 100,

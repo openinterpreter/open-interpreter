@@ -1,5 +1,5 @@
-use codex_app_server_protocol::AuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_protocol::auth::AuthMode;
 use pretty_assertions::assert_eq;
 use serial_test::serial;
 use tempfile::tempdir;
@@ -60,8 +60,10 @@ async fn login_with_bedrock_api_key_replaces_openai_auth() -> anyhow::Result<()>
         codex_home.path().to_path_buf(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
+        /*auth_route_config*/ None,
     )
     .await;
 
@@ -83,6 +85,7 @@ async fn login_with_bedrock_api_key_replaces_openai_auth() -> anyhow::Result<()>
             CodexAuth::ApiKey(_)
             | CodexAuth::Chatgpt(_)
             | CodexAuth::ChatgptAuthTokens(_)
+            | CodexAuth::Headers(_)
             | CodexAuth::AgentIdentity(_)
             | CodexAuth::PersonalAccessToken(_) => None,
         }),
@@ -107,8 +110,10 @@ async fn logout_removes_bedrock_auth() -> anyhow::Result<()> {
         codex_home.path().to_path_buf(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
+        /*auth_route_config*/ None,
     )
     .await;
 
@@ -130,8 +135,10 @@ async fn bedrock_only_auth_storage_creates_primary_auth() -> anyhow::Result<()> 
         codex_home.path().to_path_buf(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
+        /*auth_route_config*/ None,
     )
     .await;
 
@@ -142,6 +149,7 @@ async fn bedrock_only_auth_storage_creates_primary_auth() -> anyhow::Result<()> 
             CodexAuth::ApiKey(_)
             | CodexAuth::Chatgpt(_)
             | CodexAuth::ChatgptAuthTokens(_)
+            | CodexAuth::Headers(_)
             | CodexAuth::AgentIdentity(_)
             | CodexAuth::PersonalAccessToken(_) => None,
         }),

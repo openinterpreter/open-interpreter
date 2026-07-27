@@ -2,9 +2,9 @@ use crate::history_cell::PlainHistoryCell;
 use crate::legacy_core::config::Config;
 use crate::legacy_core::config::Permissions;
 use crate::session_state::SessionNetworkProxyRuntime;
-use codex_app_server_protocol::ConfigLayerSource;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerEntry;
+use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::ManagedHooksRequirementsToml;
@@ -29,6 +29,7 @@ pub(crate) fn new_debug_config_output(
     let mut lines = render_debug_config_lines(&config.config_layer_stack, |mode| {
         sandbox_mode_is_allowed_by_permissions(&config.permissions, mode)
     });
+    lines.extend(render_agents_config_lines(config));
 
     if let Some(proxy) = session_network_proxy {
         lines.push("".into());
@@ -52,6 +53,45 @@ pub(crate) fn new_debug_config_output(
     }
 
     PlainHistoryCell::new(lines)
+}
+
+fn render_agents_config_lines(config: &Config) -> Vec<Line<'static>> {
+    vec![
+        "".into(),
+        "[agents]:".bold().into(),
+        format!("  - enabled = {}", config.agents_enabled).into(),
+        format!(
+            "  - max_concurrent_threads_per_session = {}",
+            format_optional(config.agent_max_threads)
+        )
+        .into(),
+        format!(
+            "  - max_depth = {} (V1 only; ignored by V2)",
+            config.agent_max_depth
+        )
+        .into(),
+        format!(
+            "  - default_subagent_model = {}",
+            format_optional(config.agent_default_subagent_model.as_deref())
+        )
+        .into(),
+        format!(
+            "  - default_subagent_reasoning_effort = {}",
+            format_optional(config.agent_default_subagent_reasoning_effort.as_ref())
+        )
+        .into(),
+        format!(
+            "  - interrupt_message = {}",
+            config.agent_interrupt_message_enabled
+        )
+        .into(),
+    ]
+}
+
+fn format_optional(value: Option<impl std::fmt::Display>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "<unset>".to_string())
 }
 
 fn sandbox_mode_is_allowed_by_permissions(
@@ -552,13 +592,15 @@ fn format_network_unix_socket_permission(
 
 #[cfg(test)]
 mod tests {
+    use super::render_agents_config_lines;
     use super::render_debug_config_lines;
     use super::sandbox_mode_is_allowed_by_permissions;
     use super::session_all_proxy_url;
+    use crate::legacy_core::config::ConfigBuilder;
     use crate::legacy_core::config::Permissions;
     use codex_app_server_protocol::AskForApproval;
-    use codex_app_server_protocol::ConfigLayerSource;
     use codex_config::ConfigLayerEntry;
+    use codex_config::ConfigLayerSource;
     use codex_config::ConfigLayerStack;
     use codex_config::ConfigRequirements;
     use codex_config::ConfigRequirementsToml;
@@ -569,6 +611,7 @@ mod tests {
     use codex_config::FilesystemConstraints;
     use codex_config::HookEventsToml;
     use codex_config::HookHandlerConfig;
+    use codex_config::LoaderOverrides;
     use codex_config::ManagedHooksRequirementsToml;
     use codex_config::MatcherGroup;
     use codex_config::McpServerIdentity;
@@ -591,6 +634,32 @@ mod tests {
     use ratatui::text::Line;
     use std::collections::BTreeMap;
     use toml::Value as TomlValue;
+
+    #[tokio::test]
+    async fn debug_config_output_lists_agents_fields() {
+        let codex_home = tempfile::tempdir().expect("create temp dir");
+        std::fs::write(
+            codex_home.path().join(codex_config::CONFIG_TOML_FILE),
+            r#"[agents]
+enabled = false
+max_concurrent_threads_per_session = 7
+max_depth = -2
+default_subagent_model = "gpt-5.6-terra"
+default_subagent_reasoning_effort = "high"
+interrupt_message = false
+"#,
+        )
+        .expect("write config");
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .fallback_cwd(Some(codex_home.path().to_path_buf()))
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+            .build()
+            .await
+            .expect("load config");
+
+        insta::assert_snapshot!(render_to_text(&render_agents_config_lines(&config)));
+    }
 
     fn empty_toml_table() -> TomlValue {
         TomlValue::Table(toml::map::Map::new())
@@ -699,7 +768,7 @@ mod tests {
             mcp_servers: Some(Sourced::new(
                 BTreeMap::from([(
                     "docs".to_string(),
-                    McpServerRequirement {
+                    McpServerRequirement::Identity {
                         identity: McpServerIdentity::Command {
                             command: "codex-mcp".to_string(),
                         },
@@ -778,18 +847,20 @@ mod tests {
             hooks: None,
             mcp_servers: Some(BTreeMap::from([(
                 "docs".to_string(),
-                McpServerRequirement {
+                McpServerRequirement::Identity {
                     identity: McpServerIdentity::Command {
                         command: "codex-mcp".to_string(),
                     },
                 },
             )])),
             plugins: None,
+            marketplaces: None,
             apps: None,
             rules: None,
             enforce_residency: Some(ResidencyRequirement::Us),
             network: None,
             permissions: None,
+            models: None,
         };
 
         let user_file = if cfg!(windows) {
@@ -1142,11 +1213,13 @@ approval_policy = "never"
             hooks: None,
             mcp_servers: None,
             plugins: None,
+            marketplaces: None,
             apps: None,
             rules: None,
             enforce_residency: None,
             network: None,
             permissions: None,
+            models: None,
         };
 
         let stack = ConfigLayerStack::new(Vec::new(), requirements, requirements_toml)
@@ -1179,6 +1252,7 @@ approval_policy = "never"
                                 timeout_sec: Some(10),
                                 r#async: false,
                                 status_message: Some("checking".to_string()),
+                                additional_context_limit: None,
                             }],
                         }],
                         ..Default::default()

@@ -46,12 +46,15 @@ const METER_NAME: &str = "codex";
 const MILLISECOND_DURATION_UNIT: &str = "ms";
 const MILLISECOND_DURATION_DESCRIPTION: &str = "Duration in milliseconds.";
 const MILLISECOND_DURATION_BOUNDARIES: &[f64] = &[
-    0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0, 7500.0,
-    10000.0,
+    0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1_000.0, 1_250.0, 1_500.0,
+    1_750.0, 2_000.0, 2_250.0, 2_500.0, 3_000.0, 3_500.0, 4_000.0, 4_500.0, 5_000.0, 6_000.0,
+    7_000.0, 7_500.0, 8_000.0, 9_000.0, 10_000.0, 12_000.0, 15_000.0, 20_000.0, 30_000.0, 60_000.0,
+    120_000.0,
 ];
 const SECOND_DURATION_UNIT: &str = "s";
 const SECOND_DURATION_BOUNDARIES: &[f64] = &[
-    0.0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
+    0.0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 12.0,
+    15.0, 20.0, 30.0, 60.0, 120.0,
 ];
 
 #[derive(Debug, Eq, Hash, PartialEq)]
@@ -185,6 +188,24 @@ impl MetricsClientInner {
             }
         });
         gauge.record(value, &attributes);
+        Ok(())
+    }
+
+    fn register_observable_gauge(
+        &self,
+        name: &str,
+        description: &str,
+        observe: impl Fn() -> i64 + Send + Sync + 'static,
+        tags: &[(&str, &str)],
+    ) -> Result<()> {
+        validate_metric_name(name)?;
+        let attributes = self.attributes(tags)?;
+        let _gauge = self
+            .meter
+            .i64_observable_gauge(name.to_string())
+            .with_description(description.to_string())
+            .with_callback(move |observer| observer.observe(observe(), &attributes))
+            .build();
         Ok(())
     }
 
@@ -354,6 +375,18 @@ impl MetricsClient {
         self.0.gauge(name, Some(description), value, tags)
     }
 
+    /// Register a gauge callback that reports the current value on every collection.
+    pub fn register_observable_gauge_with_description(
+        &self,
+        name: &str,
+        description: &str,
+        observe: impl Fn() -> i64 + Send + Sync + 'static,
+        tags: &[(&str, &str)],
+    ) -> Result<()> {
+        self.0
+            .register_observable_gauge(name, description, observe, tags)
+    }
+
     /// Record a duration in milliseconds using a histogram.
     pub fn record_duration(
         &self,
@@ -364,6 +397,23 @@ impl MetricsClient {
         self.0.duration_histogram(
             name,
             duration.as_millis().min(i64::MAX as u128) as f64,
+            MILLISECOND_DURATION_UNIT,
+            MILLISECOND_DURATION_DESCRIPTION,
+            MILLISECOND_DURATION_BOUNDARIES,
+            tags,
+        )
+    }
+
+    /// Record a duration supplied as fractional milliseconds using a histogram.
+    pub(crate) fn record_duration_ms_f64(
+        &self,
+        name: &str,
+        duration_ms: f64,
+        tags: &[(&str, &str)],
+    ) -> Result<()> {
+        self.0.duration_histogram(
+            name,
+            duration_ms,
             MILLISECOND_DURATION_UNIT,
             MILLISECOND_DURATION_DESCRIPTION,
             MILLISECOND_DURATION_BOUNDARIES,

@@ -224,6 +224,7 @@ fn build_messages(prompt: &Prompt, kind: &Terminus2RequestKind) -> Vec<Value> {
             | ResponseItem::Compaction { .. }
             | ResponseItem::CompactionTrigger { .. }
             | ResponseItem::ContextCompaction { .. }
+            | ResponseItem::AdditionalTools { .. }
             | ResponseItem::Other => {}
         }
     }
@@ -912,7 +913,7 @@ fn build_harness_follow_up_items(
                     text: question_prompt(original_instruction, content, current_screen),
                 }],
                 phase: None,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }];
         }
         Terminus2RequestKind::Questions => {
@@ -923,7 +924,7 @@ fn build_harness_follow_up_items(
                     text: answer_questions_prompt(content),
                 }],
                 phase: None,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }];
         }
         Terminus2RequestKind::AnswerQuestions { questions } => {
@@ -934,7 +935,7 @@ fn build_harness_follow_up_items(
                     text: handoff_prompt(content, questions),
                 }],
                 phase: None,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }];
         }
         Terminus2RequestKind::Handoff { .. } | Terminus2RequestKind::Action { .. } => {}
@@ -949,7 +950,7 @@ fn build_harness_follow_up_items(
                 text: parse_error_prompt(&parsed.error, &parsed.warning),
             }],
             phase: None,
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         }];
     }
 
@@ -964,7 +965,7 @@ fn build_harness_follow_up_items(
                 text: completion_confirmation_prompt(&initial_terminal_state()),
             }],
             phase: None,
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         }];
     }
 
@@ -1021,7 +1022,7 @@ fn build_shell_call(commands: Vec<ParsedCommand>, working_directory: String) -> 
             ])),
             user: None,
         }),
-        metadata: None,
+        internal_chat_message_metadata_passthrough: None,
     }
 }
 
@@ -1705,7 +1706,7 @@ fn plain_text_content(content: &[ContentItem]) -> Option<String> {
         .iter()
         .filter_map(|item| match item {
             ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text),
-            ContentItem::InputImage { .. } => None,
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
         })
         .cloned()
         .collect::<Vec<_>>()
@@ -1759,7 +1760,7 @@ mod tests {
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
             ..Default::default()
         };
@@ -1831,7 +1832,7 @@ mod tests {
             &Terminus2RequestKind::Action {
                 current_workdir: "/app".to_string(),
             },
-            false,
+            /*pending_completion*/ false,
         );
         assert!(
             matches!(items.first(), Some(ResponseItem::Message { role, .. }) if role == "user")
@@ -1842,7 +1843,7 @@ mod tests {
                 &Terminus2RequestKind::Action {
                     current_workdir: "/app".to_string(),
                 },
-                true,
+                /*pending_completion*/ true,
             )
             .is_empty()
         );
@@ -1860,7 +1861,7 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,},
+                    internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
                     id: None,
                     role: "assistant".to_string(),
@@ -1869,7 +1870,7 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,},
+                    internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::FunctionCallOutput {
                     id: None,
                     call_id: "terminus-2-shell-0".to_string(),
@@ -1877,7 +1878,7 @@ mod tests {
                         "root@host:/app# pwd\n/app\nroot@host:/app#\n".to_string(),
                     ),
 
-                    metadata: None,},
+                    internal_chat_message_metadata_passthrough: None,},
             ],
             ..Default::default()
         };
@@ -1917,7 +1918,7 @@ mod tests {
                 }],
                 phase: None,
 
-                metadata: None,}],
+                internal_chat_message_metadata_passthrough: None,}],
             ..Default::default()
         };
         let (_, _, kind) = build_request(&prompt, &model_info()).expect("request");
@@ -1942,7 +1943,7 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,},
+                    internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
                     id: None,
                     role: "user".to_string(),
@@ -1952,7 +1953,7 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,},
+                    internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
                     id: None,
                     role: "assistant".to_string(),
@@ -1961,7 +1962,7 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,},
+                    internal_chat_message_metadata_passthrough: None,},
             ],
             ..Default::default()
         };
@@ -1992,7 +1993,7 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,},
+                    internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
                     id: None,
                     role: "user".to_string(),
@@ -2002,7 +2003,7 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,},
+                    internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
                     id: None,
                     role: "assistant".to_string(),
@@ -2012,7 +2013,7 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,},
+                    internal_chat_message_metadata_passthrough: None,},
             ],
             ..Default::default()
         };
@@ -2043,7 +2044,7 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,},
+                    internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
                     id: None,
                     role: "assistant".to_string(),
@@ -2052,7 +2053,7 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,},
+                    internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
                     id: None,
                     role: "user".to_string(),
@@ -2062,7 +2063,7 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,},
+                    internal_chat_message_metadata_passthrough: None,},
             ],
             ..Default::default()
         };
@@ -2093,7 +2094,7 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
                     id: None,
@@ -2104,7 +2105,7 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
                     id: None,
@@ -2115,7 +2116,7 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             ],
             ..Default::default()

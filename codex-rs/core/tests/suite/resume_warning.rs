@@ -1,5 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
+use std::sync::Arc;
+
 use codex_core::NewThread;
 use codex_login::CodexAuth;
 use codex_protocol::ThreadId;
@@ -32,6 +34,7 @@ fn resume_history(
         current_date: None,
         timezone: None,
         approval_policy: config.permissions.approval_policy.value(),
+        approvals_reviewer: None,
         sandbox_policy: config.legacy_sandbox_policy(),
         permission_profile: None,
         network: None,
@@ -41,6 +44,7 @@ fn resume_history(
         personality: None,
         collaboration_mode: None,
         multi_agent_version: None,
+        multi_agent_mode: None,
         realtime_active: None,
         effort: config.model_reasoning_effort.clone(),
         summary: config
@@ -50,7 +54,7 @@ fn resume_history(
 
     InitialHistory::Resumed(ResumedHistory {
         conversation_id: ThreadId::default(),
-        history: vec![
+        history: Arc::new(vec![
             RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: turn_id.clone(),
                 trace_id: None,
@@ -70,11 +74,13 @@ fn resume_history(
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id,
                 last_agent_message: None,
+                error: None,
+                started_at: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
             })),
-        ],
+        ]),
         rollout_path: Some(rollout_path.to_path_buf()),
     })
 }
@@ -110,6 +116,7 @@ async fn emits_warning_when_resumed_model_differs() {
             initial_history,
             auth_manager,
             /*parent_trace*/ None,
+            /*supports_openai_form_elicitation*/ false,
         )
         .await
         .expect("resume conversation");

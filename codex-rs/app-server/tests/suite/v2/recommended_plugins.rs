@@ -68,17 +68,16 @@ async fn first_turn_after_external_login_waits_for_recommended_plugins() -> Resu
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
         config_path,
-        format!(
-            "{config}\n[features]\napps = true\nplugins = true\nremote_plugin = true\ntool_suggest = true\n"
-        ),
+        format!("{config}\n[features]\napps = true\nplugins = true\ntool_suggest = true\n"),
     )?;
 
     let sqlite_home = codex_home.path().to_string_lossy();
-    let mut app_server = TestAppServer::new_without_managed_config_with_env(
-        codex_home.path(),
-        &[("CODEX_SQLITE_HOME", Some(sqlite_home.as_ref()))],
-    )
-    .await?;
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_managed_config()
+        .with_env_overrides(&[("CODEX_SQLITE_HOME", Some(sqlite_home.as_ref()))])
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, app_server.initialize()).await??;
 
     let access_token = encode_id_token(
@@ -105,7 +104,7 @@ async fn first_turn_after_external_login_waits_for_recommended_plugins() -> Resu
     );
 
     let thread_id = app_server
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             ..Default::default()
         })

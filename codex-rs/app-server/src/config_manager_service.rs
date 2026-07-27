@@ -1,8 +1,8 @@
+use crate::config_layer::config_layer_metadata_to_api;
+use crate::config_layer::config_layer_to_api;
 use crate::config_manager::ConfigManager;
 use codex_app_server_protocol::Config as ApiConfig;
 use codex_app_server_protocol::ConfigBatchWriteParams;
-use codex_app_server_protocol::ConfigLayerMetadata;
-use codex_app_server_protocol::ConfigLayerSource;
 use codex_app_server_protocol::ConfigReadParams;
 use codex_app_server_protocol::ConfigReadResponse;
 use codex_app_server_protocol::ConfigValueWriteParams;
@@ -13,6 +13,8 @@ use codex_app_server_protocol::OverriddenMetadata;
 use codex_app_server_protocol::WriteStatus;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerEntry;
+use codex_config::ConfigLayerMetadata;
+use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::ConfigRequirementsToml;
@@ -136,7 +138,11 @@ impl ConfigManager {
 
         Ok(ConfigReadResponse {
             config,
-            origins: layers.origins(),
+            origins: layers
+                .origins()
+                .into_iter()
+                .map(|(path, metadata)| (path, config_layer_metadata_to_api(metadata)))
+                .collect(),
             layers: params.include_layers.then(|| {
                 layers
                     .get_layers(
@@ -144,7 +150,7 @@ impl ConfigManager {
                         /*include_disabled*/ true,
                     )
                     .iter()
-                    .map(|layer| layer.as_layer())
+                    .map(|layer| config_layer_to_api(layer.as_layer()))
                     .collect()
             }),
         })
@@ -173,6 +179,43 @@ impl ConfigManager {
         let edits = vec![(params.key_path, params.value, params.merge_strategy)];
         self.apply_edits(params.file_path, params.expected_version, edits)
             .await
+    }
+
+    /// Clears a value from the active user config only when its current raw value matches.
+    pub(crate) async fn clear_user_value_if_matches(
+        &self,
+        key_path: &str,
+        expected_value: JsonValue,
+    ) -> Result<(), ConfigManagerError> {
+        let layers = self
+            .load_thread_agnostic_config()
+            .await
+            .map_err(|err| ConfigManagerError::io("failed to load configuration", err))?;
+        let Some(user_layer) = layers.get_active_user_layer() else {
+            return Ok(());
+        };
+        let segments = parse_key_path(key_path).map_err(|message| {
+            ConfigManagerError::write(ConfigWriteErrorCode::ConfigValidationError, message)
+        })?;
+        let expected_value = parse_value(expected_value).map_err(|message| {
+            ConfigManagerError::write(ConfigWriteErrorCode::ConfigValidationError, message)
+        })?;
+        if value_at_path(&user_layer.config, &segments) != expected_value.as_ref() {
+            return Ok(());
+        }
+        let expected_version = Some(user_layer.version.clone());
+
+        self.apply_edits(
+            /*file_path*/ None,
+            expected_version,
+            vec![(
+                key_path.to_string(),
+                JsonValue::Null,
+                MergeStrategy::Replace,
+            )],
+        )
+        .await?;
+        Ok(())
     }
 
     pub(crate) async fn batch_write(
@@ -671,7 +714,7 @@ fn compute_override_metadata(
 
     Some(OverriddenMetadata {
         message,
-        overriding_layer,
+        overriding_layer: config_layer_metadata_to_api(overriding_layer),
         effective_value: effective_value
             .and_then(|value| serde_json::to_value(value).ok())
             .unwrap_or(JsonValue::Null),

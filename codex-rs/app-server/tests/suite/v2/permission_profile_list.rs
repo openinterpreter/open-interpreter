@@ -41,7 +41,11 @@ description = "Inspect without writes."
 "#,
     )?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp
@@ -60,22 +64,27 @@ description = "Inspect without writes."
                 PermissionProfileSummary {
                     id: BUILT_IN_PERMISSION_PROFILE_READ_ONLY.to_string(),
                     description: None,
+                    allowed: true,
                 },
                 PermissionProfileSummary {
                     id: BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string(),
                     description: None,
+                    allowed: true,
                 },
                 PermissionProfileSummary {
                     id: BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS.to_string(),
                     description: None,
+                    allowed: true,
                 },
                 PermissionProfileSummary {
                     id: "audit".to_string(),
                     description: Some("Inspect without writes.".to_string()),
+                    allowed: true,
                 },
                 PermissionProfileSummary {
                     id: "dev".to_string(),
                     description: Some("Day-to-day coding work.".to_string()),
+                    allowed: true,
                 },
             ],
             next_cursor: None,
@@ -108,7 +117,11 @@ description = "Project-scoped profile."
     )?;
     set_project_trust_level(codex_home.path(), workspace.path(), TrustLevel::Trusted)?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
     let first_request_id = mcp
@@ -126,14 +139,17 @@ description = "Project-scoped profile."
                 PermissionProfileSummary {
                     id: BUILT_IN_PERMISSION_PROFILE_READ_ONLY.to_string(),
                     description: None,
+                    allowed: true,
                 },
                 PermissionProfileSummary {
                     id: BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string(),
                     description: None,
+                    allowed: true,
                 },
                 PermissionProfileSummary {
                     id: BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS.to_string(),
                     description: None,
+                    allowed: true,
                 },
             ],
             next_cursor: Some("3".to_string()),
@@ -155,6 +171,7 @@ description = "Project-scoped profile."
             data: vec![PermissionProfileSummary {
                 id: "project".to_string(),
                 description: Some("Project-scoped profile.".to_string()),
+                allowed: true,
             }],
             next_cursor: None,
         }
@@ -181,7 +198,11 @@ description = "Project-scoped profile."
     )?;
     set_project_trust_level(codex_home.path(), workspace.path(), TrustLevel::Trusted)?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp
@@ -200,18 +221,22 @@ description = "Project-scoped profile."
                 PermissionProfileSummary {
                     id: BUILT_IN_PERMISSION_PROFILE_READ_ONLY.to_string(),
                     description: None,
+                    allowed: true,
                 },
                 PermissionProfileSummary {
                     id: BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string(),
                     description: None,
+                    allowed: true,
                 },
                 PermissionProfileSummary {
                     id: BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS.to_string(),
                     description: None,
+                    allowed: true,
                 },
                 PermissionProfileSummary {
                     id: "project".to_string(),
                     description: Some("Project-scoped profile.".to_string()),
+                    allowed: true,
                 },
             ],
             next_cursor: None,

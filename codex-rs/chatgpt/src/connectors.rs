@@ -3,12 +3,15 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::chatgpt_client::chatgpt_get_request_with_timeout;
+use crate::chatgpt_client::chatgpt_post_request_with_timeout;
 
-use codex_app_server_protocol::AppInfo;
+use codex_connectors::AppInfo;
 use codex_connectors::ConnectorDirectoryCacheContext;
 use codex_connectors::ConnectorDirectoryCacheKey;
+use codex_connectors::ConnectorMetadata;
+use codex_connectors::ConnectorMetadataStore;
+use codex_connectors::ConnectorToolSummary;
 use codex_connectors::DirectoryListResponse;
-use codex_connectors::filter::filter_disallowed_connectors;
 use codex_connectors::merge::merge_connectors;
 use codex_connectors::merge::merge_plugin_connectors;
 use codex_core::config::Config;
@@ -21,10 +24,13 @@ pub use codex_core::connectors::list_cached_accessible_connectors_from_mcp_tools
 pub use codex_core::connectors::with_app_enabled_state;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
-use codex_login::default_client::originator;
 use codex_plugin::AppConnectorId;
+use serde::Deserialize;
+use serde::Serialize;
 
 const DIRECTORY_CONNECTORS_TIMEOUT: Duration = Duration::from_secs(60);
+const CONNECTOR_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_APPS_PRODUCT_SKU: &str = "codex";
 
 async fn apps_enabled(config: &Config) -> bool {
     let auth_manager =
@@ -82,7 +88,10 @@ pub async fn list_cached_all_connectors(
     let auth = connector_auth(config).await.ok()?;
     let cache_context = connector_directory_cache_context(config, &auth);
     let connectors = codex_connectors::cached_directory_connectors(&cache_context)?;
-    Some(merge_and_filter_plugin_connectors(connectors, plugin_apps))
+    Some(merge_directory_and_plugin_connectors(
+        connectors,
+        plugin_apps,
+    ))
 }
 
 pub async fn list_all_connectors_with_options(
@@ -109,7 +118,171 @@ pub async fn list_all_connectors_with_options(
         },
     )
     .await?;
-    Ok(merge_and_filter_plugin_connectors(connectors, plugin_apps))
+    Ok(merge_directory_and_plugin_connectors(
+        connectors,
+        plugin_apps,
+    ))
+}
+
+pub struct ConnectorMetadataReadResult {
+    pub apps: Vec<ConnectorMetadata>,
+    pub missing_app_ids: Vec<String>,
+}
+
+/// Reads display metadata without loading MCP connector tools or runtime state.
+///
+/// The store is created before awaiting the backend request, so a response that arrives after an
+/// account or backend change can only commit to the scope under which it was requested.
+pub async fn read_connector_metadata(
+    config: &Config,
+    auth: &CodexAuth,
+    app_ids: &[String],
+    include_tools: bool,
+) -> anyhow::Result<ConnectorMetadataReadResult> {
+    anyhow::ensure!(
+        auth.uses_codex_backend(),
+        "ChatGPT backend requests require Codex backend auth"
+    );
+    anyhow::ensure!(
+        auth.get_account_id().is_some(),
+        "ChatGPT account ID not available, please re-run codex login"
+    );
+
+    let store = ConnectorMetadataStore::new(
+        config.chatgpt_base_url.clone(),
+        auth.get_account_id(),
+        auth.get_chatgpt_user_id(),
+        auth.is_workspace_account(),
+    );
+    let mut metadata_by_id = store.fresh_records(app_ids, include_tools);
+    let missing_ids = app_ids
+        .iter()
+        .filter(|app_id| !metadata_by_id.contains_key(app_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if !missing_ids.is_empty() {
+        let product_sku = config
+            .apps_mcp_product_sku
+            .as_deref()
+            .unwrap_or(DEFAULT_APPS_PRODUCT_SKU);
+        let response: GetAppsResponse = chatgpt_post_request_with_timeout(
+            config,
+            auth,
+            "/ps/apps/batch".to_string(),
+            &GetAppsRequest {
+                app_ids: &missing_ids,
+                include_tools,
+            },
+            CONNECTOR_METADATA_TIMEOUT,
+            product_sku,
+        )
+        .await?;
+        let mut requested_ids = missing_ids.iter().cloned().collect::<HashSet<_>>();
+        let fetched = response
+            .apps
+            .into_iter()
+            .map(batch_app_to_metadata)
+            .filter(|metadata| requested_ids.remove(&metadata.id))
+            .collect::<Vec<_>>();
+        store.commit(&fetched);
+        metadata_by_id.extend(
+            fetched
+                .into_iter()
+                .map(|metadata| (metadata.id.clone(), metadata)),
+        );
+    }
+
+    let mut apps = Vec::new();
+    let mut missing_app_ids = Vec::new();
+    for app_id in app_ids {
+        if let Some(mut metadata) = metadata_by_id.remove(app_id) {
+            if !include_tools {
+                metadata.tool_summaries = None;
+            }
+            apps.push(metadata);
+        } else {
+            missing_app_ids.push(app_id.clone());
+        }
+    }
+
+    Ok(ConnectorMetadataReadResult {
+        apps,
+        missing_app_ids,
+    })
+}
+
+#[derive(Serialize)]
+struct GetAppsRequest<'a> {
+    app_ids: &'a [String],
+    include_tools: bool,
+}
+
+#[derive(Deserialize)]
+struct GetAppsResponse {
+    apps: Vec<BatchApp>,
+}
+
+/// The explicit metadata-only projection of Plugin Service's public app response.
+///
+/// Serde ignores all other backend fields, including full actions, model descriptions, and
+/// runtime state.
+#[derive(Deserialize)]
+struct BatchApp {
+    id: String,
+    name: String,
+    description: Option<String>,
+    icon_url: Option<String>,
+    #[serde(default, rename = "icon_dark_url", alias = "icon_url_dark")]
+    icon_url_dark: Option<String>,
+    #[serde(default)]
+    distribution_channel: Option<String>,
+    #[serde(default)]
+    tools: Option<Vec<BatchAppToolSummary>>,
+}
+
+#[derive(Deserialize)]
+struct BatchAppToolSummary {
+    name: String,
+    title: Option<String>,
+    description: String,
+}
+
+fn batch_app_to_metadata(app: BatchApp) -> ConnectorMetadata {
+    let BatchApp {
+        id,
+        name,
+        description,
+        icon_url,
+        icon_url_dark,
+        distribution_channel,
+        tools,
+    } = app;
+    ConnectorMetadata {
+        id,
+        name,
+        description,
+        icon_url,
+        icon_url_dark,
+        distribution_channel,
+        tool_summaries: tools.map(|tools| {
+            tools
+                .into_iter()
+                .map(|tool| {
+                    let BatchAppToolSummary {
+                        name,
+                        title,
+                        description,
+                    } = tool;
+                    ConnectorToolSummary {
+                        name,
+                        title,
+                        description,
+                    }
+                })
+                .collect()
+        }),
+    }
 }
 
 fn connector_directory_cache_context(
@@ -127,17 +300,16 @@ fn connector_directory_cache_context(
     )
 }
 
-fn merge_and_filter_plugin_connectors(
+fn merge_directory_and_plugin_connectors(
     connectors: Vec<AppInfo>,
     plugin_apps: &[AppConnectorId],
 ) -> Vec<AppInfo> {
-    let connectors = merge_plugin_connectors(
+    merge_plugin_connectors(
         connectors,
         plugin_apps
             .iter()
             .map(|connector_id| connector_id.0.clone()),
-    );
-    filter_disallowed_connectors(connectors, originator().value.as_str())
+    )
 }
 
 pub fn connectors_for_plugin_apps(
@@ -150,11 +322,10 @@ pub fn connectors_for_plugin_apps(
             .iter()
             .map(|connector_id| connector_id.0.clone()),
     );
-    let mut connectors_by_id =
-        filter_disallowed_connectors(connectors, originator().value.as_str())
-            .into_iter()
-            .map(|connector| (connector.id.clone(), connector))
-            .collect::<HashMap<_, _>>();
+    let mut connectors_by_id = connectors
+        .into_iter()
+        .map(|connector| (connector.id.clone(), connector))
+        .collect::<HashMap<_, _>>();
 
     plugin_apps
         .iter()
@@ -179,8 +350,7 @@ pub fn merge_connectors_with_accessible(
     } else {
         accessible_connectors
     };
-    let merged = merge_connectors(connectors, accessible_connectors);
-    filter_disallowed_connectors(merged, originator().value.as_str())
+    merge_connectors(connectors, accessible_connectors)
 }
 
 #[cfg(test)]
@@ -189,6 +359,32 @@ mod tests {
     use codex_connectors::metadata::connector_install_url;
     use codex_plugin::AppConnectorId;
     use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    #[test]
+    fn batch_app_accepts_missing_optional_metadata() {
+        let app = serde_json::from_value::<BatchApp>(json!({
+            "id": "alpha",
+            "name": "Alpha",
+            "description": "Alpha description",
+            "icon_url": null,
+            "tools": null,
+        }))
+        .expect("valid legacy batch app");
+
+        assert_eq!(
+            batch_app_to_metadata(app),
+            ConnectorMetadata {
+                id: "alpha".to_string(),
+                name: "Alpha".to_string(),
+                description: Some("Alpha description".to_string()),
+                icon_url: None,
+                icon_url_dark: None,
+                distribution_channel: None,
+                tool_summaries: None,
+            }
+        );
+    }
 
     fn app(id: &str) -> AppInfo {
         AppInfo {
@@ -197,6 +393,8 @@ mod tests {
             description: None,
             logo_url: None,
             logo_url_dark: None,
+            icon_assets: None,
+            icon_dark_assets: None,
             distribution_channel: None,
             branding: None,
             app_metadata: None,
@@ -215,6 +413,8 @@ mod tests {
             description: None,
             logo_url: None,
             logo_url_dark: None,
+            icon_assets: None,
+            icon_dark_assets: None,
             distribution_channel: None,
             branding: None,
             app_metadata: None,
@@ -269,13 +469,13 @@ mod tests {
     }
 
     #[test]
-    fn connectors_for_plugin_apps_filters_disallowed_plugin_apps() {
-        let connectors = connectors_for_plugin_apps(
-            Vec::new(),
-            &[AppConnectorId(
-                "asdk_app_6938a94a61d881918ef32cb999ff937c".to_string(),
-            )],
+    fn connectors_for_plugin_apps_preserves_formerly_disallowed_plugin_apps() {
+        let connector_id = "asdk_app_6938a94a61d881918ef32cb999ff937c";
+        let connectors =
+            connectors_for_plugin_apps(Vec::new(), &[AppConnectorId(connector_id.to_string())]);
+        assert_eq!(
+            connectors,
+            vec![merged_app(connector_id, /*is_accessible*/ false)]
         );
-        assert_eq!(connectors, Vec::<AppInfo>::new());
     }
 }

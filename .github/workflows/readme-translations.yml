@@ -1,0 +1,32 @@
+name: README translations
+
+on:
+  pull_request:
+    paths:
+      - README.md
+      - README_ES.md
+      - README_ZH.md
+      - .github/scripts/check_readme_translations.py
+      - .github/workflows/readme-translations.yml
+  push:
+    branches:
+      - main
+    paths:
+      - README.md
+      - README_ES.md
+      - README_ZH.md
+      - .github/scripts/check_readme_translations.py
+      - .github/workflows/readme-translations.yml
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Check translated READMEs
+        run: python3 .github/scripts/check_readme_translations.py

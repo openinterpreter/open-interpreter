@@ -6,9 +6,12 @@ use crate::tools::context::boxed_tool_output;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
-use codex_protocol::items::SleepItem;
+use codex_extension_items::ExtensionItem;
+use codex_extension_items::sleep::SleepItem;
 use codex_protocol::items::TurnItem;
 use codex_tools::JsonSchema;
+use codex_tools::ResponsesApiNamespace;
+use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
@@ -17,8 +20,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use std::time::Instant;
 
-const SLEEP_TOOL_NAME: &str = "sleep";
-const MAX_SLEEP_DURATION_MS: u64 = 3_600_000;
+const NAMESPACE: &str = "clock";
+const TOOL_NAME: &str = "sleep";
+const MAX_SLEEP_DURATION_MS: u64 = 12 * 60 * 60 * 1000;
 
 pub struct SleepHandler;
 
@@ -36,24 +40,28 @@ fn create_sleep_tool() -> ToolSpec {
         ))),
     )]);
 
-    ToolSpec::Function(ResponsesApiTool {
-        name: SLEEP_TOOL_NAME.to_string(),
-        description: "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time."
-            .to_string(),
-        strict: false,
-        defer_loading: None,
-        parameters: JsonSchema::object(
-            properties,
-            Some(vec!["duration_ms".to_string()]),
-            /*additional_properties*/ Some(false.into()),
-        ),
-        output_schema: None,
+    ToolSpec::Namespace(ResponsesApiNamespace {
+        name: NAMESPACE.to_string(),
+        description: "Tools for reading and waiting on time.".to_string(),
+        tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
+            name: TOOL_NAME.to_string(),
+            description: "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time."
+                .to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: JsonSchema::object(
+                properties,
+                Some(vec!["duration_ms".to_string()]),
+                /*additional_properties*/ Some(false.into()),
+            ),
+            output_schema: None,
+        })],
     })
 }
 
 impl ToolExecutor<ToolInvocation> for SleepHandler {
     fn tool_name(&self) -> ToolName {
-        ToolName::plain(SLEEP_TOOL_NAME)
+        ToolName::namespaced(NAMESPACE, TOOL_NAME)
     }
 
     fn spec(&self) -> ToolSpec {
@@ -71,7 +79,7 @@ impl ToolExecutor<ToolInvocation> for SleepHandler {
             } = invocation;
             let ToolPayload::Function { arguments } = payload else {
                 return Err(FunctionCallError::RespondToModel(format!(
-                    "{SLEEP_TOOL_NAME} handler received unsupported payload"
+                    "{TOOL_NAME} handler received unsupported payload"
                 )));
             };
             let args: SleepArgs = parse_arguments(&arguments)?;
@@ -82,10 +90,10 @@ impl ToolExecutor<ToolInvocation> for SleepHandler {
             }
 
             let started = Instant::now();
-            let item = TurnItem::Sleep(SleepItem {
+            let item = TurnItem::Extension(ExtensionItem::Sleep(SleepItem {
                 id: call_id,
                 duration_ms: args.duration_ms,
-            });
+            }));
             session.emit_turn_item_started(turn.as_ref(), &item).await;
             let turn_state = session
                 .input_queue
@@ -95,24 +103,36 @@ impl ToolExecutor<ToolInvocation> for SleepHandler {
                 .input_queue
                 .subscribe_activity(turn_state.as_deref())
                 .await;
-            let interrupted = if pending_activity.is_some() {
-                true
+            let sleep_result: Result<bool, FunctionCallError> = if pending_activity.is_some() {
+                Ok(true)
             } else {
-                let sleep = tokio::time::sleep(Duration::from_millis(args.duration_ms));
+                let sleep = session
+                    .services
+                    .time_provider
+                    .sleep(session.thread_id, Duration::from_millis(args.duration_ms));
                 tokio::pin!(sleep);
                 tokio::select! {
-                    () = &mut sleep => false,
+                    result = &mut sleep => result
+                        .map(|()| false)
+                        .map_err(|err| {
+                            FunctionCallError::Fatal(format!("failed to sleep: {err:#}"))
+                        }),
                     result = activity_rx.changed() => {
                         if result.is_ok() {
-                            true
+                            Ok(true)
                         } else {
-                            sleep.await;
-                            false
+                            sleep
+                                .await
+                                .map(|()| false)
+                                .map_err(|err| {
+                                    FunctionCallError::Fatal(format!("failed to sleep: {err:#}"))
+                                })
                         }
                     }
                 }
             };
             session.emit_turn_item_completed(turn.as_ref(), item).await;
+            let interrupted = sleep_result?;
 
             let message = if interrupted {
                 "Sleep interrupted by new input."

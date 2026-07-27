@@ -48,16 +48,13 @@ on:
         default: false
         type: boolean
 
-# Caller workflow-level env does not flow through workflow_call, so keep the
-# Cargo git transport hardening on the archive and shard jobs directly here.
-env:
-  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-
 jobs:
   archive:
     name: Build nextest archive
     runs-on: ${{ inputs.archive_runner_group != '' && fromJSON(format('{{"group":"{0}","labels":"{1}"}}', inputs.archive_runner_group, inputs.archive_runner_labels)) || inputs.archive_runner != '' && inputs.archive_runner || inputs.runner_group != '' && fromJSON(format('{{"group":"{0}","labels":"{1}"}}', inputs.runner_group, inputs.runner_labels)) || inputs.runner }}
-    timeout-minutes: 60
+    # Native ARM64 archive builds can exceed one hour when the hosted cache is
+    # cold, especially after a large upstream sync.
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: codex-rs
@@ -70,16 +67,27 @@ jobs:
       CARGO_INCREMENTAL: "0"
       SCCACHE_CACHE_SIZE: 10G
       NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst
+      NEXTEST_SOURCE_ROOT_FILE: nextest-source-root-${{ inputs.artifact_id }}.txt
       TEST_HELPERS_ARTIFACT: nextest-test-helpers-${{ inputs.artifact_id }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
-      - name: Configure Dev Drive (Windows)
-        if: ${{ runner.os == 'Windows' }}
-        shell: pwsh
-        run: ../.github/scripts/setup-dev-drive.ps1
+      # The full workspace test archive, including V8, can exhaust the stock
+      # Linux hosted-runner disk before the final test binaries are linked.
+      # Remove preinstalled toolchains that this Rust job does not use.
+      - name: Free runner disk space
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/hostedtoolcache/CodeQL \
+            /usr/local/.ghcup /usr/share/swift /usr/local/share/boost \
+            /usr/local/lib/node_modules /usr/local/julia* /opt/microsoft
+          df -h /
+
+      - uses: ./.github/actions/setup-ci
 
       - name: Install Linux build dependencies
         if: ${{ runner.os == 'Linux' }}
@@ -90,9 +98,6 @@ jobs:
             sudo apt-get update -y
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
           fi
-
-      - name: Install DotSlash
-        uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
@@ -129,8 +134,7 @@ jobs:
         if: ${{ env.USE_SCCACHE == 'true' }}
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
-          tool: sccache
-          version: 0.7.5
+          tool: sccache@0.7.5
 
       - name: Configure sccache backend
         if: ${{ env.USE_SCCACHE == 'true' }}
@@ -142,11 +146,7 @@ jobs:
             echo "Using sccache GitHub backend"
           else
             echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-            if [[ -n "${DEV_DRIVE:-}" ]]; then
-              echo "SCCACHE_DIR=${DEV_DRIVE}\\.sccache" >> "$GITHUB_ENV"
-            else
-              echo "SCCACHE_DIR=${{ github.workspace }}/.sccache" >> "$GITHUB_ENV"
-            fi
+            echo "SCCACHE_DIR=${CI_BUILD_ROOT}/sccache" >> "$GITHUB_ENV"
             echo "Using sccache local disk + actions/cache fallback"
           fi
 
@@ -175,8 +175,7 @@ jobs:
 
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
-          tool: nextest
-          version: 0.9.103
+          tool: nextest@0.9.103
 
       - name: Enable unprivileged user namespaces (Linux)
         if: runner.os == 'Linux'
@@ -192,6 +191,11 @@ jobs:
           set -euo pipefail
           archive_dir="${RUNNER_TEMP}/nextest-archive"
           mkdir -p "${archive_dir}"
+          source_root="$(pwd)"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            source_root="$(cygpath -w "${source_root}")"
+          fi
+          printf '%s\n' "${source_root}" > "${archive_dir}/${NEXTEST_SOURCE_ROOT_FILE}"
           cargo nextest archive \
             --target ${{ inputs.target }} \
             --cargo-profile ${{ inputs.profile }} \
@@ -212,7 +216,7 @@ jobs:
               --profile ${{ inputs.profile }} \
               -p codex-linux-sandbox \
               --bin codex-linux-sandbox
-            cp "target/${{ inputs.target }}/${{ inputs.profile }}/codex-linux-sandbox" "${helper_dir}/"
+            cp "${CARGO_TARGET_DIR}/${{ inputs.target }}/${{ inputs.profile }}/codex-linux-sandbox" "${helper_dir}/"
           else
             cargo build \
               --target ${{ inputs.target }} \
@@ -220,8 +224,8 @@ jobs:
               -p codex-windows-sandbox \
               --bin codex-windows-sandbox-setup \
               --bin codex-command-runner
-            cp "target/${{ inputs.target }}/${{ inputs.profile }}/codex-windows-sandbox-setup.exe" "${helper_dir}/"
-            cp "target/${{ inputs.target }}/${{ inputs.profile }}/codex-command-runner.exe" "${helper_dir}/"
+            cp "${CARGO_TARGET_DIR}/${{ inputs.target }}/${{ inputs.profile }}/codex-windows-sandbox-setup.exe" "${helper_dir}/"
+            cp "${CARGO_TARGET_DIR}/${{ inputs.target }}/${{ inputs.profile }}/codex-command-runner.exe" "${helper_dir}/"
           fi
 
       - name: Upload Cargo timings (nextest)
@@ -229,14 +233,16 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: cargo-timings-rust-ci-nextest-${{ inputs.target }}-${{ inputs.profile }}
-          path: codex-rs/target/**/cargo-timings/cargo-timing.html
+          path: ${{ env.CARGO_TARGET_DIR }}/**/cargo-timings/cargo-timing.html
           if-no-files-found: warn
 
       - name: Upload nextest archive
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: nextest-archive-${{ inputs.artifact_id }}
-          path: ${{ runner.temp }}/nextest-archive/${{ env.NEXTEST_ARCHIVE_FILE }}
+          path: |
+            ${{ runner.temp }}/nextest-archive/${{ env.NEXTEST_ARCHIVE_FILE }}
+            ${{ runner.temp }}/nextest-archive/${{ env.NEXTEST_SOURCE_ROOT_FILE }}
           if-no-files-found: error
           retention-days: 1
 
@@ -296,6 +302,7 @@ jobs:
         working-directory: codex-rs
     env:
       NEXTEST_ARCHIVE_FILE: nextest-${{ inputs.artifact_id }}.tar.zst
+      NEXTEST_SOURCE_ROOT_FILE: nextest-source-root-${{ inputs.artifact_id }}.txt
       TEST_HELPERS_ARTIFACT: nextest-test-helpers-${{ inputs.artifact_id }}
     strategy:
       fail-fast: false
@@ -305,6 +312,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
 
       - name: Install Linux build dependencies
         if: ${{ runner.os == 'Linux' }}
@@ -316,17 +325,13 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
           fi
 
-      - name: Install DotSlash
-        uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
-
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           targets: ${{ inputs.target }}
 
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
-          tool: nextest
-          version: 0.9.103
+          tool: nextest@0.9.103
 
       - name: Enable unprivileged user namespaces (Linux)
         if: runner.os == 'Linux'
@@ -354,6 +359,27 @@ jobs:
           name: nextest-archive-${{ inputs.artifact_id }}
           path: ${{ runner.temp }}/nextest-archive
 
+      # Cross-compiled Windows archives retain compile-time source paths. The
+      # hosted x64 and ARM64 images use different workspace drives, so expose
+      # the checked-out source at the producer path for snapshots and tests
+      # that intentionally inspect workspace files.
+      - name: Map archive source root to checkout (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $sourceRootFile = Join-Path $env:RUNNER_TEMP "nextest-archive/$env:NEXTEST_SOURCE_ROOT_FILE"
+          $archiveSourceRoot = (Get-Content -Raw $sourceRootFile).Trim()
+          $checkoutSourceRoot = (Resolve-Path (Join-Path $env:GITHUB_WORKSPACE "codex-rs")).Path
+
+          if (-not $archiveSourceRoot.Equals($checkoutSourceRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $archiveSourceParent = Split-Path -Parent $archiveSourceRoot
+            New-Item -ItemType Directory -Force -Path $archiveSourceParent | Out-Null
+            if (Test-Path $archiveSourceRoot) {
+              throw "archive source root already exists at $archiveSourceRoot"
+            }
+            New-Item -ItemType Junction -Path $archiveSourceRoot -Target $checkoutSourceRoot | Out-Null
+          }
+
       - name: Download runtime test helpers
         if: ${{ runner.os == 'Linux' || runner.os == 'Windows' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -376,13 +402,13 @@ jobs:
 
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             helper_dir="${RUNNER_TEMP}/${TEST_HELPERS_ARTIFACT}"
-            helper_target_dir="$(pwd)/target/${{ inputs.target }}/${{ inputs.profile }}"
+            helper_target_dir="${CARGO_TARGET_DIR}/${{ inputs.target }}/${{ inputs.profile }}"
             mkdir -p "${helper_target_dir}"
             cp "${helper_dir}/codex-linux-sandbox" "${helper_target_dir}/"
             chmod +x "${helper_target_dir}/codex-linux-sandbox"
           elif [[ "${RUNNER_OS}" == "Windows" ]]; then
             helper_dir="${RUNNER_TEMP}/${TEST_HELPERS_ARTIFACT}"
-            helper_target_dir="$(pwd)/target/${{ inputs.target }}/${{ inputs.profile }}"
+            helper_target_dir="${CARGO_TARGET_DIR}/${{ inputs.target }}/${{ inputs.profile }}"
             mkdir -p "${helper_target_dir}"
             cp "${helper_dir}/codex-windows-sandbox-setup.exe" "${helper_target_dir}/"
             cp "${helper_dir}/codex-command-runner.exe" "${helper_target_dir}/"
@@ -430,7 +456,7 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: nextest-junit-rust-ci-${{ inputs.artifact_id }}-shard-${{ matrix.shard }}
-          path: codex-rs/target/nextest/default/junit.xml
+          path: ${{ env.CARGO_TARGET_DIR }}/nextest/default/junit.xml
           if-no-files-found: warn
 
       - name: Tear down remote test env
@@ -440,6 +466,9 @@ jobs:
           set +e
           if [[ "${STEPS_TEST_OUTCOME}" != "success" ]]; then
             docker logs "${CODEX_TEST_REMOTE_ENV_CONTAINER_NAME}" || true
+            docker inspect --format '{{json .State}}' "${CODEX_TEST_REMOTE_ENV_CONTAINER_NAME}" || true
+            docker exec "${CODEX_TEST_REMOTE_ENV_CONTAINER_NAME}" \
+              sh -lc 'cat /tmp/codex-remote-env/exec-server.stdout 2>/dev/null || true' || true
           fi
           docker rm -f "${CODEX_TEST_REMOTE_ENV_CONTAINER_NAME}" >/dev/null 2>&1 || true
         env:

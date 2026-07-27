@@ -12,6 +12,7 @@ use codex_client::RequestTelemetry;
 use http::HeaderMap;
 use http::HeaderValue;
 use http::Method;
+use serde_json::Value;
 use std::sync::Arc;
 use tracing::instrument;
 
@@ -57,6 +58,42 @@ impl<T: HttpTransport> AnthropicMessagesClient<T> {
         extra_headers: HeaderMap,
     ) -> Result<ResponseStream, ApiError> {
         self.stream(request, extra_headers).await
+    }
+
+    #[instrument(
+        name = "anthropic_messages.request_value",
+        level = "info",
+        skip_all,
+        fields(
+            transport = "anthropic_http",
+            http.method = "POST",
+            api.path = "v1/messages"
+        )
+    )]
+    pub async fn request_value(
+        &self,
+        request: Value,
+        extra_headers: HeaderMap,
+    ) -> Result<Value, ApiError> {
+        let response = self
+            .session
+            .execute_with(
+                Method::POST,
+                Self::path(),
+                extra_headers,
+                Some(request),
+                |req| {
+                    req.headers.remove("originator");
+                    req.headers.insert(
+                        http::header::ACCEPT,
+                        HeaderValue::from_static("application/json"),
+                    );
+                    req.compression = RequestCompression::None;
+                },
+            )
+            .await?;
+        serde_json::from_slice(&response.body)
+            .map_err(|err| ApiError::Stream(format!("failed to decode anthropic response: {err}")))
     }
 
     fn path() -> &'static str {

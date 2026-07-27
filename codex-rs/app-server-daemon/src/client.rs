@@ -88,7 +88,7 @@ where
                     "{} App Server Daemon",
                     Product::current().display_name()
                 )),
-                version: env!("CARGO_PKG_VERSION").to_string(),
+                version: Product::current().codex_compatibility_version().to_string(),
             },
             capabilities: if experimental_api {
                 Some(InitializeCapabilities {

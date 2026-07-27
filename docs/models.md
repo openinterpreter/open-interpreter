@@ -113,8 +113,37 @@ Open Interpreter has two built-in local OSS providers:
 | `ollama` | `http://localhost:11434/v1` | `CODEX_OSS_PORT` or `CODEX_OSS_BASE_URL` |
 | `lmstudio` | `http://localhost:1234/v1` | `CODEX_OSS_PORT` or `CODEX_OSS_BASE_URL` |
 
-Start the local service, then choose it from onboarding or `/model`.
-`--oss` selects the configured local provider from the command line.
+Start the local service before Open Interpreter, then launch the provider
+directly:
+
+```bash
+interpreter --oss --local-provider ollama
+interpreter --oss --local-provider lmstudio
+```
+
+`--oss` without `--local-provider` uses your saved `oss_provider` or opens a
+picker that shows whether each default local endpoint is responding.
+
+For a server on another host or port, set its full OpenAI-compatible `/v1`
+base URL before launching Open Interpreter:
+
+```bash
+CODEX_OSS_BASE_URL=http://192.168.1.20:1234/v1 \
+  interpreter --oss --local-provider lmstudio -m qwen/qwen3-coder-next
+```
+
+Use `--local-provider ollama` for a remote Ollama server. Do not create a
+separate `model_providers` entry just to change the address of either built-in
+local provider; `CODEX_OSS_BASE_URL` is the supported override.
+
+### Model metadata warnings
+
+`Model metadata for ... not found` means the local server returned a model ID
+that is not in Open Interpreter's compatibility catalog. It does not by itself
+mean the server connection failed. Confirm the exact ID exposed by the server,
+pass that same value with `-m`, and update Open Interpreter so you have the
+latest catalog. Open Interpreter can continue with fallback metadata, but some
+model-specific controls or behavior may be unavailable.
 
 ## Provider Families And Harness Defaults
 
@@ -123,8 +152,9 @@ Some model families get a default harness when no explicit harness is set:
 | Model/provider family | Default harness |
 | --- | --- |
 | Claude/Anthropic/Messages | `claude-code` |
-| Kimi/Moonshot | `kimi-cli` |
+| Kimi/Moonshot | `kimi-code` |
 | Qwen/QwQ/DashScope | `qwen-code` |
-| DeepSeek | `deepseek-tui` |
+| DeepSeek | `claude-code-bare` |
 
-See [Harness](/docs/harness) for the wire-api compatibility matrix.
+See [Harness](/docs/harness) for the wire-api compatibility matrix and
+[Model providers](/docs/providers) for provider-specific setup guides.

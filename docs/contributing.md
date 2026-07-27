@@ -57,6 +57,10 @@ codex-rs/scripts/write_provider_catalog.py
 codex-rs/scripts/write_model_compatibility_catalog.py
 ```
 
+`write_provider_catalog.py --provider <id>` refreshes only the named provider
+in the existing generated artifact. Repeat the option to refresh a related set
+without requiring credentials for unrelated live provider sources.
+
 Update [Models](/docs/models), [Providers](/docs/providers), or
 [Config reference](/docs/config-reference) when the user-facing setup changes.
 

@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use rmcp::ErrorData as McpError;
@@ -11,10 +13,14 @@ use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::CallToolRequestParams;
 use rmcp::model::CallToolResult;
+use rmcp::model::Implementation;
+use rmcp::model::InitializeRequestParams;
+use rmcp::model::InitializeResult;
 use rmcp::model::JsonObject;
 use rmcp::model::ListResourceTemplatesResult;
 use rmcp::model::ListResourcesResult;
 use rmcp::model::ListToolsResult;
+use rmcp::model::Meta;
 use rmcp::model::PaginatedRequestParams;
 use rmcp::model::RawResource;
 use rmcp::model::RawResourceTemplate;
@@ -38,12 +44,22 @@ struct TestToolServer {
     tools: Arc<Vec<Tool>>,
     resources: Arc<Vec<Resource>>,
     resource_templates: Arc<Vec<ResourceTemplate>>,
+    supports_openai_form_elicitation: Arc<AtomicBool>,
 }
 
 const MEMO_URI: &str = "memo://codex/example-note";
 const MEMO_CONTENT: &str = "This is a sample MCP resource served by the rmcp test server.";
 const SANDBOX_STATE_META_CAPABILITY: &str = "codex/sandbox-state-meta";
 const SMALL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+const APP_ONLY_CWD_MARKER_FILE_ENV: &str = "MCP_TEST_APP_ONLY_CWD_MARKER_FILE";
+const DYNAMIC_SERVER_METADATA_ENV: &str = "MCP_TEST_DYNAMIC_SERVER_METADATA";
+const INITIALIZE_BARRIER_FILE_ENV: &str = "MCP_TEST_INITIALIZE_BARRIER_FILE";
+
+fn dynamic_server_process_label() -> Option<String> {
+    std::env::var_os(DYNAMIC_SERVER_METADATA_ENV)
+        .is_some()
+        .then(|| format!("rmcp-test-process-{}", std::process::id()))
+}
 
 pub fn stdio() -> (tokio::io::Stdin, tokio::io::Stdout) {
     (tokio::io::stdin(), tokio::io::stdout())
@@ -65,9 +81,43 @@ impl TestToolServer {
         );
         sandbox_meta_tool.annotations = Some(ToolAnnotations::new().read_only(true));
 
-        let tools = vec![
+        #[expect(clippy::expect_used)]
+        let thread_hint_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }))
+        .expect("thread_hint tool schema should deserialize");
+        let mut thread_hint_tool = Tool::new(
+            Cow::Borrowed("thread_hint"),
+            Cow::Borrowed("Return an unstructured history hint for a thread."),
+            Arc::new(thread_hint_schema),
+        );
+        thread_hint_tool.annotations = Some(ToolAnnotations::new().read_only(true));
+        let mut thread_hint_meta = Meta::new();
+        thread_hint_meta.insert("ui".to_string(), json!({ "visibility": [] }));
+        thread_hint_tool.meta = Some(thread_hint_meta);
+
+        #[expect(clippy::expect_used)]
+        let encrypted_output_schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }))
+        .expect("encrypted_output tool schema should deserialize");
+        let mut encrypted_output_tool = Tool::new(
+            Cow::Borrowed("encrypted_output"),
+            Cow::Borrowed("Return mixed plaintext and encrypted content for integration tests."),
+            Arc::new(encrypted_output_schema),
+        );
+        encrypted_output_tool.annotations = Some(ToolAnnotations::new().read_only(true));
+
+        let mut tools = vec![
             Self::echo_tool(),
             Self::echo_dash_tool(),
+            encrypted_output_tool,
+            thread_hint_tool,
+            Self::client_capabilities_tool(),
             Self::cwd_tool(),
             Self::sync_tool(),
             Self::sync_readonly_tool(),
@@ -75,12 +125,18 @@ impl TestToolServer {
             Self::image_scenario_tool(),
             sandbox_meta_tool,
         ];
+        if let Some(process_label) = dynamic_server_process_label()
+            && let Some(echo) = tools.iter_mut().find(|tool| tool.name == "echo")
+        {
+            echo.description = Some(Cow::Owned(format!("Echo from {process_label}.")));
+        }
         let resources = vec![Self::memo_resource()];
         let resource_templates = vec![Self::memo_template()];
         Self {
             tools: Arc::new(tools),
             resources: Arc::new(resources),
             resource_templates: Arc::new(resource_templates),
+            supports_openai_form_elicitation: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -162,6 +218,24 @@ impl TestToolServer {
         }))
         .expect("cwd tool output schema should deserialize");
         tool.output_schema = Some(Arc::new(output_schema));
+        tool.annotations = Some(ToolAnnotations::new().read_only(true));
+        tool
+    }
+
+    fn client_capabilities_tool() -> Tool {
+        #[expect(clippy::expect_used)]
+        let schema: JsonObject = serde_json::from_value(serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }))
+        .expect("client capabilities tool schema should deserialize");
+
+        let mut tool = Tool::new(
+            Cow::Borrowed("client_capabilities"),
+            Cow::Borrowed("Return capabilities advertised by the MCP client."),
+            Arc::new(schema),
+        );
         tool.annotations = Some(ToolAnnotations::new().read_only(true));
         tool
     }
@@ -396,6 +470,28 @@ struct ImageScenarioArgs {
 }
 
 impl ServerHandler for TestToolServer {
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        if let Ok(barrier_file) = std::env::var(INITIALIZE_BARRIER_FILE_ENV) {
+            while !std::path::Path::new(&barrier_file).is_file() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        }
+        self.supports_openai_form_elicitation.store(
+            request
+                .capabilities
+                .extensions
+                .as_ref()
+                .is_some_and(|extensions| extensions.contains_key("openai/form")),
+            Ordering::Relaxed,
+        );
+        context.peer.set_peer_info(request);
+        Ok(self.get_info())
+    }
+
     fn get_info(&self) -> ServerInfo {
         let mut capabilities = ServerCapabilities::builder()
             .enable_tools()
@@ -407,8 +503,18 @@ impl ServerHandler for TestToolServer {
             JsonObject::new(),
         )]));
 
-        ServerInfo::new(capabilities)
-            .with_instructions("Use these tools to exercise the rmcp test server.")
+        let server_info = ServerInfo::new(capabilities);
+        match dynamic_server_process_label() {
+            Some(process_label) => server_info
+                .with_server_info(
+                    Implementation::new("codex-rmcp-test-server", env!("CARGO_PKG_VERSION"))
+                        .with_title(process_label.clone()),
+                )
+                .with_instructions(format!("Use the tools from {process_label}.")),
+            None => {
+                server_info.with_instructions("Use these tools to exercise the rmcp test server.")
+            }
+        }
     }
 
     fn list_tools(
@@ -418,8 +524,17 @@ impl ServerHandler for TestToolServer {
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         let tools = self.tools.clone();
         async move {
+            let mut tools = (*tools).clone();
+            if let Some(marker_file) = std::env::var_os(APP_ONLY_CWD_MARKER_FILE_ENV)
+                && std::path::Path::new(&marker_file).is_file()
+                && let Some(cwd) = tools.iter_mut().find(|tool| tool.name == "cwd")
+            {
+                cwd.meta
+                    .get_or_insert_with(Meta::new)
+                    .insert("ui".to_string(), json!({ "visibility": ["app"] }));
+            }
             Ok(ListToolsResult {
-                tools: (*tools).clone(),
+                tools,
                 next_cursor: None,
                 meta: None,
             })
@@ -481,6 +596,11 @@ impl ServerHandler for TestToolServer {
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         match request.name.as_ref() {
+            "client_capabilities" => Ok(Self::structured_result(json!({
+                "supportsOpenaiFormElicitation": self
+                    .supports_openai_form_elicitation
+                    .load(Ordering::Relaxed),
+            }))),
             "sandbox_meta" => Ok(Self::structured_result(serde_json::Value::Object(
                 context.meta.0,
             ))),
@@ -489,6 +609,22 @@ impl ServerHandler for TestToolServer {
                     .map(|path| path.to_string_lossy().into_owned())
                     .map_err(|err| McpError::internal_error(err.to_string(), None))?;
                 Ok(Self::structured_result(json!({ "cwd": cwd })))
+            }
+            "thread_hint" => {
+                let thread_id = context
+                    .meta
+                    .0
+                    .get("threadId")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        McpError::invalid_params("missing threadId metadata".to_string(), None)
+                    })?;
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::Content::text(format!(
+                        "manual history hint for thread {thread_id}"
+                    )),
+                    rmcp::model::Content::text("unstructured notes/thread_hint fixture result"),
+                ]))
             }
             "echo" | "echo-tool" => {
                 let args: EchoArgs = match request.arguments {
@@ -506,12 +642,30 @@ impl ServerHandler for TestToolServer {
 
                 let env_snapshot: HashMap<String, String> = std::env::vars().collect();
                 let env_name = args.env_var.as_deref().unwrap_or("MCP_TEST_VALUE");
+                let echo = dynamic_server_process_label()
+                    .unwrap_or_else(|| format!("ECHOING: {}", args.message));
                 let structured_content = json!({
-                    "echo": format!("ECHOING: {}", args.message),
+                    "echo": echo,
                     "env": env_snapshot.get(env_name),
                 });
 
                 Ok(Self::structured_result(structured_content))
+            }
+            "encrypted_output" => {
+                let mut meta = Meta::new();
+                meta.insert("codex/encryptedContent".to_string(), json!(true));
+                let mut result = CallToolResult::success(vec![
+                    rmcp::model::Content::text("Lookup completed"),
+                    rmcp::model::Annotated::new(
+                        rmcp::model::RawContent::Text(rmcp::model::RawTextContent {
+                            text: "gAAAA-test".to_string(),
+                            meta: Some(meta),
+                        }),
+                        None,
+                    ),
+                ]);
+                result.structured_content = Some(json!({"encrypted_output": "ignored"}));
+                Ok(result)
             }
             "image" => {
                 // Read a data URL (e.g. data:image/png;base64,AAA...) from env and convert to

@@ -1,5 +1,6 @@
 use crate::types::AccountsCheckResponse;
 use crate::types::CodeTaskDetailsResponse;
+use crate::types::CodexWorkspaceMessagesResponse;
 use crate::types::ConfigBundleResponse;
 use crate::types::PaginatedListTaskListItem;
 use crate::types::RateLimitReachedKind as BackendRateLimitReachedKind;
@@ -8,8 +9,8 @@ use crate::types::TokenUsageProfile;
 use crate::types::TurnAttemptsSiblingTurnsResponse;
 use anyhow::Result;
 use codex_api::SharedAuthProvider;
-use codex_client::build_reqwest_client_with_custom_ca;
-use codex_client::with_chatgpt_cloudflare_cookie_store;
+use codex_http_client::build_reqwest_client_with_custom_ca;
+use codex_http_client::with_chatgpt_cloudflare_cookie_store;
 use codex_login::CodexAuth;
 use codex_login::default_client::get_codex_user_agent;
 use codex_protocol::account::PlanType as AccountPlanType;
@@ -19,6 +20,7 @@ use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::SpendControlLimitSnapshot;
 use reqwest::StatusCode;
+use reqwest::header::CACHE_CONTROL;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
@@ -430,6 +432,20 @@ impl Client {
             .map_err(RequestError::from)
     }
 
+    pub async fn list_workspace_messages(
+        &self,
+    ) -> std::result::Result<CodexWorkspaceMessagesResponse, RequestError> {
+        let url = self.workspace_messages_url();
+        let req = self
+            .http
+            .get(&url)
+            .headers(self.headers())
+            .header(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        let (body, ct) = self.exec_request_detailed(req, "GET", &url).await?;
+        self.decode_json::<CodexWorkspaceMessagesResponse>(&url, &ct, &body)
+            .map_err(RequestError::from)
+    }
+
     /// Create a new task (user turn) by POSTing to the appropriate backend path
     /// based on `path_style`. Returns the created task id.
     pub async fn create_task(&self, request_body: serde_json::Value) -> Result<String> {
@@ -474,17 +490,12 @@ impl Client {
             .rate_limit_reached_type
             .flatten()
             .and_then(|details| Self::map_rate_limit_reached_type(details.kind));
-        let individual_limit = payload
-            .spend_control
-            .flatten()
-            .and_then(|details| details.individual_limit.flatten())
-            .map(|details| Self::map_individual_limit(*details));
         let mut snapshots = vec![Self::make_rate_limit_snapshot(
             Some("codex".to_string()),
             /*limit_name*/ None,
             payload.rate_limit.flatten().map(|details| *details),
             payload.credits.flatten().map(|details| *details),
-            individual_limit,
+            payload.spend_control.flatten().map(|details| *details),
             plan_type,
             rate_limit_reached_type,
         )];
@@ -495,7 +506,7 @@ impl Client {
                     Some(details.limit_name),
                     details.rate_limit.flatten().map(|rate_limit| *rate_limit),
                     /*credits*/ None,
-                    /*individual_limit*/ None,
+                    /*spend_control*/ None,
                     plan_type,
                     /*rate_limit_reached_type*/ None,
                 )
@@ -509,7 +520,7 @@ impl Client {
         limit_name: Option<String>,
         rate_limit: Option<crate::types::RateLimitStatusDetails>,
         credits: Option<crate::types::CreditStatusDetails>,
-        individual_limit: Option<SpendControlLimitSnapshot>,
+        spend_control: Option<codex_backend_openapi_models::models::SpendControlStatusDetails>,
         plan_type: Option<AccountPlanType>,
         rate_limit_reached_type: Option<RateLimitReachedType>,
     ) -> RateLimitSnapshot {
@@ -520,6 +531,10 @@ impl Client {
             ),
             None => (None, None),
         };
+        let spend_control_reached = spend_control.as_ref().map(|details| details.reached);
+        let individual_limit = spend_control
+            .and_then(|details| details.individual_limit.flatten())
+            .map(|details| Self::map_individual_limit(*details));
         RateLimitSnapshot {
             limit_id,
             limit_name,
@@ -527,6 +542,7 @@ impl Client {
             secondary,
             credits: Self::map_credits(credits),
             individual_limit,
+            spend_control_reached,
             plan_type,
             rate_limit_reached_type,
         }
@@ -567,6 +583,13 @@ impl Client {
                     self.base_url
                 )
             }
+        }
+    }
+
+    fn workspace_messages_url(&self) -> String {
+        match self.path_style {
+            PathStyle::CodexApi => format!("{}/api/codex/workspace-messages", self.base_url),
+            PathStyle::ChatGptApi => format!("{}/wham/workspace-messages", self.base_url),
         }
     }
 
@@ -744,6 +767,7 @@ mod tests {
             })
         );
         assert_eq!(snapshots[0].plan_type, Some(AccountPlanType::Pro));
+        assert_eq!(snapshots[0].spend_control_reached, Some(false));
         assert_eq!(
             snapshots[0].rate_limit_reached_type,
             Some(RateLimitReachedType::WorkspaceMemberCreditsDepleted)
@@ -766,6 +790,7 @@ mod tests {
         );
         assert_eq!(snapshots[1].credits, None);
         assert_eq!(snapshots[1].individual_limit, None);
+        assert_eq!(snapshots[1].spend_control_reached, None);
         assert_eq!(snapshots[1].plan_type, Some(AccountPlanType::Pro));
         assert_eq!(snapshots[1].rate_limit_reached_type, None);
     }
@@ -795,6 +820,29 @@ mod tests {
     }
 
     #[test]
+    fn usage_payload_maps_spend_control_reached_without_individual_limit() {
+        let payload = RateLimitStatusPayload {
+            plan_type: crate::types::PlanType::EnterpriseCbpUsageBased,
+            rate_limit: None,
+            additional_rate_limits: None,
+            credits: None,
+            spend_control: Some(Some(Box::new(
+                codex_backend_openapi_models::models::SpendControlStatusDetails {
+                    reached: true,
+                    individual_limit: None,
+                },
+            ))),
+            rate_limit_reached_type: None,
+        };
+
+        let snapshots = Client::rate_limit_snapshots_from_payload(payload);
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].spend_control_reached, Some(true));
+        assert_eq!(snapshots[0].individual_limit, None);
+    }
+
+    #[test]
     fn preferred_snapshot_selection_matches_get_rate_limits_behavior() {
         let snapshots = [
             RateLimitSnapshot {
@@ -808,6 +856,7 @@ mod tests {
                 secondary: None,
                 credits: None,
                 individual_limit: None,
+                spend_control_reached: None,
                 plan_type: Some(AccountPlanType::Pro),
                 rate_limit_reached_type: None,
             },
@@ -822,6 +871,7 @@ mod tests {
                 secondary: None,
                 credits: None,
                 individual_limit: None,
+                spend_control_reached: None,
                 plan_type: Some(AccountPlanType::Pro),
                 rate_limit_reached_type: None,
             },
@@ -933,6 +983,21 @@ mod tests {
         assert_eq!(
             chatgpt_client.token_usage_profile_url(),
             "https://chatgpt.com/backend-api/wham/profiles/me"
+        );
+    }
+
+    #[test]
+    fn workspace_messages_uses_expected_paths() {
+        let codex_client = test_client("https://example.test", PathStyle::CodexApi);
+        assert_eq!(
+            codex_client.workspace_messages_url(),
+            "https://example.test/api/codex/workspace-messages"
+        );
+
+        let chatgpt_client = test_client("https://chatgpt.com/backend-api", PathStyle::ChatGptApi);
+        assert_eq!(
+            chatgpt_client.workspace_messages_url(),
+            "https://chatgpt.com/backend-api/wham/workspace-messages"
         );
     }
 

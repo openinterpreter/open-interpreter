@@ -1,11 +1,13 @@
 use crate::client_common::Prompt;
 use crate::harness::kimi_cli;
+use crate::harness::session_skills::parse_session_skills;
 use codex_chat_wire_compat::ToolKinds;
 use codex_chat_wire_compat::ToolOutputKind;
 use codex_protocol::openai_models::ModelInfo;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -15,8 +17,15 @@ use std::sync::Mutex;
 
 const KIMI_CODE_SYSTEM_PROMPT: &str = include_str!("kimi_code_system_prompt.md");
 const KIMI_CODE_TOOLS: &str = include_str!("kimi_code_tools.json");
-const KIMI_CODE_AUTO_PERMISSION_REMINDER: &str = "<system-reminder>\nAuto permission mode is active. Tool approvals will be handled automatically while this mode remains enabled.\n  - Continue normally without pausing for approval prompts.\n  - Do NOT call AskUserQuestion while auto mode is active. Make a reasonable decision and continue without asking the user.\n</system-reminder>";
-const KIMI_CODE_BUILTIN_SKILLS: &str = "DISREGARD any earlier skill listings. Current available skills:\n### Built-in\n- update-config: Inspect or edit kimi-code's own config — `config.toml` (model, provider, permission, hooks) and `tui.toml` (theme, editor, notifications, auto-update). Use when the user asks what a setting does or wants to change one.\n  Path: builtin://update-config";
+const KIMI_CODE_AUTO_PERMISSION_REMINDER: &str = "<system-reminder>\nAuto permission mode is active. Tool approvals will be handled automatically while this mode remains enabled.\n  - Continue normally without pausing for approval prompts.\n  - Do NOT call AskUserQuestion while auto mode is active. Make a reasonable decision and continue without asking the user.\n  - ExitPlanMode is also approved automatically, without the user reviewing the plan. An auto-approved plan is NOT a signal from the user to start executing — follow the user's original instructions on whether to proceed.\n</system-reminder>";
+const KIMI_CODE_BUILTIN_SKILLS: &str = r#"DISREGARD any earlier skill listings. Current available skills:
+### Built-in
+- check-kimi-code-docs: Answer questions about the Kimi Code product using the official documentation — CLI usage, configuration, slash commands, features, membership and quota, API onboarding, third-party tool setup, and error codes. Use when the user asks how Kimi Code w…
+  Path: builtin://check-kimi-code-docs
+- update-config: Inspect or edit kimi-code's own config — `config.toml` (model, provider, permission, hooks) and `tui.toml` (theme, editor, notifications, auto-update). Use when the user asks what a setting does or wants to change one.
+  Path: builtin://update-config
+- write-goal: Help the user craft a well-specified `/goal` objective for goal mode — turn a rough intention into a completion contract with a clear finish line, proof, boundaries, and stop rule. Use when the user asks for help writing, refining, or improving a go…
+  Path: builtin://write-goal"#;
 static KIMI_CODE_SYSTEM_PROMPT_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -60,8 +69,8 @@ pub(crate) fn build_request(
             "tools": tools,
             "thinking": {
                 "type": "enabled",
+                "keep": "all",
             },
-            "reasoning_effort": "high",
         }),
         tool_kinds,
     ))
@@ -91,8 +100,20 @@ fn cached_system_prompt(prompt: &Prompt, conversation_id: &str) -> String {
 }
 
 /// Renders Kimi Code's source-backed model-facing skill listing.
-fn session_skills_listing(_prompt: &Prompt) -> String {
-    KIMI_CODE_BUILTIN_SKILLS.to_string()
+fn session_skills_listing(prompt: &Prompt) -> String {
+    let session_skills = parse_session_skills(&prompt.input);
+    let mut listing = KIMI_CODE_BUILTIN_SKILLS.to_string();
+    if !session_skills.is_empty() {
+        listing.push_str("\n### Open Interpreter");
+        for skill in session_skills {
+            let _ = write!(
+                listing,
+                "\n- {}: {}\n  Path: {}",
+                skill.name, skill.description, skill.path
+            );
+        }
+    }
+    listing
 }
 
 fn add_auto_permission_reminders(messages: Vec<Value>) -> Vec<Value> {
@@ -138,6 +159,8 @@ fn build_system_prompt(prompt: &Prompt, skills: &str) -> String {
         .replace("{{ KIMI_ADDITIONAL_DIRS_INFO }}", "")
         .replace("{{ KIMI_AGENTS_MD }}", "")
         .replace("{{ KIMI_SKILLS }}", skills)
+        .replace("{% if KIMI_SKILLS %}\n", "\n")
+        .replace("{% endif %}\n", "\n")
 }
 
 fn kimi_os_label() -> &'static str {
@@ -150,7 +173,7 @@ fn kimi_os_label() -> &'static str {
 }
 
 fn kimi_now() -> String {
-    if let Ok(fake_time) = std::env::var("HARNESS_LAB_FAKE_TIME") {
+    if let Ok(fake_time) = std::env::var("OPENINTERPRETER_TEST_TIME") {
         if let Some((date, time)) = fake_time.split_once(' ') {
             return format!("{date}T{time}.000Z");
         }
@@ -246,6 +269,7 @@ mod tests {
     use super::build_request;
     use crate::client_common::Prompt;
     use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputContentItem;
     use codex_protocol::models::FunctionCallOutputPayload;
     use codex_protocol::models::ResponseItem;
     use codex_protocol::openai_models::ModelInfo;
@@ -255,14 +279,16 @@ mod tests {
     fn kimi_code_request_renders_kimi_code_builtin_skills() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
-                id: Some("user".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "Run the QA pass".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
             cwd: Some(std::env::temp_dir()),
             ..Prompt::default()
@@ -279,18 +305,108 @@ mod tests {
             .as_str()
             .expect("system content");
         assert!(system.contains("DISREGARD any earlier skill listings"));
+        assert!(system.contains("- check-kimi-code-docs:"));
         assert!(system.contains("- update-config: Inspect or edit kimi-code's own config"));
         assert!(system.contains("Path: builtin://update-config"));
+        assert!(system.contains("- write-goal:"));
         assert!(!system.contains("{{ KIMI_SKILLS }}"));
+        assert!(!system.contains("{% if KIMI_SKILLS %}"));
         assert!(!system.contains("<skills_instructions>"));
     }
 
     #[test]
-    fn kimi_code_request_does_not_render_codex_session_skills() {
+    fn kimi_code_request_matches_current_kimi_k3_transport_options_and_tools() {
+        let prompt = Prompt {
+            input: vec![ResponseItem::Message {
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "Inspect the project".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }],
+            cwd: Some(std::env::temp_dir()),
+            ..Prompt::default()
+        };
+
+        let (request, _) = build_request(
+            &prompt,
+            &test_model_info(),
+            "kimi-code-current-request-conversation",
+        )
+        .expect("build request");
+
+        assert_eq!(
+            request["thinking"],
+            json!({
+                "type": "enabled",
+                "keep": "all",
+            })
+        );
+        assert_eq!(request["max_completion_tokens"], json!(32768));
+        assert!(request.get("reasoning_effort").is_none());
+
+        let tool_names = request["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .map(|tool| {
+                tool["function"]["name"]
+                    .as_str()
+                    .expect("tool name")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tool_names,
+            [
+                "Agent",
+                "AgentSwarm",
+                "AskUserQuestion",
+                "Bash",
+                "CreateGoal",
+                "CronCreate",
+                "CronDelete",
+                "CronList",
+                "Edit",
+                "EnterPlanMode",
+                "ExitPlanMode",
+                "FetchURL",
+                "GetGoal",
+                "Glob",
+                "Grep",
+                "Read",
+                "ReadMediaFile",
+                "SetGoalBudget",
+                "Skill",
+                "TaskList",
+                "TaskOutput",
+                "TaskStop",
+                "TodoList",
+                "UpdateGoal",
+                "Write",
+            ]
+        );
+
+        let messages = request["messages"].as_array().expect("messages array");
+        assert!(messages.iter().any(|message| {
+            message["content"].as_str().is_some_and(|content| {
+                content.contains("ExitPlanMode is also approved automatically")
+            })
+        }));
+    }
+
+    #[test]
+    fn kimi_code_request_renders_open_interpreter_session_skills() {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
-                    id: Some("developer".to_string()),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "developer".to_string(),
+                    )),
                     role: "developer".to_string(),
                     content: vec![ContentItem::InputText {
                         text: "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file.\n### Available skills\n- qa-testing: Run the project's QA test plan against a live build (file: /home/user/skills/.system/qa-testing/SKILL.md)\n### How to use skills\n- Discovery: ...\n</skills_instructions>"
@@ -298,16 +414,18 @@ mod tests {
                     }],
                     phase: None,
 
-                    metadata: None,},
+                    internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::Message {
-                    id: Some("user".to_string()),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "user".to_string(),
+                    )),
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
                         text: "hello".to_string(),
                     }],
                     phase: None,
 
-                    metadata: None,},
+                    internal_chat_message_metadata_passthrough: None,},
             ],
             cwd: Some(std::env::temp_dir()),
             ..Prompt::default()
@@ -324,8 +442,12 @@ mod tests {
             .as_str()
             .expect("system content");
         assert!(!system.contains("{{ KIMI_SKILLS }}"));
-        assert!(!system.contains("qa-testing"));
-        assert!(!system.contains("### Extra"));
+        assert!(system.contains("### Open Interpreter"));
+        assert!(
+            system.contains("- qa-testing: Run the project's QA test plan against a live build")
+        );
+        assert!(system.contains("Path: /home/user/skills/.system/qa-testing/SKILL.md"));
+        assert!(!system.contains("<skills_instructions>"));
     }
 
     #[test]
@@ -333,14 +455,16 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
-                    id: Some("user".to_string()),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "user".to_string(),
+                    )),
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
                         text: "Find Python files".to_string(),
                     }],
                     phase: None,
 
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
                     id: None,
@@ -349,14 +473,14 @@ mod tests {
                     arguments: r#"{"pattern":"*.py"}"#.to_string(),
                     call_id: "Glob:0".to_string(),
 
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
                     call_id: "Glob:0".to_string(),
                     output: FunctionCallOutputPayload::from_text("module.py".to_string()),
 
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             ],
             cwd: Some(std::env::temp_dir()),
@@ -387,7 +511,9 @@ mod tests {
     fn kimi_code_request_preserves_image_content() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
-                id: Some("user".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![
                     ContentItem::InputText {
@@ -400,7 +526,7 @@ mod tests {
                 ],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
             cwd: Some(std::env::temp_dir()),
             ..Prompt::default()
@@ -426,6 +552,86 @@ mod tests {
                         "url": "data:image/png;base64,AAAB",
                         "id": null
                     }
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn kimi_code_request_preserves_video_tool_content() {
+        let prompt = Prompt {
+            input: vec![
+                ResponseItem::Message {
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "user".to_string(),
+                    )),
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "Read the video.".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::FunctionCall {
+                    id: None,
+                    name: "ReadMediaFile".to_string(),
+                    namespace: None,
+                    arguments: r#"{"path":"probe.mp4"}"#.to_string(),
+                    call_id: "ReadMediaFile:1".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::FunctionCallOutput {
+                    id: None,
+                    call_id: "ReadMediaFile:1".to_string(),
+                    output: FunctionCallOutputPayload::from_content_items(vec![
+                        FunctionCallOutputContentItem::InputText {
+                            text: "<video path=\"/workspace/probe.mp4\">".to_string(),
+                        },
+                        FunctionCallOutputContentItem::InputVideo {
+                            video_url: "ms://file-123".to_string(),
+                            id: Some("file-123".to_string()),
+                        },
+                        FunctionCallOutputContentItem::InputText {
+                            text: "</video>".to_string(),
+                        },
+                    ]),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            ],
+            cwd: Some(std::env::temp_dir()),
+            ..Prompt::default()
+        };
+
+        let (request, _) = build_request(
+            &prompt,
+            &test_model_info(),
+            "kimi-code-video-content-conversation",
+        )
+        .expect("build request");
+        let tool_message = request["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .find(|message| message["role"] == json!("tool"))
+            .expect("tool message");
+
+        assert_eq!(
+            tool_message["content"],
+            json!([
+                {
+                    "type": "text",
+                    "text": "<video path=\"/workspace/probe.mp4\">"
+                },
+                {
+                    "type": "video_url",
+                    "video_url": {
+                        "url": "ms://file-123",
+                        "id": "file-123"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "</video>"
                 }
             ])
         );

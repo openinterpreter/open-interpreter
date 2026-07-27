@@ -7,6 +7,7 @@ pub enum Harness {
     DeepSeekTui,
     KimiCode,
     KimiCli,
+    ZCode,
     LittleCoder,
     MiniSweAgent,
     OpenCode,
@@ -27,6 +28,7 @@ impl Harness {
             Some("deepseek-tui") => Self::DeepSeekTui,
             Some("kimi-code") => Self::KimiCode,
             Some("kimi-cli") => Self::KimiCli,
+            Some("zcode") => Self::ZCode,
             Some("little-coder") => Self::LittleCoder,
             Some("mini-swe-agent") => Self::MiniSweAgent,
             Some("opencode") => Self::OpenCode,
@@ -53,6 +55,10 @@ impl Harness {
 
     pub fn is_kimi_code(&self) -> bool {
         matches!(self, Self::KimiCode)
+    }
+
+    pub fn is_zcode(&self) -> bool {
+        matches!(self, Self::ZCode)
     }
 
     pub fn is_little_coder(&self) -> bool {
@@ -99,7 +105,7 @@ mod tests {
 
     #[test]
     fn from_config_name_parses_known_harnesses() {
-        assert_eq!(Harness::from_config_name(None), Harness::Native);
+        assert_eq!(Harness::from_config_name(/*name*/ None), Harness::Native);
         assert_eq!(
             Harness::from_config_name(Some("claude-code")),
             Harness::ClaudeCode
@@ -120,6 +126,7 @@ mod tests {
             Harness::from_config_name(Some("kimi-code")),
             Harness::KimiCode
         );
+        assert_eq!(Harness::from_config_name(Some("zcode")), Harness::ZCode);
         assert_eq!(
             Harness::from_config_name(Some("little-coder")),
             Harness::LittleCoder

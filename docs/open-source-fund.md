@@ -1,4 +1,7 @@
-## Codex open source fund
+---
+title: Open Source Fund
+description: Support open-source development around Open Interpreter.
+---
 
 We're excited to launch a **$1 million initiative** supporting open source projects that use Codex CLI and other OpenAI models.
 

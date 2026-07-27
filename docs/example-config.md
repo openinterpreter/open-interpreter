@@ -22,8 +22,8 @@ web_search = "cached"
 # Harness compatibility
 # ---------------------------------------------------------------
 
-# Leave unset for normal Open Interpreter behavior.
-# harness = "kimi-cli"
+# Leave unset to choose the recommended harness for the selected provider.
+# harness = "kimi-code"
 harness_guidance = true
 
 # ---------------------------------------------------------------

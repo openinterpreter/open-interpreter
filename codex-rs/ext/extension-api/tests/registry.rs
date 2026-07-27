@@ -12,12 +12,15 @@ use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::PromptFragment;
+use codex_extension_api::PromptSlot;
+use codex_extension_api::SkillInvocationContributor;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::TokenUsageContributor;
 use codex_extension_api::ToolCall;
 use codex_extension_api::ToolContributor;
 use codex_extension_api::ToolExecutor;
 use codex_extension_api::ToolLifecycleContributor;
+use codex_extension_api::TurnContextContributionInput;
 use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputContributor;
 use codex_extension_api::TurnItemContributor;
@@ -34,7 +37,7 @@ use pretty_assertions::assert_eq;
 struct AllContributors;
 
 impl ContextContributor for AllContributors {
-    fn contribute<'a>(
+    fn contribute_thread_context<'a>(
         &'a self,
         _session_store: &'a ExtensionData,
         _thread_store: &'a ExtensionData,
@@ -50,6 +53,8 @@ impl TurnLifecycleContributor for AllContributors {}
 impl ConfigContributor<()> for AllContributors {}
 
 impl TokenUsageContributor for AllContributors {}
+
+impl SkillInvocationContributor for AllContributors {}
 
 impl TurnInputContributor for AllContributors {
     fn contribute<'a>(
@@ -115,6 +120,7 @@ async fn build_round_trips_every_contributor_category() {
     builder.turn_lifecycle_contributor(contributor.clone());
     builder.config_contributor(contributor.clone());
     builder.token_usage_contributor(contributor.clone());
+    builder.skill_invocation_contributor(contributor.clone());
     builder.prompt_contributor(contributor.clone());
     builder.turn_input_contributor(contributor.clone());
     builder.tool_contributor(contributor.clone());
@@ -127,6 +133,7 @@ async fn build_round_trips_every_contributor_category() {
     assert_eq!(registry.turn_lifecycle_contributors().len(), 1);
     assert_eq!(registry.config_contributors().len(), 1);
     assert_eq!(registry.token_usage_contributors().len(), 1);
+    assert_eq!(registry.skill_invocation_contributors().len(), 1);
     assert_eq!(registry.context_contributors().len(), 1);
     assert_eq!(registry.turn_input_contributors().len(), 1);
     assert_eq!(registry.tool_contributors().len(), 1);
@@ -147,12 +154,26 @@ async fn build_round_trips_every_contributor_category() {
 struct NamedContextContributor(&'static str);
 
 impl ContextContributor for NamedContextContributor {
-    fn contribute<'a>(
+    fn contribute_thread_context<'a>(
         &'a self,
         _session_store: &'a ExtensionData,
         _thread_store: &'a ExtensionData,
     ) -> ExtensionFuture<'a, Vec<PromptFragment>> {
         Box::pin(std::future::ready(vec![PromptFragment::developer_policy(
+            self.0,
+        )]))
+    }
+}
+
+struct NamedTurnContextContributor(&'static str);
+
+impl ContextContributor for NamedTurnContextContributor {
+    fn contribute_turn_context<'a>(
+        &'a self,
+        _input: TurnContextContributionInput<'a>,
+    ) -> ExtensionFuture<'a, Vec<PromptFragment>> {
+        Box::pin(std::future::ready(vec![PromptFragment::new(
+            PromptSlot::ContextualUser,
             self.0,
         )]))
     }
@@ -186,6 +207,8 @@ async fn contributors_preserve_registration_order() {
     let mut builder = ExtensionRegistryBuilder::<()>::new();
     builder.prompt_contributor(Arc::new(NamedContextContributor("first")));
     builder.prompt_contributor(Arc::new(NamedContextContributor("second")));
+    builder.prompt_contributor(Arc::new(NamedTurnContextContributor("turn-first")));
+    builder.prompt_contributor(Arc::new(NamedTurnContextContributor("turn-second")));
     for name in ["first", "second"] {
         builder.turn_item_contributor(Arc::new(RecordingTurnItemContributor {
             name,
@@ -199,7 +222,25 @@ async fn contributors_preserve_registration_order() {
 
     let mut fragments = Vec::new();
     for contributor in registry.context_contributors() {
-        fragments.extend(contributor.contribute(&session_store, &thread_store).await);
+        fragments.extend(
+            contributor
+                .contribute_thread_context(&session_store, &thread_store)
+                .await,
+        );
+    }
+    for contributor in registry.context_contributors() {
+        fragments.extend(
+            contributor
+                .contribute_turn_context(TurnContextContributionInput {
+                    thread_id: codex_protocol::ThreadId::default(),
+                    turn_id: turn_store.level_id(),
+                    session_store: &session_store,
+                    thread_store: &thread_store,
+                    turn_store: &turn_store,
+                    model_context_window: Some(123),
+                })
+                .await,
+        );
     }
     let mut item = TurnItem::HookPrompt(HookPromptItem {
         id: "item".to_string(),
@@ -217,6 +258,8 @@ async fn contributors_preserve_registration_order() {
         vec![
             PromptFragment::developer_policy("first"),
             PromptFragment::developer_policy("second"),
+            PromptFragment::new(PromptSlot::ContextualUser, "turn-first"),
+            PromptFragment::new(PromptSlot::ContextualUser, "turn-second"),
         ]
     );
     assert_eq!(
@@ -271,7 +314,10 @@ async fn approval_review_returns_first_claim_and_short_circuits() {
     for (name, decision) in [
         ("first", None),
         ("second", Some(ReviewDecision::Approved)),
-        ("third", Some(ReviewDecision::Denied)),
+        (
+            "third",
+            Some(ReviewDecision::denied("rejected by extension")),
+        ),
     ] {
         builder.approval_review_contributor(Arc::new(RecordingApprovalContributor {
             name,

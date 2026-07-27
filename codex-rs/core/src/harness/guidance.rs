@@ -2,11 +2,12 @@ use codex_tools::Harness;
 
 pub(crate) fn guidance_for_harness(harness: &Harness) -> Option<&'static str> {
     match harness {
-        Harness::KimiCli | Harness::KimiCode => Some(KIMI_CLI_GUIDANCE),
+        Harness::KimiCli => Some(KIMI_CLI_GUIDANCE),
         Harness::Native
         | Harness::ClaudeCode
         | Harness::ClaudeCodeBare
         | Harness::DeepSeekTui
+        | Harness::KimiCode
         | Harness::LittleCoder
         | Harness::MiniSweAgent
         | Harness::Minimal
@@ -15,6 +16,7 @@ pub(crate) fn guidance_for_harness(harness: &Harness) -> Option<&'static str> {
         | Harness::QwenCode
         | Harness::SweAgent
         | Harness::Terminus2
+        | Harness::ZCode
         | Harness::Other(_) => None,
     }
 }
@@ -36,3 +38,16 @@ Open Interpreter adds the following guidance to improve coding-task reliability 
 - Before finalizing, verify that any output artifact exactly satisfies the user's explicit constraints such as path, format, length, prefix/suffix, schema, and command invocation.
 - Keep changes minimal and focused on the user request. Do not stop after planning if the task requires code or file changes.
 </extra_instruction>"##;
+
+#[cfg(test)]
+mod tests {
+    use codex_tools::Harness;
+
+    use super::guidance_for_harness;
+
+    #[test]
+    fn current_kimi_code_does_not_receive_legacy_kimi_cli_guidance() {
+        assert_eq!(guidance_for_harness(&Harness::KimiCode), None);
+        assert!(guidance_for_harness(&Harness::KimiCli).is_some());
+    }
+}

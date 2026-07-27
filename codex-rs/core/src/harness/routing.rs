@@ -5,6 +5,7 @@ use codex_tools::Harness;
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum MessagesHarnessRoute {
     ClaudeCode,
+    ZCode,
 }
 
 /// Which claude-code tool/prompt surface a non-Messages wire should shape.
@@ -101,6 +102,9 @@ pub(crate) fn resolve_stream_transport_route(
                 MessagesHarnessRoute::ClaudeCode,
             ))
         }
+        (WireApi::Messages, Harness::ZCode) => {
+            Ok(StreamTransportRoute::MessagesHarness(MessagesHarnessRoute::ZCode))
+        }
         (WireApi::Messages, Harness::KimiCli) => Err(CodexErr::InvalidRequest(
             "wire_api = \"messages\" is not supported by harness = \"kimi-cli\"".to_string(),
         )),
@@ -165,6 +169,7 @@ fn harness_config_name(harness: &Harness) -> &str {
         Harness::DeepSeekTui => "deepseek-tui",
         Harness::KimiCode => "kimi-code",
         Harness::KimiCli => "kimi-cli",
+        Harness::ZCode => "zcode",
         Harness::LittleCoder => "little-coder",
         Harness::MiniSweAgent => "mini-swe-agent",
         Harness::OpenCode => "opencode",
@@ -209,6 +214,15 @@ mod tests {
             resolve_stream_transport_route(WireApi::Messages, &Harness::ClaudeCode)
                 .expect("messages claude-code route"),
             StreamTransportRoute::MessagesHarness(MessagesHarnessRoute::ClaudeCode)
+        );
+    }
+
+    #[test]
+    fn zcode_messages_wire_uses_messages_harness_route() {
+        assert_eq!(
+            resolve_stream_transport_route(WireApi::Messages, &Harness::ZCode)
+                .expect("messages zcode route"),
+            StreamTransportRoute::MessagesHarness(MessagesHarnessRoute::ZCode)
         );
     }
 

@@ -22,6 +22,9 @@ jobs:
           set -euo pipefail
           ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].sort.each { |path| YAML.load_file(path); puts path }'
 
+      - name: Validate localized documentation parity
+        run: node scripts/check-doc-locales.mjs
+
       - name: Validate installer scripts
         run: |
           set -euo pipefail
@@ -75,9 +78,31 @@ jobs:
           ]
 
           manual_only.each do |file|
-            workflow = YAML.load_file(File.join(".github/workflows", file))
+            path = File.join(".github/workflows", file)
+            next unless File.exist?(path)
+            workflow = YAML.load_file(path)
             triggers = workflow.fetch(true)
             unexpected = triggers.keys - ["workflow_dispatch"]
             raise "#{file} should stay manual-only, found #{unexpected.inspect}" unless unexpected.empty?
           end
           RUBY
+
+  windows-installer:
+    name: Windows installer architecture
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - windows-2025
+          - windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Test with Windows PowerShell
+        shell: powershell
+        run: scripts/install/test_install_ps1.ps1
+
+      - name: Test with PowerShell
+        shell: pwsh
+        run: scripts/install/test_install_ps1.ps1

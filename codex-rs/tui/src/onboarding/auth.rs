@@ -10,14 +10,14 @@
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_protocol::AccountLoginCompletedNotification;
 use codex_app_server_protocol::AccountUpdatedNotification;
-#[cfg(test)]
-use codex_app_server_protocol::AuthMode as AppServerAuthMode;
+use codex_app_server_protocol::AuthMode as ApiAuthMode;
 use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_login::read_openai_api_key_from_env;
 use codex_product_info::Product;
+use codex_protocol::auth::AuthMode;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -28,7 +28,8 @@ use ratatui::layout::Layout;
 use ratatui::layout::Rect;
 use ratatui::prelude::Widget;
 use ratatui::style::Color;
-use ratatui::style::Styled as _;
+use ratatui::style::Modifier;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Block;
@@ -52,13 +53,9 @@ use crate::motion::shimmer_text;
 use crate::onboarding::keys;
 use crate::onboarding::onboarding_screen::KeyboardHandler;
 use crate::onboarding::onboarding_screen::StepStateProvider;
-use crate::style::app_accent_style;
-use crate::style::app_accent_underlined_style;
-use crate::style::selected_option_style;
-use crate::style::unselected_option_style;
 use crate::tui::FrameRequester;
 
-/// Marks buffer cells that have underlined style as an OSC 8 hyperlink.
+/// Marks buffer cells that have cyan+underlined style as an OSC 8 hyperlink.
 ///
 /// Terminal emulators recognise the OSC 8 escape sequence and treat the entire
 /// marked region as a single clickable link, regardless of row wrapping.  This
@@ -66,7 +63,7 @@ use crate::tui::FrameRequester;
 /// row boundary, which breaks normal terminal URL detection for long URLs that
 /// wrap across multiple rows.
 pub(crate) fn mark_url_hyperlink(buf: &mut Buffer, area: Rect, url: &str) {
-    crate::terminal_hyperlinks::mark_underlined_hyperlink(buf, area, url);
+    crate::terminal_hyperlinks::mark_url_hyperlink(buf, area, url);
 }
 
 /// Marks any underlined buffer cells as an OSC 8 hyperlink.
@@ -413,20 +410,20 @@ impl AuthModeWidget {
 
             let line1 = if is_selected {
                 Line::from(vec![
-                    format!("{caret} {index}. ", index = idx + 1)
-                        .set_style(selected_option_style())
-                        .dim(),
-                    text.to_string().set_style(selected_option_style()),
+                    format!("{caret} {index}. ", index = idx + 1).cyan().dim(),
+                    text.to_string().cyan(),
                 ])
             } else {
-                Line::from(format!("  {index}. {text}", index = idx + 1))
-                    .set_style(unselected_option_style())
+                format!("  {index}. {text}", index = idx + 1).into()
             };
 
             let line2 = if is_selected {
-                Line::from(format!("     {description}")).set_style(selected_option_style().dim())
+                Line::from(format!("     {description}"))
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::DIM)
             } else {
-                Line::from(format!("     {description}")).set_style(unselected_option_style())
+                Line::from(format!("     {description}"))
+                    .style(Style::default().add_modifier(Modifier::DIM))
             };
 
             vec![line1, line2]
@@ -515,17 +512,14 @@ impl AuthModeWidget {
             lines.push("".into());
             lines.push(Line::from(vec![
                 "  ".into(),
-                state
-                    .auth_url
-                    .as_str()
-                    .set_style(app_accent_underlined_style()),
+                state.auth_url.as_str().cyan().underlined(),
             ]));
             lines.push("".into());
             lines.push(Line::from(vec![
                 "  On a remote or headless machine? Press ".into(),
                 self.cancel_binding().into(),
                 " and choose ".into(),
-                "Sign in with Device Code".set_style(app_accent_style()),
+                "Sign in with Device Code".cyan(),
                 ".".into(),
             ]));
             lines.push("".into());
@@ -584,9 +578,9 @@ impl AuthModeWidget {
             .dim(),
             "".into(),
             Line::from(vec![
-                "  Press ".set_style(app_accent_style()),
+                "  Press ".fg(Color::Cyan),
                 self.confirm_binding().into(),
-                " to continue".set_style(app_accent_style()),
+                " to continue".fg(Color::Cyan),
             ]),
         ];
 
@@ -661,7 +655,7 @@ impl AuthModeWidget {
                     .title("API key")
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(app_accent_style()),
+                    .border_style(Style::default().fg(Color::Cyan)),
             )
             .render(input_area, buf);
 
@@ -879,7 +873,9 @@ impl AuthModeWidget {
                 .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
                     request_id: onboarding_request_id(),
                     params: LoginAccountParams::Chatgpt {
+                        app_brand: None,
                         codex_streamlined_login: false,
+                        use_hosted_login_success_page: false,
                     },
                 })
                 .await
@@ -950,7 +946,17 @@ impl AuthModeWidget {
     pub(crate) fn on_account_updated(&mut self, notification: AccountUpdatedNotification) {
         self.login_status = notification
             .auth_mode
-            .map(LoginStatus::AuthMode)
+            .map(|auth_mode| {
+                LoginStatus::AuthMode(match auth_mode {
+                    ApiAuthMode::ApiKey => AuthMode::ApiKey,
+                    ApiAuthMode::Chatgpt => AuthMode::Chatgpt,
+                    ApiAuthMode::ChatgptAuthTokens => AuthMode::ChatgptAuthTokens,
+                    ApiAuthMode::Headers => AuthMode::Headers,
+                    ApiAuthMode::AgentIdentity => AuthMode::AgentIdentity,
+                    ApiAuthMode::PersonalAccessToken => AuthMode::PersonalAccessToken,
+                    ApiAuthMode::BedrockApiKey => AuthMode::BedrockApiKey,
+                })
+            })
             .unwrap_or(LoginStatus::NotAuthenticated);
     }
 }
@@ -1079,6 +1085,7 @@ mod tests {
                 AuthCredentialsStoreMode::File,
                 AuthKeyringBackendKind::default(),
                 "https://chatgpt.com/backend-api/".to_string(),
+                /*auth_route_config*/ None,
             )
             .await,
             feedback: codex_feedback::CodexFeedback::new(),
@@ -1094,6 +1101,7 @@ mod tests {
             client_name: "test".to_string(),
             client_version: "test".to_string(),
             experimental_api: true,
+            mcp_server_openai_form_elicitation: false,
             opt_out_notification_methods: Vec::new(),
             channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
         })
@@ -1148,10 +1156,7 @@ mod tests {
 
     #[tokio::test]
     async fn existing_non_oauth_chatgpt_login_counts_as_signed_in() {
-        for auth_mode in [
-            AppServerAuthMode::ChatgptAuthTokens,
-            AppServerAuthMode::PersonalAccessToken,
-        ] {
+        for auth_mode in [AuthMode::ChatgptAuthTokens, AuthMode::PersonalAccessToken] {
             let (mut widget, _tmp) = widget_forced_chatgpt().await;
             widget.login_status = LoginStatus::AuthMode(auth_mode);
 
@@ -1271,54 +1276,6 @@ mod tests {
         assert_eq!(widget.should_suppress_animations(), true);
     }
 
-    #[test]
-    fn auth_intro_copy_follows_product() {
-        assert_eq!(
-            chatgpt_sign_in_intro(Product::Codex),
-            "Sign in with ChatGPT to use Codex as part of your paid plan"
-        );
-        assert_eq!(
-            chatgpt_sign_in_intro(Product::OpenInterpreter),
-            "Sign in with ChatGPT to use Open Interpreter as part of your paid plan"
-        );
-    }
-
-    #[test]
-    fn api_key_billing_copy_follows_product() {
-        assert_eq!(
-            api_key_billing_copy(Product::Codex),
-            "  OpenAI Codex will use usage-based billing with your API key."
-        );
-        assert_eq!(
-            api_key_billing_copy(Product::OpenInterpreter),
-            "  Open Interpreter will use usage-based billing with your API key."
-        );
-    }
-
-    #[test]
-    fn chatgpt_success_copy_follows_product() {
-        assert_eq!(
-            chatgpt_success_autonomy_copy(Product::Codex),
-            "  Decide how much autonomy you want to grant OpenAI Codex"
-        );
-        assert_eq!(
-            chatgpt_success_autonomy_copy(Product::OpenInterpreter),
-            "  Decide how much autonomy you want to grant Open Interpreter"
-        );
-        assert_eq!(
-            chatgpt_success_mistakes_copy(Product::Codex),
-            "  OpenAI Codex can make mistakes"
-        );
-        assert_eq!(
-            chatgpt_success_mistakes_copy(Product::OpenInterpreter),
-            "  Open Interpreter can make mistakes"
-        );
-        assert_eq!(
-            chatgpt_success_docs_link(Product::OpenInterpreter),
-            ("https://docs.openinterpreter.com", "Open Interpreter docs")
-        );
-    }
-
     #[tokio::test]
     async fn device_code_login_completion_advances_to_success_message() {
         let (mut widget, _tmp) = widget_forced_chatgpt().await;
@@ -1353,7 +1310,7 @@ mod tests {
             let cell = &mut buf[(i as u16, 0)];
             cell.set_symbol(&ch.to_string());
             cell.fg = Color::Cyan;
-            cell.modifier = ratatui::style::Modifier::UNDERLINED;
+            cell.modifier = Modifier::UNDERLINED;
         }
         // Leave a plain cell that should NOT be marked.
         buf[(7, 0)].set_symbol("X");
@@ -1377,7 +1334,7 @@ mod tests {
         let cell = &mut buf[(0, 0)];
         cell.set_symbol("a");
         cell.fg = Color::Cyan;
-        cell.modifier = ratatui::style::Modifier::UNDERLINED;
+        cell.modifier = Modifier::UNDERLINED;
 
         // URL contains ESC and BEL that could break the OSC 8 sequence.
         let malicious_url = "https://evil.com/\x1B]8;;\x07injected";

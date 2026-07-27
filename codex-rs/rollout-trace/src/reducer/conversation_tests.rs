@@ -276,6 +276,7 @@ fn incremental_request_carries_prior_request_and_response_items_forward() -> any
             "token_usage": {
                 "input_tokens": 10,
                 "cached_input_tokens": 1,
+                "cache_write_input_tokens": 3,
                 "output_tokens": 5,
                 "reasoning_output_tokens": 2,
                 "total_tokens": 15
@@ -329,6 +330,13 @@ fn incremental_request_carries_prior_request_and_response_items_forward() -> any
     assert_eq!(
         first.usage.as_ref().map(|usage| usage.input_tokens),
         Some(10),
+    );
+    assert_eq!(
+        first
+            .usage
+            .as_ref()
+            .map(|usage| usage.cache_write_input_tokens),
+        Some(3),
     );
 
     Ok(())
@@ -733,6 +741,48 @@ fn unsupported_model_item_is_reducer_error() -> anyhow::Result<()> {
         &temp,
         "unsupported model item type new_unhandled_model_item",
     )
+}
+
+#[test]
+fn additional_tools_are_excluded_from_request_conversation() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let writer = create_started_writer(&temp)?;
+    start_turn(&writer, "turn-1")?;
+
+    let request = writer.write_json_payload(
+        RawPayloadKind::InferenceRequest,
+        &json!({
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{
+                        "type": "function",
+                        "name": "lookup",
+                        "parameters": {"type": "object", "properties": {}}
+                    }]
+                },
+                message("user", "find it")
+            ]
+        }),
+    )?;
+    append_inference_start(&writer, "inference-1", "turn-1", request)?;
+
+    let rollout = replay_bundle(temp.path())?;
+    let request_item_ids = &rollout.inference_calls["inference-1"].request_item_ids;
+
+    assert_eq!(request_item_ids.len(), 1);
+    assert_eq!(rollout.conversation_items.len(), 1);
+    assert_eq!(
+        rollout.conversation_items[&request_item_ids[0]].body,
+        ConversationBody {
+            parts: vec![ConversationPart::Text {
+                text: "find it".to_string(),
+            }],
+        }
+    );
+
+    Ok(())
 }
 
 #[test]

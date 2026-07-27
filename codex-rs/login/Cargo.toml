@@ -11,12 +11,12 @@ workspace = true
 base64 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 codex-agent-identity = { workspace = true }
-codex-app-server-protocol = { workspace = true }
-codex-client = { workspace = true }
+codex-http-client = { workspace = true }
 codex-config = { workspace = true }
 codex-keyring-store = { workspace = true }
 codex-model-provider-info = { workspace = true }
 codex-otel = { workspace = true }
+codex-product-info = { workspace = true }
 codex-protocol = { workspace = true }
 codex-secrets = { workspace = true }
 codex-terminal-detection = { workspace = true }

@@ -243,7 +243,8 @@ fn build_system_prompt(prompt: &Prompt) -> String {
                             | codex_protocol::models::ContentItem::OutputText { text } => {
                                 Some(text.as_str())
                             }
-                            codex_protocol::models::ContentItem::InputImage { .. } => None,
+                            codex_protocol::models::ContentItem::InputImage { .. }
+                            | codex_protocol::models::ContentItem::InputAudio { .. } => None,
                         })
                         .collect::<Vec<_>>()
                         .join("\n"),

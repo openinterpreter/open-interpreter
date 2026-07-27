@@ -23,7 +23,6 @@ use std::fmt;
 use std::io::Error as IoError;
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,11 +49,8 @@ use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
 use codex_config::RemoteThreadConfigLoader;
 use codex_config::ThreadConfigLoader;
-use codex_config::config_toml::ConfigToml;
 use codex_core::config::Config;
 pub use codex_core::otel_init::build_provider as build_otel_provider;
-use codex_core::personality_migration::PersonalityMigrationStatus;
-use codex_core::personality_migration::maybe_migrate_personality;
 pub use codex_exec_server::EnvironmentManager;
 pub use codex_exec_server::ExecServerRuntimePaths;
 use codex_feedback::CodexFeedback;
@@ -78,9 +74,6 @@ pub use crate::remote::RemoteAppServerEndpoint;
 /// module exists so clients can remove a direct `codex-core` dependency
 /// while legacy startup/config paths are migrated to RPCs.
 pub mod legacy_core {
-    pub use codex_core::check_execpolicy_for_warnings;
-    pub use codex_core::format_exec_policy_error_with_source;
-
     pub mod config {
         pub use codex_core::config::*;
 
@@ -91,23 +84,6 @@ pub mod legacy_core {
 }
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Runs the embedded app-server personality migration.
-///
-/// Returns `true` when the migration changed config and the caller should reload it.
-pub async fn migrate_personality_if_needed(
-    codex_home: &Path,
-    config_toml: &ConfigToml,
-    state_db: Option<StateDbHandle>,
-) -> IoResult<bool> {
-    let status = maybe_migrate_personality(codex_home, config_toml, state_db).await?;
-    match status {
-        PersonalityMigrationStatus::Applied => Ok(true),
-        PersonalityMigrationStatus::SkippedMarker
-        | PersonalityMigrationStatus::SkippedExplicitPersonality
-        | PersonalityMigrationStatus::SkippedNoSessions => Ok(false),
-    }
-}
 
 /// Raw app-server request result for typed in-process requests.
 ///
@@ -350,6 +326,8 @@ pub struct InProcessClientStartArgs {
     pub client_version: String,
     /// Whether experimental APIs are requested at initialize time.
     pub experimental_api: bool,
+    /// Whether MCP servers may send `openai/form` elicitation requests.
+    pub mcp_server_openai_form_elicitation: bool,
     /// Notification methods this client opts out of receiving.
     pub opt_out_notification_methods: Vec<String>,
     /// Queue capacity for command/event channels (clamped to at least 1).
@@ -374,6 +352,7 @@ impl InProcessClientStartArgs {
             } else {
                 Some(self.opt_out_notification_methods.clone())
             },
+            mcp_server_openai_form_elicitation: self.mcp_server_openai_form_elicitation,
         };
 
         InitializeParams {
@@ -827,10 +806,7 @@ impl InProcessAppServerRequestHandle {
             .map_err(|source| TypedRequestError::Deserialize { method, source })
     }
 
-    /// Resolves a pending server request.
-    ///
-    /// This should only be called with request IDs obtained from the
-    /// originating client's event stream.
+    /// Resolves a pending server request received by the associated client.
     pub async fn resolve_server_request(
         &self,
         request_id: RequestId,
@@ -858,7 +834,7 @@ impl InProcessAppServerRequestHandle {
         })?
     }
 
-    /// Rejects a pending server request with JSON-RPC error payload.
+    /// Rejects a pending server request received by the associated client.
     pub async fn reject_server_request(
         &self,
         request_id: RequestId,
@@ -1103,6 +1079,7 @@ mod tests {
             client_name: "codex-app-server-client-test".to_string(),
             client_version: "0.0.0-test".to_string(),
             experimental_api: true,
+            mcp_server_openai_form_elicitation: false,
             opt_out_notification_methods: Vec::new(),
             channel_capacity,
         })
@@ -1296,9 +1273,23 @@ mod tests {
             client_name: "codex-app-server-client-test".to_string(),
             client_version: "0.0.0-test".to_string(),
             experimental_api: true,
+            mcp_server_openai_form_elicitation: false,
             opt_out_notification_methods: Vec::new(),
             channel_capacity: 8,
         }
+    }
+
+    #[test]
+    fn remote_initialize_params_forward_openai_form_capability() {
+        let mut args = test_remote_connect_args("ws://localhost/rpc".to_string());
+        args.mcp_server_openai_form_elicitation = true;
+
+        assert!(
+            args.initialize_params()
+                .capabilities
+                .expect("initialize capabilities")
+                .mcp_server_openai_form_elicitation
+        );
     }
 
     #[tokio::test]
@@ -1571,6 +1562,7 @@ mod tests {
             client_name: "codex-app-server-client-test".to_string(),
             client_version: "0.0.0-test".to_string(),
             experimental_api: true,
+            mcp_server_openai_form_elicitation: false,
             opt_out_notification_methods: Vec::new(),
             channel_capacity: 8,
         })
@@ -1659,6 +1651,7 @@ mod tests {
             client_name: "codex-app-server-client-test".to_string(),
             client_version: "0.0.0-test".to_string(),
             experimental_api: true,
+            mcp_server_openai_form_elicitation: false,
             opt_out_notification_methods: Vec::new(),
             channel_capacity: 8,
         })
@@ -1678,6 +1671,7 @@ mod tests {
             client_name: "codex-app-server-client-test".to_string(),
             client_version: "0.0.0-test".to_string(),
             experimental_api: true,
+            mcp_server_openai_form_elicitation: false,
             opt_out_notification_methods: Vec::new(),
             channel_capacity: 8,
         })
@@ -2248,7 +2242,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_start_args_forward_environment_manager() {
+    async fn runtime_start_args_forward_environment_manager_and_openai_form_capability() {
         let config = Arc::new(build_test_config().await);
         let environment_manager = Arc::new(
             EnvironmentManager::create_for_tests(
@@ -2281,12 +2275,20 @@ mod tests {
             client_name: "codex-app-server-client-test".to_string(),
             client_version: "0.0.0-test".to_string(),
             experimental_api: true,
+            mcp_server_openai_form_elicitation: true,
             opt_out_notification_methods: Vec::new(),
             channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
         }
         .into_runtime_start_args();
 
         assert_eq!(runtime_args.config, config);
+        assert!(
+            runtime_args
+                .initialize
+                .capabilities
+                .expect("initialize capabilities")
+                .mcp_server_openai_form_elicitation
+        );
         assert!(Arc::ptr_eq(
             &runtime_args.environment_manager,
             &environment_manager
@@ -2322,6 +2324,7 @@ mod tests {
             client_name: "codex-app-server-client-test".to_string(),
             client_version: "0.0.0-test".to_string(),
             experimental_api: true,
+            mcp_server_openai_form_elicitation: false,
             opt_out_notification_methods: Vec::new(),
             channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
         }

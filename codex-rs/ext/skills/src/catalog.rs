@@ -1,5 +1,6 @@
-use codex_core_skills::model::SkillDependencies;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_skills::SkillDependencies;
+use codex_utils_path_uri::PathUri;
+use std::sync::Arc;
 
 /// Source authority that owns a skill package and must be used to read it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -76,13 +77,30 @@ impl SkillResourceId {
     pub fn environment(
         id: impl Into<String>,
         environment_id: impl Into<String>,
-        path: AbsolutePathBuf,
+        path: PathUri,
     ) -> Self {
         Self {
             id: id.into(),
             environment_path: Some(EnvironmentSkillResource {
                 environment_id: environment_id.into(),
                 path,
+                contents: None,
+            }),
+        }
+    }
+
+    pub fn environment_with_contents(
+        id: impl Into<String>,
+        environment_id: impl Into<String>,
+        path: PathUri,
+        contents: String,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            environment_path: Some(EnvironmentSkillResource {
+                environment_id: environment_id.into(),
+                path,
+                contents: Some(contents.into()),
             }),
         }
     }
@@ -91,17 +109,24 @@ impl SkillResourceId {
         &self.id
     }
 
-    pub(crate) fn environment_path(&self) -> Option<(&str, &AbsolutePathBuf)> {
+    pub(crate) fn environment_path(&self) -> Option<(&str, &PathUri)> {
         self.environment_path
             .as_ref()
             .map(|resource| (resource.environment_id.as_str(), &resource.path))
+    }
+
+    pub(crate) fn environment_contents(&self) -> Option<&str> {
+        self.environment_path
+            .as_ref()
+            .and_then(|resource| resource.contents.as_deref())
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct EnvironmentSkillResource {
     environment_id: String,
-    path: AbsolutePathBuf,
+    path: PathUri,
+    contents: Option<Arc<str>>,
 }
 
 /// Metadata shown in the always-visible skills catalog.

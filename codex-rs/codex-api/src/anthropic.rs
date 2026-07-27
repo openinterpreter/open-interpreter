@@ -9,6 +9,8 @@ pub struct AnthropicMessageRequest {
     pub system: Vec<AnthropicTextBlock>,
     pub tools: Vec<AnthropicTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<AnthropicThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_management: Option<AnthropicContextManagement>,

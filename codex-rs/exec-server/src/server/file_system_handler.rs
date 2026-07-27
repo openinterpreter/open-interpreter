@@ -2,8 +2,10 @@ use std::io;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use codex_app_server_protocol::JSONRPCErrorError;
+use codex_exec_server_protocol::JSONRPCErrorError;
 
+use crate::CapabilityRootsDiscoverParams;
+use crate::CapabilityRootsDiscoverResponse;
 use crate::CopyOptions;
 use crate::CreateDirectoryOptions;
 use crate::ExecServerRuntimePaths;
@@ -11,6 +13,7 @@ use crate::ExecutorFileSystem;
 use crate::RemoveOptions;
 use crate::file_read::FileReadHandleManager;
 use crate::local_file_system::LocalFileSystem;
+use crate::protocol::FS_READ_DIRECTORY_METHOD;
 use crate::protocol::FS_WRITE_FILE_METHOD;
 use crate::protocol::FsCanonicalizeParams;
 use crate::protocol::FsCanonicalizeResponse;
@@ -33,6 +36,8 @@ use crate::protocol::FsReadFileParams;
 use crate::protocol::FsReadFileResponse;
 use crate::protocol::FsRemoveParams;
 use crate::protocol::FsRemoveResponse;
+use crate::protocol::FsWalkParams;
+use crate::protocol::FsWalkResponse;
 use crate::protocol::FsWriteFileParams;
 use crate::protocol::FsWriteFileResponse;
 use crate::rpc::internal_error;
@@ -40,6 +45,9 @@ use crate::rpc::invalid_request;
 use crate::rpc::not_found;
 
 const MAX_FILE_READ_HANDLE_ID_BYTES: usize = 32;
+// Each read-directory entry needs four JSON values. Keep same-version
+// producers comfortably below the shared 256K-value decoder budget.
+const MAX_READ_DIRECTORY_ENTRIES: usize = 50_000;
 
 #[derive(Clone)]
 pub(crate) struct FileSystemHandler {
@@ -57,6 +65,15 @@ impl FileSystemHandler {
 
     pub(crate) async fn shutdown(&self) {
         self.file_reads.close_all().await;
+    }
+
+    pub(crate) async fn discover_capability_roots(
+        &self,
+        params: CapabilityRootsDiscoverParams,
+    ) -> Result<CapabilityRootsDiscoverResponse, JSONRPCErrorError> {
+        crate::discover_capability_roots(&self.file_system, params)
+            .await
+            .map_err(|error| invalid_request(error.to_string()))
     }
 
     pub(crate) async fn open(
@@ -187,7 +204,14 @@ impl FileSystemHandler {
             .file_system
             .read_directory(&params.path, params.sandbox.as_ref())
             .await
-            .map_err(map_fs_error)?
+            .map_err(map_fs_error)?;
+        let entry_count = entries.len();
+        if entry_count > MAX_READ_DIRECTORY_ENTRIES {
+            return Err(internal_error(format!(
+                "{FS_READ_DIRECTORY_METHOD} returned {entry_count} entries; limit is {MAX_READ_DIRECTORY_ENTRIES}"
+            )));
+        }
+        let entries = entries
             .into_iter()
             .map(|entry| FsReadDirectoryEntry {
                 file_name: entry.file_name,
@@ -196,6 +220,16 @@ impl FileSystemHandler {
             })
             .collect();
         Ok(FsReadDirectoryResponse { entries })
+    }
+
+    pub(crate) async fn walk(
+        &self,
+        params: FsWalkParams,
+    ) -> Result<FsWalkResponse, JSONRPCErrorError> {
+        self.file_system
+            .walk(&params.path, params.options, params.sandbox.as_ref())
+            .await
+            .map_err(map_fs_error)
     }
 
     pub(crate) async fn remove(
@@ -274,7 +308,7 @@ mod tests {
         )
         .expect("runtime paths");
         let handler = FileSystemHandler::new(runtime_paths);
-        let sandbox_cwd = PathUri::from_path(temp_dir.path()).expect("tempdir URI");
+        let sandbox_cwd = PathUri::from_host_native_path(temp_dir.path()).expect("tempdir URI");
         let sandbox_context = |sandbox_policy| {
             FileSystemSandboxContext::from_legacy_sandbox_policy(
                 sandbox_policy,
@@ -292,7 +326,8 @@ mod tests {
                 },
             ),
         ] {
-            let path = PathUri::from_path(temp_dir.path().join(file_name)).expect("path URI");
+            let path =
+                PathUri::from_host_native_path(temp_dir.path().join(file_name)).expect("path URI");
 
             handler
                 .write_file(FsWriteFileParams {
@@ -312,7 +347,7 @@ mod tests {
                 .expect("canonicalize file");
             assert_eq!(
                 canonicalized.path,
-                PathUri::from_path(
+                PathUri::from_host_native_path(
                     std::fs::canonicalize(temp_dir.path().join(file_name)).expect("canonical path"),
                 )
                 .expect("canonical path URI"),

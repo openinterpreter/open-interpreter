@@ -1,0 +1,89 @@
+name: rust-release-publish-existing
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Successful rust-release workflow run containing all six target artifacts"
+        required: true
+      tag:
+        description: "Existing rust-vX.Y.Z tag to publish"
+        required: true
+      version:
+        description: "Release version without the rust-v prefix"
+        required: true
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    name: Publish existing release artifacts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag and source run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" == "rust-v$VERSION" ]]
+          tagged_sha="$(git rev-list -n 1 "$TAG")"
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")"
+          [[ "$(jq -r .name <<<"$run_json")" == "rust-release" ]]
+          [[ "$(jq -r .conclusion <<<"$run_json")" == "success" ]]
+          [[ "$(jq -r .head_sha <<<"$run_json")" == "$tagged_sha" ]]
+
+          artifacts_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts")"
+          actual="$(jq -r '.artifacts[] | select(.expired == false) | .name' <<<"$artifacts_json" | sort)"
+          expected="$(printf '%s\n' \
+            aarch64-apple-darwin \
+            aarch64-pc-windows-msvc \
+            aarch64-unknown-linux-musl \
+            x86_64-apple-darwin \
+            x86_64-pc-windows-msvc \
+            x86_64-unknown-linux-musl)"
+          [[ "$actual" == "$expected" ]]
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.run_id }}
+          path: dist
+          merge-multiple: true
+
+      - name: Stage installers and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/install/install.sh dist/install.sh
+          cp scripts/install/install.ps1 dist/install.ps1
+          cd dist
+          [[ "$(find . -maxdepth 1 -name 'open-interpreter-package-*.tar.gz' | wc -l)" -eq 6 ]]
+          [[ "$(find . -maxdepth 1 -name 'open-interpreter-package-*.tar.zst' | wc -l)" -eq 6 ]]
+          sha256sum open-interpreter-package-*.tar.gz open-interpreter-package-*.tar.zst \
+            > codex-package_SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.5.0
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: Open Interpreter ${{ inputs.version }}
+          draft: false
+          prerelease: false
+          files: |
+            dist/open-interpreter-package-*.tar.gz
+            dist/open-interpreter-package-*.tar.zst
+            dist/codex-package_SHA256SUMS
+            dist/install.sh
+            dist/install.ps1

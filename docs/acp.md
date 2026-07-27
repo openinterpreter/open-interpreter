@@ -8,6 +8,10 @@ agent. ACP lets an editor or another UI start an agent process over stdio,
 create sessions, send prompts, stream assistant messages, show tool progress,
 and request permissions without scraping a terminal.
 
+Choose from the current directory of
+[ACP-compatible clients](https://agentclientprotocol.com/get-started/clients),
+then configure the client to launch Open Interpreter as shown below.
+
 Use ACP when you want Open Interpreter inside an editor agent panel or another
 structured agent UI. Use [Non-interactive mode](/docs/exec) for scripts, the
 [SDK](/docs/sdk) for app-server integrations, and [MCP server](/docs/mcp-server)
@@ -36,6 +40,7 @@ INTERPRETER_HOME="$HOME/.openinterpreter"
 OPENAI_API_KEY="..."
 ANTHROPIC_API_KEY="..."
 KIMI_API_KEY="..."
+MOONSHOT_API_KEY="..."
 ```
 
 If the client lets you pass environment variables, prefer setting provider keys

@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use codex_features::Feature;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::ToolInfo;
+use codex_tools::ToolExposure;
 use codex_tools::ToolName;
 use pretty_assertions::assert_eq;
 use rmcp::model::JsonObject;
@@ -24,6 +24,8 @@ fn make_connector(id: &str, name: &str) -> AppInfo {
         description: None,
         logo_url: None,
         logo_url_dark: None,
+        icon_assets: None,
+        icon_dark_assets: None,
         distribution_channel: None,
         branding: None,
         app_metadata: None,
@@ -55,6 +57,7 @@ fn make_mcp_tool(
             format!("Test tool: {tool_name}"),
             Arc::new(JsonObject::default()),
         ),
+        openai_file_input_optional_fields: Default::default(),
         connector_id: connector_id.map(str::to_string),
         connector_name: connector_name.map(str::to_string),
         plugin_display_names: Vec::new(),
@@ -77,10 +80,20 @@ fn numbered_mcp_tools(count: usize) -> Vec<ToolInfo> {
         .collect()
 }
 
-fn tool_names(tools: &[ToolInfo]) -> HashSet<ToolName> {
+fn expected_runtimes(
+    tools: &[ToolInfo],
+    exposure: ToolExposure,
+) -> HashMap<ToolName, ToolExposure> {
     tools
         .iter()
-        .map(codex_mcp::ToolInfo::canonical_tool_name)
+        .map(|tool| (tool.canonical_tool_name(), exposure))
+        .collect()
+}
+
+fn runtimes_by_name(runtimes: &[Arc<dyn CoreToolRuntime>]) -> HashMap<ToolName, ToolExposure> {
+    runtimes
+        .iter()
+        .map(|runtime| (runtime.tool_name(), runtime.exposure()))
         .collect()
 }
 
@@ -95,16 +108,18 @@ fn with_visibility(mut tool: ToolInfo, visibility: &[&str]) -> ToolInfo {
 }
 
 #[tokio::test]
-async fn directly_exposes_small_effective_tool_sets() {
+async fn directly_exposes_effective_tool_sets_when_search_is_unavailable() {
     let config = test_config().await;
-    let mcp_tools = numbered_mcp_tools(DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD - 1);
+    let mcp_tools = numbered_mcp_tools(/*count*/ 2);
 
-    let exposure = build_mcp_tool_exposure(
-        &mcp_tools, /*connectors*/ None, &config, /*search_tool_enabled*/ true,
+    let runtimes = build_mcp_tool_runtimes(
+        &mcp_tools, /*connectors*/ None, &config, /*search_tool_enabled*/ false,
     );
 
-    assert_eq!(tool_names(&exposure.direct_tools), tool_names(&mcp_tools));
-    assert!(exposure.deferred_tools.is_none());
+    assert_eq!(
+        runtimes_by_name(&runtimes),
+        expected_runtimes(&mcp_tools, ToolExposure::Direct)
+    );
 }
 
 #[tokio::test]
@@ -171,7 +186,7 @@ async fn excludes_tools_hidden_from_model_exposure() {
     ];
     let connectors = vec![make_connector("calendar", "Calendar")];
 
-    let exposure = build_mcp_tool_exposure(
+    let runtimes = build_mcp_tool_runtimes(
         &mcp_tools,
         Some(connectors.as_slice()),
         &config,
@@ -179,10 +194,9 @@ async fn excludes_tools_hidden_from_model_exposure() {
     );
 
     assert_eq!(
-        tool_names(&exposure.direct_tools),
-        tool_names(&[visible_tool, visible_app_tool])
+        runtimes_by_name(&runtimes),
+        expected_runtimes(&[visible_tool, visible_app_tool], ToolExposure::Direct)
     );
-    assert!(exposure.deferred_tools.is_none());
 }
 
 #[tokio::test]
@@ -222,7 +236,7 @@ enabled = true
     );
     let connectors = vec![make_connector("calendar", "Calendar")];
 
-    let exposure = build_mcp_tool_exposure(
+    let runtimes = build_mcp_tool_runtimes(
         &[enabled_tool.clone(), disabled_tool],
         Some(connectors.as_slice()),
         &config,
@@ -230,36 +244,29 @@ enabled = true
     );
 
     assert_eq!(
-        tool_names(&exposure.direct_tools),
-        tool_names(&[enabled_tool])
+        runtimes_by_name(&runtimes),
+        expected_runtimes(&[enabled_tool], ToolExposure::Direct)
     );
-    assert!(exposure.deferred_tools.is_none());
 }
 
 #[tokio::test]
-async fn searches_large_effective_tool_sets() {
+async fn defers_effective_tool_sets_when_search_is_available() {
     let config = test_config().await;
-    let mcp_tools = numbered_mcp_tools(DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD);
+    let mcp_tools = numbered_mcp_tools(/*count*/ 2);
 
-    let exposure = build_mcp_tool_exposure(
+    let runtimes = build_mcp_tool_runtimes(
         &mcp_tools, /*connectors*/ None, &config, /*search_tool_enabled*/ true,
     );
 
-    assert!(exposure.direct_tools.is_empty());
-    let deferred_tools = exposure
-        .deferred_tools
-        .as_ref()
-        .expect("large tool sets should be discoverable through tool_search");
-    assert_eq!(tool_names(deferred_tools), tool_names(&mcp_tools));
+    assert_eq!(
+        runtimes_by_name(&runtimes),
+        expected_runtimes(&mcp_tools, ToolExposure::Deferred)
+    );
 }
 
 #[tokio::test]
-async fn always_defer_feature_defers_apps_too() {
-    let mut config = test_config().await;
-    config
-        .features
-        .enable(Feature::ToolSearchAlwaysDeferMcpTools)
-        .expect("test config should allow feature update");
+async fn defers_apps_and_non_app_mcp_tools() {
+    let config = test_config().await;
     let mcp_tools = vec![
         make_mcp_tool(
             "rmcp",
@@ -280,22 +287,15 @@ async fn always_defer_feature_defers_apps_too() {
     ];
     let connectors = vec![make_connector("calendar", "Calendar")];
 
-    let exposure = build_mcp_tool_exposure(
+    let runtimes = build_mcp_tool_runtimes(
         &mcp_tools,
         Some(connectors.as_slice()),
         &config,
         /*search_tool_enabled*/ true,
     );
 
-    assert!(exposure.direct_tools.is_empty());
-    let deferred_tools = exposure
-        .deferred_tools
-        .as_ref()
-        .expect("MCP tools should be discoverable through tool_search");
-    let deferred_tool_names = tool_names(deferred_tools);
-    assert!(deferred_tool_names.contains(&ToolName::namespaced("mcp__rmcp", "tool")));
-    assert!(deferred_tool_names.contains(&ToolName::namespaced(
-        "mcp__codex_apps__calendar",
-        "_create_event"
-    )));
+    assert_eq!(
+        runtimes_by_name(&runtimes),
+        expected_runtimes(&mcp_tools, ToolExposure::Deferred)
+    );
 }

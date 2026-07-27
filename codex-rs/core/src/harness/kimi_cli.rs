@@ -111,7 +111,10 @@ fn apply_reasoning_effort(request: &mut Value, reasoning_effort: Option<Reasonin
             request_object.insert("reasoning_effort".to_string(), json!("medium"));
             request_object.insert("thinking".to_string(), json!({ "type": "enabled" }));
         }
-        ReasoningEffort::High | ReasoningEffort::XHigh => {
+        ReasoningEffort::High
+        | ReasoningEffort::XHigh
+        | ReasoningEffort::Max
+        | ReasoningEffort::Ultra => {
             request_object.insert("reasoning_effort".to_string(), json!("high"));
             request_object.insert("thinking".to_string(), json!({ "type": "enabled" }));
         }
@@ -197,6 +200,7 @@ pub(super) struct MessageBuildOptions {
     pub omitted_reasoning_placeholder: Option<&'static str>,
     pub compact_function_arguments: bool,
     pub merge_assistant_text_with_following_tool_calls: bool,
+    pub preserve_empty_reasoning_content: bool,
     pub preserve_empty_tool_output: bool,
     pub trim_user_message_trailing_newlines: bool,
     pub tool_call_id_format: ToolCallIdFormat,
@@ -214,6 +218,7 @@ impl MessageBuildOptions {
             omitted_reasoning_placeholder: None,
             compact_function_arguments: false,
             merge_assistant_text_with_following_tool_calls: false,
+            preserve_empty_reasoning_content: false,
             preserve_empty_tool_output: false,
             trim_user_message_trailing_newlines: true,
             tool_call_id_format: ToolCallIdFormat::Preserve,
@@ -225,6 +230,7 @@ impl MessageBuildOptions {
             omitted_reasoning_placeholder: None,
             compact_function_arguments: true,
             merge_assistant_text_with_following_tool_calls: false,
+            preserve_empty_reasoning_content: true,
             preserve_empty_tool_output: false,
             trim_user_message_trailing_newlines: false,
             tool_call_id_format: ToolCallIdFormat::KimiCodeUnderscore,
@@ -236,6 +242,7 @@ impl MessageBuildOptions {
             omitted_reasoning_placeholder: Some("(reasoning omitted)"),
             compact_function_arguments: true,
             merge_assistant_text_with_following_tool_calls: true,
+            preserve_empty_reasoning_content: false,
             preserve_empty_tool_output: true,
             trim_user_message_trailing_newlines: true,
             tool_call_id_format: ToolCallIdFormat::Preserve,
@@ -281,6 +288,7 @@ pub(super) fn build_messages_with_options(
                                 &mut messages,
                                 &mut pending_assistant_content,
                                 &mut pending_reasoning_content,
+                                options.preserve_empty_reasoning_content,
                             );
                             pending_assistant_content = Some(message_content);
                             continue;
@@ -289,12 +297,17 @@ pub(super) fn build_messages_with_options(
                             &mut messages,
                             &mut pending_assistant_content,
                             &mut pending_reasoning_content,
+                            options.preserve_empty_reasoning_content,
                         );
                         let mut message = json!({
                             "role": "assistant",
                             "content": message_content,
                         });
-                        attach_reasoning_content(&mut message, &mut pending_reasoning_content);
+                        attach_reasoning_content(
+                            &mut message,
+                            &mut pending_reasoning_content,
+                            options.preserve_empty_reasoning_content,
+                        );
                         messages.push(message);
                     }
                 }
@@ -313,6 +326,7 @@ pub(super) fn build_messages_with_options(
                         &mut messages,
                         &mut pending_assistant_content,
                         &mut pending_reasoning_content,
+                        options.preserve_empty_reasoning_content,
                     );
                     pending_reasoning_content.clear();
                     if let Some(message_content) = convert_user_message_content(content, options) {
@@ -332,6 +346,7 @@ pub(super) fn build_messages_with_options(
                         &mut messages,
                         &mut pending_assistant_content,
                         &mut pending_reasoning_content,
+                        options.preserve_empty_reasoning_content,
                     );
                     pending_reasoning_content.clear();
                 }
@@ -348,6 +363,7 @@ pub(super) fn build_messages_with_options(
                         &mut messages,
                         &mut pending_assistant_content,
                         &mut pending_reasoning_content,
+                        options.preserve_empty_reasoning_content,
                     );
                 }
                 let call_id = format_tool_call_id(call_id, options.tool_call_id_format);
@@ -375,6 +391,7 @@ pub(super) fn build_messages_with_options(
                         &mut messages,
                         &mut pending_assistant_content,
                         &mut pending_reasoning_content,
+                        options.preserve_empty_reasoning_content,
                     );
                 }
                 let call_id = format_tool_call_id(call_id, options.tool_call_id_format);
@@ -399,14 +416,18 @@ pub(super) fn build_messages_with_options(
                         &mut messages,
                         &mut pending_assistant_content,
                         &mut pending_reasoning_content,
+                        options.preserve_empty_reasoning_content,
                     );
                 }
-                let call_id = call_id.clone().or_else(|| id.clone()).ok_or_else(|| {
-                    serde_json::Error::io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "local_shell history item missing call id",
-                    ))
-                })?;
+                let call_id = call_id
+                    .clone()
+                    .or_else(|| id.as_ref().map(ToString::to_string))
+                    .ok_or_else(|| {
+                        serde_json::Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "local_shell history item missing call id",
+                        ))
+                    })?;
                 let call_id = format_tool_call_id(&call_id, options.tool_call_id_format);
                 let arguments = match action {
                     LocalShellAction::Exec(exec) => json!({
@@ -434,8 +455,11 @@ pub(super) fn build_messages_with_options(
                     &mut awaiting_tool_call_ids,
                     &mut pending_assistant_content,
                     &mut pending_reasoning_content,
-                    &format_tool_call_id(call_id, options.tool_call_id_format),
-                    kimi_tool_output_content(output, options),
+                    ToolOutputMessage {
+                        call_id: format_tool_call_id(call_id, options.tool_call_id_format),
+                        content: kimi_tool_output_content(output, options),
+                    },
+                    options.preserve_empty_reasoning_content,
                 );
             }
             ResponseItem::CustomToolCallOutput {
@@ -447,8 +471,11 @@ pub(super) fn build_messages_with_options(
                     &mut awaiting_tool_call_ids,
                     &mut pending_assistant_content,
                     &mut pending_reasoning_content,
-                    &format_tool_call_id(call_id, options.tool_call_id_format),
-                    kimi_tool_output_content(output, options),
+                    ToolOutputMessage {
+                        call_id: format_tool_call_id(call_id, options.tool_call_id_format),
+                        content: kimi_tool_output_content(output, options),
+                    },
+                    options.preserve_empty_reasoning_content,
                 );
             }
             ResponseItem::Reasoning { content, .. } => {
@@ -466,6 +493,7 @@ pub(super) fn build_messages_with_options(
             | ResponseItem::Compaction { .. }
             | ResponseItem::CompactionTrigger { .. }
             | ResponseItem::ContextCompaction { .. }
+            | ResponseItem::AdditionalTools { .. }
             | ResponseItem::Other => {}
         }
     }
@@ -474,6 +502,7 @@ pub(super) fn build_messages_with_options(
         &mut messages,
         &mut pending_assistant_content,
         &mut pending_reasoning_content,
+        options.preserve_empty_reasoning_content,
     );
     discard_unanswered_tool_calls(
         &mut pending_tool_calls,
@@ -512,6 +541,7 @@ fn flush_pending_tool_calls(
     pending_tool_calls: &mut Vec<Value>,
     awaiting_tool_call_ids: &mut Vec<String>,
     pending_reasoning_content: &mut String,
+    preserve_empty_reasoning_content: bool,
 ) {
     if pending_tool_calls.is_empty() {
         return;
@@ -526,7 +556,11 @@ fn flush_pending_tool_calls(
         "role": "assistant",
         "tool_calls": std::mem::take(pending_tool_calls),
     });
-    attach_reasoning_content(&mut message, pending_reasoning_content);
+    attach_reasoning_content(
+        &mut message,
+        pending_reasoning_content,
+        preserve_empty_reasoning_content,
+    );
     messages.push(message);
 }
 
@@ -536,6 +570,7 @@ fn flush_pending_tool_calls_with_content(
     awaiting_tool_call_ids: &mut Vec<String>,
     pending_reasoning_content: &mut String,
     content: Value,
+    preserve_empty_reasoning_content: bool,
 ) {
     if pending_tool_calls.is_empty() {
         return;
@@ -551,7 +586,11 @@ fn flush_pending_tool_calls_with_content(
         "content": content,
         "tool_calls": std::mem::take(pending_tool_calls),
     });
-    attach_reasoning_content(&mut message, pending_reasoning_content);
+    attach_reasoning_content(
+        &mut message,
+        pending_reasoning_content,
+        preserve_empty_reasoning_content,
+    );
     messages.push(message);
 }
 
@@ -569,6 +608,7 @@ fn push_pending_assistant_content(
     messages: &mut Vec<Value>,
     pending_assistant_content: &mut Option<Value>,
     pending_reasoning_content: &mut String,
+    preserve_empty_reasoning_content: bool,
 ) {
     let Some(content) = pending_assistant_content.take() else {
         return;
@@ -577,8 +617,17 @@ fn push_pending_assistant_content(
         "role": "assistant",
         "content": content,
     });
-    attach_reasoning_content(&mut message, pending_reasoning_content);
+    attach_reasoning_content(
+        &mut message,
+        pending_reasoning_content,
+        preserve_empty_reasoning_content,
+    );
     messages.push(message);
+}
+
+struct ToolOutputMessage {
+    call_id: String,
+    content: Value,
 }
 
 fn push_tool_output_if_expected(
@@ -587,9 +636,10 @@ fn push_tool_output_if_expected(
     awaiting_tool_call_ids: &mut Vec<String>,
     pending_assistant_content: &mut Option<Value>,
     pending_reasoning_content: &mut String,
-    call_id: &str,
-    content: Value,
+    output: ToolOutputMessage,
+    preserve_empty_reasoning_content: bool,
 ) {
+    let ToolOutputMessage { call_id, content } = output;
     if let Some(content) = pending_assistant_content.take() {
         flush_pending_tool_calls_with_content(
             messages,
@@ -597,6 +647,7 @@ fn push_tool_output_if_expected(
             awaiting_tool_call_ids,
             pending_reasoning_content,
             content,
+            preserve_empty_reasoning_content,
         );
     } else {
         flush_pending_tool_calls(
@@ -604,11 +655,12 @@ fn push_tool_output_if_expected(
             pending_tool_calls,
             awaiting_tool_call_ids,
             pending_reasoning_content,
+            preserve_empty_reasoning_content,
         );
     }
     if let Some(index) = awaiting_tool_call_ids
         .iter()
-        .position(|awaiting_call_id| awaiting_call_id == call_id)
+        .position(|awaiting_call_id| awaiting_call_id == &call_id)
     {
         awaiting_tool_call_ids.remove(index);
         messages.push(json!({
@@ -685,8 +737,12 @@ fn compact_json_whitespace_preserving_order(input: &str) -> String {
     out
 }
 
-fn attach_reasoning_content(message: &mut Value, pending_reasoning_content: &mut String) {
-    if pending_reasoning_content.is_empty() {
+fn attach_reasoning_content(
+    message: &mut Value,
+    pending_reasoning_content: &mut String,
+    preserve_empty_reasoning_content: bool,
+) {
+    if pending_reasoning_content.is_empty() && !preserve_empty_reasoning_content {
         return;
     }
     if let Some(message_object) = message.as_object_mut() {
@@ -723,6 +779,10 @@ fn convert_message_parts(content: &[ContentItem]) -> Vec<Value> {
                     "id": null,
                 }
             }),
+            ContentItem::InputAudio { audio_url } => json!({
+                "type": "input_audio",
+                "audio_url": audio_url,
+            }),
         })
         .collect()
 }
@@ -748,6 +808,10 @@ fn convert_user_message_parts(content: &[ContentItem], options: MessageBuildOpti
                     "url": image_url,
                     "id": null,
                 }
+            }),
+            ContentItem::InputAudio { audio_url } => json!({
+                "type": "input_audio",
+                "audio_url": audio_url,
             }),
         })
         .collect()
@@ -830,6 +894,17 @@ fn kimi_output_content_item(item: &FunctionCallOutputContentItem) -> Value {
                 "url": image_url,
                 "id": null,
             }
+        }),
+        FunctionCallOutputContentItem::InputVideo { video_url, id } => json!({
+            "type": "video_url",
+            "video_url": {
+                "url": video_url,
+                "id": id,
+            }
+        }),
+        FunctionCallOutputContentItem::InputAudio { audio_url } => json!({
+            "type": "input_audio",
+            "audio_url": audio_url,
         }),
         FunctionCallOutputContentItem::EncryptedContent { .. } => json!({
             "type": "text",
@@ -976,7 +1051,7 @@ fn collect_developer_instruction_text(items: &[ResponseItem]) -> String {
                 (!trimmed.is_empty()).then_some(trimmed)
             }
             ContentItem::InputText { .. } => None,
-            ContentItem::InputImage { .. } => None,
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -999,7 +1074,7 @@ pub(super) fn session_kimi_skills(items: &[ResponseItem]) -> Vec<KimiSkill> {
 }
 
 /// Renders the `${KIMI_SKILLS}` system-prompt section from on-disk discovery
-/// (the captured Kimi CLI behavior) plus the session's actual skills. Disk
+/// (the Kimi CLI behavior) plus the session's actual skills. Disk
 /// re-discovery alone misses session skill roots such as
 /// `<home>/skills/.system`, and the workspace harness instruction-role rule
 /// forbids dropping skills assembled above the harness layer, so session
@@ -1042,26 +1117,26 @@ fn kimi_skill_roots(
 ) -> Vec<KimiSkillRoot> {
     let mut roots = Vec::new();
     if let Some(root) = first_existing_dir([
-        work_dir.join(".kimi/skills"),
-        work_dir.join(".claude/skills"),
-        work_dir.join(".codex/skills"),
+        work_dir.join(".kimi").join("skills"),
+        work_dir.join(".claude").join("skills"),
+        work_dir.join(".codex").join("skills"),
     ]) {
         roots.push(KimiSkillRoot::new(root, KimiSkillScope::Project));
     }
-    if let Some(root) = first_existing_dir([work_dir.join(".agents/skills")]) {
+    if let Some(root) = first_existing_dir([work_dir.join(".agents").join("skills")]) {
         roots.push(KimiSkillRoot::new(root, KimiSkillScope::Project));
     }
     if let Some(home) = home_dir {
         if let Some(root) = first_existing_dir([
-            home.join(".kimi/skills"),
-            home.join(".claude/skills"),
-            home.join(".codex/skills"),
+            home.join(".kimi").join("skills"),
+            home.join(".claude").join("skills"),
+            home.join(".codex").join("skills"),
         ]) {
             roots.push(KimiSkillRoot::new(root, KimiSkillScope::User));
         }
         if let Some(root) = first_existing_dir([
-            home.join(".config/agents/skills"),
-            home.join(".agents/skills"),
+            home.join(".config").join("agents").join("skills"),
+            home.join(".agents").join("skills"),
         ]) {
             roots.push(KimiSkillRoot::new(root, KimiSkillScope::User));
         }
@@ -1255,7 +1330,7 @@ fn render_conditional_block(
 }
 
 fn current_kimi_now() -> String {
-    if let Ok(fake_time) = std::env::var("HARNESS_LAB_FAKE_TIME") {
+    if let Ok(fake_time) = std::env::var("OPENINTERPRETER_TEST_TIME") {
         if let Some((date, time)) = fake_time.split_once(' ') {
             return format!("{date}T{time}.000000+00:00");
         }
@@ -1365,14 +1440,16 @@ mod tests {
     #[test]
     fn kimi_user_messages_trim_trailing_newline() {
         let items = vec![ResponseItem::Message {
-            id: Some("user".to_string()),
+            id: Some(codex_protocol::ResponseItemId::from_server(
+                "user".to_string(),
+            )),
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
                 text: "hello\n".to_string(),
             }],
             phase: None,
 
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         }];
 
         let messages = build_messages(&items)
@@ -1391,14 +1468,16 @@ mod tests {
     #[test]
     fn kimi_code_user_messages_preserve_trailing_newline() {
         let items = vec![ResponseItem::Message {
-            id: Some("user".to_string()),
+            id: Some(codex_protocol::ResponseItemId::from_server(
+                "user".to_string(),
+            )),
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
                 text: "hello\n".to_string(),
             }],
             phase: None,
 
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         }];
 
         let messages =
@@ -1416,9 +1495,63 @@ mod tests {
     }
 
     #[test]
+    fn kimi_code_preserves_empty_reasoning_content_on_assistant_messages() {
+        let items = vec![
+            ResponseItem::FunctionCall {
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "fc-1".to_string(),
+                )),
+                name: "GetGoal".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                call_id: "GetGoal:0".to_string(),
+
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: "GetGoal:0".to_string(),
+                output: FunctionCallOutputPayload::from_text("{}".to_string()),
+
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ];
+
+        let messages =
+            super::build_messages_with_options(&items, super::MessageBuildOptions::kimi_code())
+                .expect("build messages")
+                .collect::<Vec<_>>();
+
+        assert_eq!(
+            messages,
+            vec![
+                json!({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "type": "function",
+                        "id": "GetGoal_0",
+                        "function": {
+                            "name": "GetGoal",
+                            "arguments": "{}",
+                        },
+                    }],
+                    "reasoning_content": "",
+                }),
+                json!({
+                    "role": "tool",
+                    "content": "{}",
+                    "tool_call_id": "GetGoal_0",
+                }),
+            ]
+        );
+    }
+
+    #[test]
     fn kimi_user_messages_preserve_image_content() {
         let items = vec![ResponseItem::Message {
-            id: Some("user".to_string()),
+            id: Some(codex_protocol::ResponseItemId::from_server(
+                "user".to_string(),
+            )),
             role: "user".to_string(),
             content: vec![
                 ContentItem::InputText {
@@ -1431,7 +1564,7 @@ mod tests {
             ],
             phase: None,
 
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         }];
 
         let messages = build_messages(&items)
@@ -1486,24 +1619,28 @@ mod tests {
     fn kimi_contextual_developer_messages_do_not_add_extra_user_messages() {
         let items = vec![
             ResponseItem::Message {
-                id: Some("developer".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "developer".to_string(),
+                )),
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "<skills_instructions>\n- imagegen\n</skills_instructions>".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
-                id: Some("user".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "$imagegen what is this".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
         let prompt = Prompt {
@@ -1511,7 +1648,8 @@ mod tests {
             cwd: Some(std::env::temp_dir()),
             ..Prompt::default()
         };
-        let system_prompt = build_system_prompt(&prompt, None, "conversation-id");
+        let system_prompt =
+            build_system_prompt(&prompt, /*session_source*/ None, "conversation-id");
 
         let messages = build_messages(&items)
             .expect("build messages")
@@ -1532,7 +1670,9 @@ mod tests {
     fn kimi_contextual_user_blocks_do_not_add_extra_user_messages() {
         let items = vec![
             ResponseItem::Message {
-                id: Some("permissions".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "permissions".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "<permissions instructions>\nbody\n</permissions instructions>"
@@ -1540,27 +1680,31 @@ mod tests {
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
-                id: Some("skills".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "skills".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "<skills_instructions>\nbody\n</skills_instructions>".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
-                id: Some("user".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "do the task".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
 
@@ -1581,7 +1725,9 @@ mod tests {
     fn kimi_session_skills_render_in_system_prompt_skills_section() {
         let items = vec![
             ResponseItem::Message {
-                id: Some("developer".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "developer".to_string(),
+                )),
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file.\n### Available skills\n- qa-testing: Run the project's QA test plan against a live build (file: /home/user/skills/.system/qa-testing/SKILL.md)\n### How to use skills\n- Discovery: ...\n</skills_instructions>"
@@ -1589,16 +1735,18 @@ mod tests {
                 }],
                 phase: None,
 
-                metadata: None,},
+                internal_chat_message_metadata_passthrough: None,},
             ResponseItem::Message {
-                id: Some("user".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "Run the QA pass".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,},
+                internal_chat_message_metadata_passthrough: None,},
         ];
         let prompt = Prompt {
             input: items,
@@ -1606,7 +1754,11 @@ mod tests {
             ..Prompt::default()
         };
 
-        let system_prompt = build_system_prompt(&prompt, None, "kimi-session-skills-conversation");
+        let system_prompt = build_system_prompt(
+            &prompt,
+            /*session_source*/ None,
+            "kimi-session-skills-conversation",
+        );
 
         // The session's skills (which disk re-discovery cannot find under
         // <home>/skills/.system) render in Kimi's native skills shape.
@@ -1620,14 +1772,16 @@ mod tests {
     #[test]
     fn kimi_non_contextual_developer_messages_are_preserved_in_system_prompt() {
         let items = vec![ResponseItem::Message {
-            id: Some("developer".to_string()),
+            id: Some(codex_protocol::ResponseItemId::from_server(
+                "developer".to_string(),
+            )),
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
                 text: "Prefer small patches.".to_string(),
             }],
             phase: None,
 
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         }];
         let prompt = Prompt {
             input: items,
@@ -1635,7 +1789,8 @@ mod tests {
             ..Prompt::default()
         };
 
-        let system_prompt = build_system_prompt(&prompt, None, "conversation-id");
+        let system_prompt =
+            build_system_prompt(&prompt, /*session_source*/ None, "conversation-id");
 
         assert!(system_prompt.contains("# Additional Developer Instructions"));
         assert!(system_prompt.contains("Prefer small patches."));
@@ -1652,7 +1807,8 @@ mod tests {
             ..Prompt::default()
         };
 
-        let system_prompt = build_system_prompt(&prompt, None, "conversation-id");
+        let system_prompt =
+            build_system_prompt(&prompt, /*session_source*/ None, "conversation-id");
 
         assert!(
             !system_prompt
@@ -1691,14 +1847,16 @@ mod tests {
     fn kimi_request_omits_openai_specific_chat_fields_but_keeps_kimi_fields() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
-                id: Some("user".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "hello".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
             cwd: Some(std::env::temp_dir()),
             ..Prompt::default()
@@ -1707,9 +1865,9 @@ mod tests {
         let (request, _) = build_request(
             &prompt,
             &test_model_info(),
-            None,
+            /*reasoning_effort*/ None,
             "conversation-id",
-            None,
+            /*session_source*/ None,
             /*yolo_mode*/ false,
         )
         .expect("build request");
@@ -1727,14 +1885,16 @@ mod tests {
     fn kimi_request_keeps_reasoning_effort_even_without_catalog_reasoning_control() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
-                id: Some("user".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "think".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
             cwd: Some(std::env::temp_dir()),
             ..Prompt::default()
@@ -1745,7 +1905,7 @@ mod tests {
             &test_model_info(),
             Some(ReasoningEffort::High),
             "conversation-id",
-            None,
+            /*session_source*/ None,
             /*yolo_mode*/ false,
         )
         .expect("build request");
@@ -1758,14 +1918,16 @@ mod tests {
     fn kimi_request_maps_thinking_toggle_model_reasoning_effort_to_thinking() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
-                id: Some("user".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "think".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
             cwd: Some(std::env::temp_dir()),
             ..Prompt::default()
@@ -1777,7 +1939,7 @@ mod tests {
             &model_info,
             Some(ReasoningEffort::High),
             "conversation-id",
-            None,
+            /*session_source*/ None,
             /*yolo_mode*/ false,
         )
         .expect("build request");
@@ -1795,14 +1957,16 @@ mod tests {
     fn thinking_toggle_prompt() -> Prompt {
         Prompt {
             input: vec![ResponseItem::Message {
-                id: Some("user".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "think".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
             cwd: Some(std::env::temp_dir()),
             ..Prompt::default()
@@ -1816,7 +1980,7 @@ mod tests {
             &thinking_toggle_model_info(),
             Some(ReasoningEffort::thinking_toggle_on()),
             "conversation-id",
-            None,
+            /*session_source*/ None,
             /*yolo_mode*/ false,
         )
         .expect("build request");
@@ -1832,7 +1996,7 @@ mod tests {
             &thinking_toggle_model_info(),
             Some(ReasoningEffort::None),
             "conversation-id",
-            None,
+            /*session_source*/ None,
             /*yolo_mode*/ false,
         )
         .expect("build request");
@@ -1849,9 +2013,9 @@ mod tests {
         let (request, _) = build_request(
             &thinking_toggle_prompt(),
             &thinking_toggle_model_info(),
-            None,
+            /*reasoning_effort*/ None,
             "conversation-id",
-            None,
+            /*session_source*/ None,
             /*yolo_mode*/ false,
         )
         .expect("build request");
@@ -1870,7 +2034,11 @@ mod tests {
             description: "Ask the user a question.".to_string(),
             strict: false,
             defer_loading: None,
-            parameters: JsonSchema::object(std::collections::BTreeMap::new(), None, None),
+            parameters: JsonSchema::object(
+                std::collections::BTreeMap::new(),
+                /*required*/ None,
+                /*additional_properties*/ None,
+            ),
             output_schema: None,
         };
         let shell = ResponsesApiTool {
@@ -1878,19 +2046,25 @@ mod tests {
             description: "Run a shell command.".to_string(),
             strict: false,
             defer_loading: None,
-            parameters: JsonSchema::object(std::collections::BTreeMap::new(), None, None),
+            parameters: JsonSchema::object(
+                std::collections::BTreeMap::new(),
+                /*required*/ None,
+                /*additional_properties*/ None,
+            ),
             output_schema: None,
         };
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
-                id: Some("user".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "do the task".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
             tools: vec![
                 ToolSpec::Function(ask_user_question),
@@ -1903,9 +2077,9 @@ mod tests {
         let (request, _) = build_request(
             &prompt,
             &test_model_info(),
-            None,
+            /*reasoning_effort*/ None,
             "conversation-id",
-            None,
+            /*session_source*/ None,
             /*yolo_mode*/ true,
         )
         .expect("build request");
@@ -1937,9 +2111,9 @@ mod tests {
         let (interactive_request, _) = build_request(
             &prompt,
             &test_model_info(),
-            None,
+            /*reasoning_effort*/ None,
             "conversation-id",
-            None,
+            /*session_source*/ None,
             /*yolo_mode*/ false,
         )
         .expect("build request");
@@ -1956,23 +2130,27 @@ mod tests {
     fn kimi_messages_drop_unanswered_tool_call() {
         let items = vec![
             ResponseItem::FunctionCall {
-                id: Some("fc-1".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "fc-1".to_string(),
+                )),
                 name: "WriteFile".to_string(),
                 namespace: None,
                 arguments: r#"{"path":"/app/ars.R","content":"ok"}"#.to_string(),
                 call_id: "WriteFile:6".to_string(),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
-                id: Some("assistant".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "assistant".to_string(),
+                )),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "done".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
 
@@ -1993,23 +2171,27 @@ mod tests {
     fn kimi_messages_ignore_empty_assistant_between_tool_call_and_output() {
         let items = vec![
             ResponseItem::FunctionCall {
-                id: Some("fc-1".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "fc-1".to_string(),
+                )),
                 name: "Shell".to_string(),
                 namespace: None,
                 arguments: r#"{"command":"which R && R --version"}"#.to_string(),
                 call_id: "Shell:0".to_string(),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
-                id: Some("chat-message-1".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "chat-message-1".to_string(),
+                )),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: String::new(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
@@ -2018,7 +2200,7 @@ mod tests {
                     "<system>Command executed successfully.</system>".to_string(),
                 ),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
 
@@ -2055,30 +2237,34 @@ mod tests {
     fn kimi_messages_attach_reasoning_content_to_tool_call_message() {
         let items = vec![
             ResponseItem::Reasoning {
-                id: Some("rs-1".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "rs-1".to_string(),
+                )),
                 summary: Vec::new(),
                 content: Some(vec![ReasoningItemContent::ReasoningText {
                     text: "I need to inspect the files.".to_string(),
                 }]),
                 encrypted_content: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
-                id: Some("fc-1".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "fc-1".to_string(),
+                )),
                 name: "Shell".to_string(),
                 namespace: None,
                 arguments: r#"{"command":"ls"}"#.to_string(),
                 call_id: "Shell:0".to_string(),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
                 call_id: "Shell:0".to_string(),
                 output: FunctionCallOutputPayload::from_text("ok".to_string()),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
 
@@ -2116,33 +2302,39 @@ mod tests {
     fn kimi_messages_merge_late_assistant_text_with_pending_tool_calls() {
         let items = vec![
             ResponseItem::Reasoning {
-                id: Some("rs-1".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "rs-1".to_string(),
+                )),
                 summary: Vec::new(),
                 content: Some(vec![ReasoningItemContent::ReasoningText {
                     text: "I should inspect the runtime.".to_string(),
                 }]),
                 encrypted_content: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
-                id: Some("fc-1".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "fc-1".to_string(),
+                )),
                 name: "Shell".to_string(),
                 namespace: None,
                 arguments: r#"{"command":"which R && R --version"}"#.to_string(),
                 call_id: "Shell:1".to_string(),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
-                id: Some("msg-1".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "msg-1".to_string(),
+                )),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "I'll check whether R is available.".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
@@ -2151,7 +2343,7 @@ mod tests {
                     "<system>ERROR: Command failed with exit code: 1.</system>".to_string(),
                 ),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
 
@@ -2190,13 +2382,15 @@ mod tests {
     fn kimi_messages_replace_non_text_only_tool_output() {
         let items = vec![
             ResponseItem::FunctionCall {
-                id: Some("fc-1".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "fc-1".to_string(),
+                )),
                 name: "Shell".to_string(),
                 namespace: None,
                 arguments: r#"{"command":"./a.out"}"#.to_string(),
                 call_id: "Shell:0".to_string(),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
@@ -2210,7 +2404,7 @@ mod tests {
                     },
                 ]),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
 
@@ -2256,20 +2450,22 @@ mod tests {
     fn kimi_messages_preserve_control_bytes_from_tool_output() {
         let items = vec![
             ResponseItem::FunctionCall {
-                id: Some("fc-1".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "fc-1".to_string(),
+                )),
                 name: "Shell".to_string(),
                 namespace: None,
                 arguments: r#"{"command":"printf"}"#.to_string(),
                 call_id: "Shell:0".to_string(),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
                 call_id: "Shell:0".to_string(),
                 output: FunctionCallOutputPayload::from_text("a\u{c}b\nc".to_string()),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
 
@@ -2291,20 +2487,22 @@ mod tests {
     fn kimi_messages_keep_actual_tool_output_after_call() {
         let items = vec![
             ResponseItem::FunctionCall {
-                id: Some("fc-1".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "fc-1".to_string(),
+                )),
                 name: "WriteFile".to_string(),
                 namespace: None,
                 arguments: r#"{"path":"/app/ars.R","content":"ok"}"#.to_string(),
                 call_id: "WriteFile:6".to_string(),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
                 call_id: "WriteFile:6".to_string(),
                 output: FunctionCallOutputPayload::from_text("written".to_string()),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
 
@@ -2341,13 +2539,15 @@ mod tests {
     fn kimi_messages_preserve_kimi_style_failed_tool_content_parts() {
         let items = vec![
             ResponseItem::FunctionCall {
-                id: Some("fc-1".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "fc-1".to_string(),
+                )),
                 name: "Shell".to_string(),
                 namespace: None,
                 arguments: r#"{"command":"false"}"#.to_string(),
                 call_id: "Shell:7".to_string(),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
@@ -2365,7 +2565,7 @@ mod tests {
                     success: Some(false),
                 },
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
 
@@ -2411,13 +2611,15 @@ mod tests {
     fn kimi_messages_preserve_single_kimi_style_failed_tool_part() {
         let items = vec![
             ResponseItem::FunctionCall {
-                id: Some("fc-1".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "fc-1".to_string(),
+                )),
                 name: "Shell".to_string(),
                 namespace: None,
                 arguments: r#"{"command":"which R && R --version"}"#.to_string(),
                 call_id: "Shell:7".to_string(),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
@@ -2429,7 +2631,7 @@ mod tests {
                     success: Some(false),
                 },
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
 
@@ -2466,13 +2668,15 @@ mod tests {
     fn kimi_messages_preserve_image_tool_output_content() {
         let items = vec![
             ResponseItem::FunctionCall {
-                id: Some("fc-1".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "fc-1".to_string(),
+                )),
                 name: "ReadMediaFile".to_string(),
                 namespace: None,
                 arguments: r#"{"path":"screenshot.png"}"#.to_string(),
                 call_id: "ReadMediaFile:1".to_string(),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
@@ -2490,7 +2694,7 @@ mod tests {
                     success: Some(true),
                 },
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
 
@@ -2543,17 +2747,19 @@ mod tests {
                 call_id: "WriteFile:6".to_string(),
                 output: FunctionCallOutputPayload::from_text("written".to_string()),
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
-                id: Some("assistant".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "assistant".to_string(),
+                )),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "done".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
 
@@ -2630,7 +2836,7 @@ Body
         )
         .expect("write generic skill");
 
-        let skills = kimi_skill_roots(&work_dir, Some(home.clone()), None)
+        let skills = kimi_skill_roots(&work_dir, Some(home.clone()), /*kimi_source_dir*/ None)
             .into_iter()
             .flat_map(|root| discover_skills_in_root(&root.path, root.scope))
             .collect::<Vec<_>>();
@@ -2640,8 +2846,16 @@ Body
             skills,
             format!(
                 "### User\n- demo-guide\n  - Path: {}\n  - Description: Read the demo creation workflow guide\n- generic-guide\n  - Path: {}\n  - Description: Read the generic workflow guide",
-                home.join(".claude/skills/demo-guide/SKILL.md").display(),
-                home.join(".agents/skills/generic-guide/SKILL.md").display(),
+                home.join(".claude")
+                    .join("skills")
+                    .join("demo-guide")
+                    .join("SKILL.md")
+                    .display(),
+                home.join(".agents")
+                    .join("skills")
+                    .join("generic-guide")
+                    .join("SKILL.md")
+                    .display(),
             )
         );
     }

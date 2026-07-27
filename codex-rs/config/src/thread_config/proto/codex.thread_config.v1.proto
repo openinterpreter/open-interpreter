@@ -65,4 +65,6 @@ message ModelProviderAuthInfo {
 enum WireApi {
   WIRE_API_UNSPECIFIED = 0;
   WIRE_API_RESPONSES = 1;
+  WIRE_API_CHAT = 2;
+  WIRE_API_MESSAGES = 3;
 }

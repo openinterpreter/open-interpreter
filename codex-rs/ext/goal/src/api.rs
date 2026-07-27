@@ -6,8 +6,11 @@ use std::sync::PoisonError;
 use std::sync::Weak;
 
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::ThreadGoal;
 use codex_protocol::protocol::ThreadGoalStatus;
+use codex_protocol::protocol::ThreadGoalUpdatedEvent;
 use codex_protocol::protocol::validate_thread_goal_objective;
 
 use crate::runtime::GoalRuntimeHandle;
@@ -61,6 +64,14 @@ pub struct GoalSetOutcome {
 }
 
 impl GoalSetOutcome {
+    pub fn thread_goal_updated_item(&self) -> RolloutItem {
+        RolloutItem::EventMsg(EventMsg::ThreadGoalUpdated(ThreadGoalUpdatedEvent {
+            thread_id: self.goal.thread_id,
+            turn_id: None,
+            goal: self.goal.clone(),
+        }))
+    }
+
     pub async fn apply_runtime_effects(&self, goal_service: &GoalService) {
         if let Some(runtime) = goal_service.runtime_for_thread(self.goal.thread_id)
             && let Err(err) = runtime
@@ -80,6 +91,40 @@ pub struct GoalService {
 impl GoalService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Restores persisted goal state into the registered runtime for `thread_id`.
+    pub async fn restore_thread_runtime_after_resume(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<(), GoalServiceError> {
+        let runtime = self.runtime_for_thread(thread_id).ok_or_else(|| {
+            GoalServiceError::Internal(format!(
+                "goal runtime is unavailable for thread {thread_id}"
+            ))
+        })?;
+        runtime
+            .restore_after_resume()
+            .await
+            .map_err(GoalServiceError::Internal)
+    }
+
+    /// Flushes any in-flight goal accounting before a fork copies the source goal snapshot.
+    pub async fn flush_thread_goal_progress_for_fork(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<(), GoalServiceError> {
+        let Some(runtime) = self.runtime_for_thread(thread_id) else {
+            return Ok(());
+        };
+        let _goal_state_permit = runtime
+            .goal_state_permit()
+            .await
+            .map_err(GoalServiceError::Internal)?;
+        runtime
+            .prepare_external_goal_mutation()
+            .await
+            .map_err(GoalServiceError::Internal)
     }
 
     pub async fn get_thread_goal(

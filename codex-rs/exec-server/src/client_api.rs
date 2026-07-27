@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
+use futures::future::Shared;
+use tokio::sync::oneshot;
 
 use crate::ExecServerError;
 use crate::HttpRequestParams;
@@ -88,9 +90,18 @@ pub(crate) struct StdioExecServerCommand {
     pub cwd: Option<PathBuf>,
 }
 
+pub(crate) type DeferredEnvironmentReadiness = Shared<oneshot::Receiver<Result<(), String>>>;
+
+#[derive(Clone)]
+pub(crate) struct Deferred<T> {
+    pub readiness: DeferredEnvironmentReadiness,
+    pub transport: T,
+}
+
 /// Parameters used to connect to a remote exec-server environment.
 #[derive(Clone)]
 pub(crate) enum ExecServerTransportParams {
+    Deferred(Box<Deferred<ExecServerTransportParams>>),
     WebSocketUrl {
         websocket_url: String,
         connect_timeout: Duration,
@@ -110,6 +121,10 @@ pub(crate) enum ExecServerTransportParams {
 impl std::fmt::Debug for ExecServerTransportParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Deferred(deferred) => f
+                .debug_struct("Deferred")
+                .field("transport", &deferred.transport)
+                .finish_non_exhaustive(),
             Self::WebSocketUrl {
                 websocket_url,
                 connect_timeout,
@@ -136,10 +151,10 @@ impl std::fmt::Debug for ExecServerTransportParams {
 }
 
 impl ExecServerTransportParams {
-    pub(crate) fn websocket_url(websocket_url: String) -> Self {
+    pub(crate) fn websocket_url(websocket_url: String, connect_timeout: Duration) -> Self {
         Self::WebSocketUrl {
             websocket_url,
-            connect_timeout: DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
+            connect_timeout,
             initialize_timeout: DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT,
         }
     }

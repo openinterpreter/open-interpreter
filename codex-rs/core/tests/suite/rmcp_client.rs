@@ -17,17 +17,20 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use codex_config::types::McpServerAuth;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerEnvVar;
 use codex_config::types::McpServerTransportConfig;
 use codex_core::config::Config;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::Environment;
+use codex_exec_server::HttpRedirectPolicy;
 use codex_exec_server::HttpRequestParams;
-use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_mcp::MCP_SANDBOX_STATE_META_CAPABILITY;
+use codex_mcp::SandboxState;
 use codex_models_manager::manager::RefreshStrategy;
+use codex_utils_path_uri::LegacyAppPathString;
 
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::PermissionProfile;
@@ -46,17 +49,21 @@ use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use codex_utils_cargo_bin::cargo_bin;
 use codex_utils_path_uri::PathUri;
+use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::assert_regex_match;
+use core_test_support::is_remote_test_environment;
 use core_test_support::responses;
 use core_test_support::responses::mount_models_once;
 use core_test_support::responses::mount_sse_once;
+use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::skip_if_no_remote_env;
 use core_test_support::skip_if_wine_exec;
 use core_test_support::stdio_server_bin;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
-use core_test_support::test_environment;
+use core_test_support::test_docker_container_name;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_mcp_server;
 use image::DynamicImage;
@@ -162,8 +169,8 @@ enum McpCallEvent {
 
 const REMOTE_MCP_ENVIRONMENT: &str = "remote";
 
-fn remote_aware_environment_id() -> String {
-    if test_environment().is_remote() {
+pub(super) fn remote_aware_environment_id() -> String {
+    if is_remote_test_environment() {
         REMOTE_MCP_ENVIRONMENT.to_string()
     } else {
         codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string()
@@ -177,10 +184,9 @@ fn remote_aware_environment_id() -> String {
 /// would be meaningless to the process that actually launches the server. When
 /// the remote test environment is active, copy the binary into the executor
 /// container and return that in-container path instead.
-fn remote_aware_stdio_server_bin() -> anyhow::Result<String> {
+pub(super) fn remote_aware_stdio_server_bin() -> anyhow::Result<String> {
     let bin = stdio_server_bin()?;
-    let environment = test_environment();
-    let Some(container_name) = environment.docker_container_name() else {
+    let Some(container_name) = test_docker_container_name() else {
         return Ok(bin);
     };
 
@@ -193,7 +199,7 @@ fn remote_aware_stdio_server_bin() -> anyhow::Result<String> {
     // path instead of the host build artifact path.
     // Several remote-aware MCP tests can run in parallel; give each copied
     // binary its own path so one test cannot replace another test's executable.
-    copy_binary_to_remote_env(container_name, Path::new(&bin), "test_stdio_server")
+    copy_binary_to_remote_env(&container_name, Path::new(&bin), "test_stdio_server")
 }
 
 /// Builds a collision-resistant in-container path for copied test binaries.
@@ -264,6 +270,7 @@ fn copy_binary_to_remote_env(
 
 struct TestMcpServerOptions {
     environment_id: String,
+    auth: McpServerAuth,
     supports_parallel_tool_calls: bool,
     tool_timeout_sec: Option<Duration>,
 }
@@ -272,6 +279,7 @@ impl Default for TestMcpServerOptions {
     fn default() -> Self {
         Self {
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
+            auth: McpServerAuth::default(),
             supports_parallel_tool_calls: false,
             tool_timeout_sec: None,
         }
@@ -297,7 +305,7 @@ fn stdio_transport_with_cwd(
         args: Vec::new(),
         env,
         env_vars,
-        cwd,
+        cwd: cwd.map(|cwd| LegacyAppPathString::from_path(&cwd)),
     }
 }
 
@@ -312,6 +320,7 @@ fn insert_mcp_server(
         server_name.to_string(),
         McpServerConfig {
             transport,
+            auth: options.auth,
             environment_id: options.environment_id,
             enabled: true,
             required: false,
@@ -340,12 +349,22 @@ async fn call_cwd_tool(
     server_name: &str,
     call_id: &str,
 ) -> anyhow::Result<Value> {
+    call_structured_tool(server, fixture, server_name, "cwd", call_id).await
+}
+
+async fn call_structured_tool(
+    server: &MockServer,
+    fixture: &TestCodex,
+    server_name: &str,
+    tool_name: &str,
+    call_id: &str,
+) -> anyhow::Result<Value> {
     let namespace = format!("mcp__{server_name}");
     mount_sse_once(
         server,
         responses::sse(vec![
             responses::ev_response_created("resp-1"),
-            responses::ev_function_call_with_namespace(call_id, &namespace, "cwd", r#"{}"#),
+            responses::ev_function_call_with_namespace(call_id, &namespace, tool_name, r#"{}"#),
             responses::ev_completed("resp-1"),
         ]),
     )
@@ -353,7 +372,7 @@ async fn call_cwd_tool(
     mount_sse_once(
         server,
         responses::sse(vec![
-            responses::ev_assistant_message("msg-1", "rmcp cwd tool completed successfully."),
+            responses::ev_assistant_message("msg-1", "rmcp tool completed successfully."),
             responses::ev_completed("resp-2"),
         ]),
     )
@@ -361,7 +380,7 @@ async fn call_cwd_tool(
 
     fixture
         .codex
-        .submit(read_only_user_turn(fixture, "call the rmcp cwd tool"))
+        .submit(read_only_user_turn(fixture, "call the requested rmcp tool"))
         .await?;
 
     wait_for_event(&fixture.codex, |ev| {
@@ -378,7 +397,7 @@ async fn call_cwd_tool(
     let structured_content = end
         .result
         .as_ref()
-        .expect("rmcp cwd tool should return success")
+        .expect("rmcp tool should return success")
         .structured_content
         .as_ref()
         .expect("structured content")
@@ -388,13 +407,113 @@ async fn call_cwd_tool(
     Ok(structured_content)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn openai_form_capability_is_advertised_to_mcp_servers() -> anyhow::Result<()> {
+    assert_openai_form_capability_advertisement(/*expected*/ true).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn openai_form_capability_is_not_advertised_by_default() -> anyhow::Result<()> {
+    assert_openai_form_capability_advertisement(/*expected*/ false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn openai_form_capability_updates_for_loaded_thread() -> anyhow::Result<()> {
+    skip_if_wine_exec!(
+        Ok(()),
+        "requires a Windows test_stdio_server in the Wine-exec environment"
+    );
+
+    let server = start_mock_server().await;
+    let server_name = "capabilities";
+    let command = stdio_server_bin()?;
+    let fixture = test_codex()
+        .with_config(move |config| {
+            insert_mcp_server(
+                config,
+                server_name,
+                stdio_transport(command, /*env*/ None, Vec::new()),
+                TestMcpServerOptions::default(),
+            );
+        })
+        .build(&server)
+        .await?;
+    wait_for_mcp_server(&fixture.codex, server_name).await?;
+
+    let unsupported = call_structured_tool(
+        &server,
+        &fixture,
+        server_name,
+        "client_capabilities",
+        "call-client-capabilities-unsupported",
+    )
+    .await?;
+    assert_eq!(
+        unsupported,
+        json!({ "supportsOpenaiFormElicitation": false })
+    );
+
+    fixture
+        .codex
+        .set_openai_form_elicitation_support(/*supported*/ true)
+        .await?;
+    let supported = call_structured_tool(
+        &server,
+        &fixture,
+        server_name,
+        "client_capabilities",
+        "call-client-capabilities-supported",
+    )
+    .await?;
+    assert_eq!(supported, json!({ "supportsOpenaiFormElicitation": true }));
+    Ok(())
+}
+
+async fn assert_openai_form_capability_advertisement(expected: bool) -> anyhow::Result<()> {
+    skip_if_wine_exec!(
+        Ok(()),
+        "requires a Windows test_stdio_server in the Wine-exec environment"
+    );
+
+    let server = start_mock_server().await;
+    let server_name = "capabilities";
+    let command = stdio_server_bin()?;
+    let mut builder = test_codex().with_config(move |config| {
+        insert_mcp_server(
+            config,
+            server_name,
+            stdio_transport(command, /*env*/ None, Vec::new()),
+            TestMcpServerOptions::default(),
+        );
+    });
+    if expected {
+        builder = builder.with_openai_form_elicitation();
+    }
+    let fixture = builder.build(&server).await?;
+    wait_for_mcp_server(&fixture.codex, server_name).await?;
+
+    let structured = call_structured_tool(
+        &server,
+        &fixture,
+        server_name,
+        "client_capabilities",
+        "call-client-capabilities",
+    )
+    .await?;
+    assert_eq!(
+        structured,
+        json!({ "supportsOpenaiFormElicitation": expected })
+    );
+    Ok(())
+}
+
 fn assert_cwd_tool_output(structured: &Value, expected_cwd: &Path) {
     let actual_cwd = structured
         .get("cwd")
         .and_then(Value::as_str)
         .expect("cwd tool should return a string cwd");
 
-    if test_environment().is_remote() {
+    if is_remote_test_environment() {
         assert_eq!(
             structured,
             &json!({
@@ -429,20 +548,33 @@ async fn stdio_server_round_trip() -> anyhow::Result<()> {
     let server = responses::start_mock_server().await;
 
     let call_id = "call-123";
+    let search_call_id = "search-rmcp-echo";
     let server_name = "rmcp";
     let namespace = format!("mcp__{server_name}");
 
-    let call_mock = mount_sse_once(
+    mount_sse_once(
         &server,
         responses::sse(vec![
             responses::ev_response_created("resp-1"),
+            responses::ev_tool_search_call(
+                search_call_id,
+                &json!({"query": "echo message and environment data"}),
+            ),
+            responses::ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let call_mock = mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("resp-2"),
             responses::ev_function_call_with_namespace(
                 call_id,
                 &namespace,
                 "echo",
                 "{\"message\":\"ping\"}",
             ),
-            responses::ev_completed("resp-1"),
+            responses::ev_completed("resp-2"),
         ]),
     )
     .await;
@@ -450,7 +582,7 @@ async fn stdio_server_round_trip() -> anyhow::Result<()> {
         &server,
         responses::sse(vec![
             responses::ev_assistant_message("msg-1", "rmcp echo tool completed successfully."),
-            responses::ev_completed("resp-2"),
+            responses::ev_completed("resp-3"),
         ]),
     )
     .await;
@@ -477,7 +609,7 @@ async fn stdio_server_round_trip() -> anyhow::Result<()> {
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
     wait_for_mcp_server(&fixture.codex, server_name).await?;
 
@@ -535,13 +667,14 @@ async fn stdio_server_round_trip() -> anyhow::Result<()> {
 
     wait_for_event(&fixture.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
-    let output_item = final_mock.single_request().function_call_output(call_id);
-    let request = call_mock.single_request();
+    let search_output = call_mock
+        .single_request()
+        .tool_search_output(search_call_id);
     assert!(
-        request.tool_by_name(&namespace, "echo").is_some(),
-        "direct MCP tool should be sent as a namespace child tool: {:?}",
-        request.body_json()
+        responses::namespace_child_tool(&search_output, &namespace, "echo").is_some(),
+        "tool_search should surface the RMCP echo tool: {search_output:?}"
     );
+    let output_item = final_mock.single_request().function_call_output(call_id);
 
     let output_text = output_item
         .get("output")
@@ -623,7 +756,7 @@ async fn stdio_server_uses_configured_cwd_before_runtime_fallback() -> anyhow::R
     let fixture = test_codex()
         .with_workspace_setup(|cwd, fs| async move {
             let configured_cwd = cwd.join("mcp-configured-cwd");
-            let configured_cwd_uri = PathUri::from_path(&configured_cwd)?;
+            let configured_cwd_uri = PathUri::from_host_native_path(&configured_cwd)?;
             fs.create_directory(
                 &configured_cwd_uri,
                 CreateDirectoryOptions { recursive: true },
@@ -655,7 +788,7 @@ async fn stdio_server_uses_configured_cwd_before_runtime_fallback() -> anyhow::R
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
     wait_for_mcp_server(&fixture.codex, server_name).await?;
 
@@ -750,7 +883,7 @@ async fn stdio_mcp_tool_call_includes_sandbox_state_meta() -> anyhow::Result<()>
     let server_name = "rmcp";
     let namespace = format!("mcp__{server_name}");
 
-    let call_mock = mount_sse_once(
+    mount_sse_once(
         &server,
         responses::sse(vec![
             responses::ev_response_created("resp-1"),
@@ -781,7 +914,7 @@ async fn stdio_mcp_tool_call_includes_sandbox_state_meta() -> anyhow::Result<()>
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
 
     wait_for_mcp_server(&fixture.codex, server_name).await?;
@@ -792,13 +925,6 @@ async fn stdio_mcp_tool_call_includes_sandbox_state_meta() -> anyhow::Result<()>
             PermissionProfile::read_only(),
         )
         .await?;
-
-    let request = call_mock.single_request();
-    assert!(
-        request.tool_by_name(&namespace, "sandbox_meta").is_some(),
-        "direct MCP tool should be sent as a namespace child tool: {:?}",
-        request.body_json()
-    );
 
     let output_item = final_mock.single_request().function_call_output(call_id);
     let output_text = output_item
@@ -815,18 +941,16 @@ async fn stdio_mcp_tool_call_includes_sandbox_state_meta() -> anyhow::Result<()>
     let sandbox_meta = meta
         .get(MCP_SANDBOX_STATE_META_CAPABILITY)
         .expect("sandbox state metadata should be present");
-    let (sandbox_policy, _) =
-        turn_permission_fields(PermissionProfile::read_only(), fixture.config.cwd.as_path());
-    let expected_sandbox_policy = serde_json::to_value(&sandbox_policy)?;
+    let sandbox_state: SandboxState = serde_json::from_value(sandbox_meta.clone())?;
     assert_eq!(
-        sandbox_meta.get("sandboxPolicy"),
-        Some(&expected_sandbox_policy)
+        sandbox_state,
+        SandboxState {
+            permission_profile: PermissionProfile::read_only(),
+            codex_linux_sandbox_exe: fixture.config.codex_linux_sandbox_exe.clone(),
+            sandbox_cwd: PathUri::from_abs_path(&fixture.config.cwd),
+            use_legacy_landlock: false,
+        }
     );
-    assert_eq!(
-        sandbox_meta.get("sandboxCwd").and_then(Value::as_str),
-        fixture.config.cwd.as_path().to_str()
-    );
-    assert_eq!(sandbox_meta.get("useLegacyLandlock"), Some(&json!(false)));
 
     server.verify().await;
 
@@ -884,7 +1008,7 @@ async fn stdio_mcp_parallel_tool_calls_default_false_runs_serially() -> anyhow::
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
     wait_for_mcp_server(&fixture.codex, server_name).await?;
 
@@ -1025,7 +1149,7 @@ async fn stdio_mcp_read_only_tool_calls_run_concurrently_without_server_opt_in()
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
     wait_for_mcp_server(&fixture.codex, server_name).await?;
 
@@ -1109,12 +1233,13 @@ async fn stdio_mcp_parallel_tool_calls_opt_in_runs_concurrently() -> anyhow::Res
                 stdio_transport(rmcp_test_server_bin, /*env*/ None, Vec::new()),
                 TestMcpServerOptions {
                     environment_id: remote_aware_environment_id(),
+                    auth: Default::default(),
                     supports_parallel_tool_calls: true,
                     tool_timeout_sec: Some(Duration::from_secs(2)),
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
     wait_for_mcp_server(&fixture.codex, server_name).await?;
 
@@ -1144,6 +1269,96 @@ async fn stdio_mcp_parallel_tool_calls_opt_in_runs_concurrently() -> anyhow::Res
 
     server.verify().await;
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[serial(mcp_test_value)]
+async fn stdio_encrypted_content_responses_round_trip() -> anyhow::Result<()> {
+    skip_if_wine_exec!(
+        Ok(()),
+        "requires a Windows test_stdio_server in the Wine-exec environment"
+    );
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let call_id = "encrypted-1";
+    let server_name = "rmcp";
+    let namespace = format!("mcp__{server_name}");
+
+    mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("resp-1"),
+            responses::ev_function_call_with_namespace(
+                call_id,
+                &namespace,
+                "encrypted_output",
+                "{}",
+            ),
+            responses::ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let final_mock = mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_assistant_message("msg-1", "rmcp tool completed successfully."),
+            responses::ev_completed("resp-2"),
+        ]),
+    )
+    .await;
+
+    let rmcp_test_server_bin = remote_aware_stdio_server_bin()?;
+    let fixture = test_codex()
+        .with_config(move |config| {
+            insert_mcp_server(
+                config,
+                server_name,
+                stdio_transport(rmcp_test_server_bin, /*env*/ None, Vec::new()),
+                TestMcpServerOptions {
+                    environment_id: remote_aware_environment_id(),
+                    ..Default::default()
+                },
+            );
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    wait_for_mcp_server(&fixture.codex, server_name).await?;
+
+    fixture
+        .codex
+        .submit(read_only_user_turn(
+            &fixture,
+            "call the rmcp encrypted output tool",
+        ))
+        .await?;
+    wait_for_event(&fixture.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let output_item = final_mock.single_request().function_call_output(call_id);
+    let output = output_item["output"]
+        .as_array()
+        .expect("encrypted MCP output should be content items");
+    assert_eq!(output.len(), 3);
+    assert_wall_time_header(
+        output[0]["text"]
+            .as_str()
+            .expect("first encrypted MCP output item should be wall-time text"),
+    );
+    assert_eq!(
+        &output[1..],
+        &[
+            json!({
+                "type": "input_text",
+                "text": "Lookup completed",
+            }),
+            json!({
+                "type": "encrypted_content",
+                "encrypted_content": "gAAAA-test",
+            }),
+        ]
+    );
+    server.verify().await;
     Ok(())
 }
 
@@ -1187,6 +1402,7 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
     let rmcp_test_server_bin = remote_aware_stdio_server_bin()?;
 
     let fixture = test_codex()
+        .with_model("gpt-5.2")
         .with_config(move |config| {
             insert_mcp_server(
                 config,
@@ -1205,7 +1421,7 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
     wait_for_mcp_server(&fixture.codex, server_name).await?;
 
@@ -1231,7 +1447,11 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
                 tool: "image".to_string(),
                 arguments: Some(json!({})),
             },
+            connector_id: None,
             mcp_app_resource_uri: None,
+            link_id: None,
+            app_name: None,
+            action_name: None,
             plugin_id: None,
         },
     );
@@ -1347,10 +1567,6 @@ async fn stdio_image_responses_resize_large_image() -> anyhow::Result<()> {
     let rmcp_test_server_bin = remote_aware_stdio_server_bin()?;
     let fixture = test_codex()
         .with_config(move |config| {
-            config
-                .features
-                .enable(Feature::ResizeAllImages)
-                .expect("resize_all_images should be enabled");
             insert_mcp_server(
                 config,
                 server_name,
@@ -1361,7 +1577,7 @@ async fn stdio_image_responses_resize_large_image() -> anyhow::Result<()> {
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
     wait_for_mcp_server(&fixture.codex, server_name).await?;
 
@@ -1437,7 +1653,7 @@ async fn stdio_image_responses_preserve_original_detail_metadata() -> anyhow::Re
     let rmcp_test_server_bin = remote_aware_stdio_server_bin()?;
 
     let fixture = test_codex()
-        .with_model("gpt-5.3-codex")
+        .with_model("gpt-5.4")
         .with_config(move |config| {
             insert_mcp_server(
                 config,
@@ -1449,7 +1665,7 @@ async fn stdio_image_responses_preserve_original_detail_metadata() -> anyhow::Re
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
     wait_for_mcp_server(&fixture.codex, server_name).await?;
 
@@ -1515,7 +1731,8 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                     effort: codex_protocol::openai_models::ReasoningEffort::Medium,
                     description: "Medium".to_string(),
                 }],
-                reasoning_control: codex_protocol::openai_models::ReasoningControl::None,
+                reasoning_control: Default::default(),
+                supports_reasoning_summaries: false,
                 shell_type: ConfigShellToolType::Default,
                 visibility: ModelVisibility::List,
                 supported_in_api: true,
@@ -1526,7 +1743,8 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                 upgrade: None,
                 base_instructions: "base instructions".to_string(),
                 model_messages: None,
-                supports_reasoning_summaries: false,
+                include_skills_usage_instructions: false,
+                supports_reasoning_summary_parameter: true,
                 default_reasoning_summary: ReasoningSummary::Auto,
                 support_verbosity: false,
                 default_verbosity: None,
@@ -1596,14 +1814,17 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
     wait_for_mcp_server(&fixture.codex, server_name).await?;
 
     fixture
         .thread_manager
         .get_models_manager()
-        .list_models(RefreshStrategy::Online)
+        .list_models(
+            RefreshStrategy::Online,
+            codex_core::test_support::default_http_client_factory(),
+        )
         .await;
     assert_eq!(models_mock.requests().len(), 1);
 
@@ -1704,7 +1925,7 @@ async fn stdio_server_propagates_whitelisted_env_vars() -> anyhow::Result<()> {
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
     wait_for_mcp_server(&fixture.codex, server_name).await?;
 
@@ -1829,7 +2050,7 @@ async fn stdio_server_propagates_explicit_local_env_var_source() -> anyhow::Resu
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
     wait_for_mcp_server(&fixture.codex, server_name).await?;
 
@@ -1872,9 +2093,7 @@ async fn remote_stdio_env_var_source_does_not_copy_local_env() -> anyhow::Result
         "requires a Windows test_stdio_server in the Wine-exec environment"
     );
     skip_if_no_network!(Ok(()));
-    if !test_environment().is_remote() {
-        return Ok(());
-    }
+    skip_if_no_remote_env!(Ok(()));
 
     let server = responses::start_mock_server().await;
     let call_id = "call-remote-source";
@@ -1927,7 +2146,7 @@ async fn remote_stdio_env_var_source_does_not_copy_local_env() -> anyhow::Result
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
     wait_for_mcp_server(&fixture.codex, server_name).await?;
 
@@ -2111,7 +2330,7 @@ async fn streamable_http_tool_call_round_trip() -> anyhow::Result<()> {
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
     wait_for_mcp_server(&fixture.codex, server_name).await?;
 
@@ -2181,6 +2400,174 @@ async fn streamable_http_tool_call_round_trip() -> anyhow::Result<()> {
     server.verify().await;
 
     http_server.shutdown().await;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn streamable_http_configured_auth_precedes_chatgpt_auth() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let Some(configured_auth_server) =
+        start_streamable_http_test_server("configured-auth", Some("configured-token")).await?
+    else {
+        return Ok(());
+    };
+    let configured_auth_url = configured_auth_server.url().to_string();
+
+    let configured_auth_fixture = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(move |config| {
+            insert_mcp_server(
+                config,
+                "configured_auth",
+                McpServerTransportConfig::StreamableHttp {
+                    url: configured_auth_url,
+                    bearer_token_env_var: None,
+                    http_headers: Some(HashMap::from([(
+                        "Authorization".to_string(),
+                        "Bearer configured-token".to_string(),
+                    )])),
+                    env_http_headers: None,
+                },
+                TestMcpServerOptions {
+                    environment_id: remote_aware_environment_id(),
+                    auth: McpServerAuth::ChatGpt,
+                    ..Default::default()
+                },
+            );
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    wait_for_mcp_server(&configured_auth_fixture.codex, "configured_auth").await?;
+    drop(configured_auth_fixture);
+    configured_auth_server.shutdown().await;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn streamable_http_chatgpt_auth_is_not_sent_to_configured_origin() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let untrusted_server = MockServer::start().await;
+    let untrusted_apps = AppsTestServer::mount(&untrusted_server).await?;
+    let untrusted_mcp_url = format!("{}/api/codex/ps/mcp", untrusted_apps.chatgpt_base_url);
+    let untrusted_chatgpt_base_url = untrusted_apps.chatgpt_base_url;
+
+    let fixture = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(move |config| {
+            config.chatgpt_base_url = untrusted_chatgpt_base_url;
+            insert_mcp_server(
+                config,
+                "untrusted_origin",
+                McpServerTransportConfig::StreamableHttp {
+                    url: untrusted_mcp_url,
+                    bearer_token_env_var: None,
+                    http_headers: None,
+                    env_http_headers: None,
+                },
+                TestMcpServerOptions {
+                    auth: McpServerAuth::ChatGpt,
+                    ..Default::default()
+                },
+            );
+        })
+        .build(&server)
+        .await?;
+
+    wait_for_mcp_server(&fixture.codex, "untrusted_origin").await?;
+    let observed_requests = untrusted_server
+        .received_requests()
+        .await
+        .expect("mock server should capture MCP startup requests")
+        .into_iter()
+        .filter(|request| request.url.path() == "/api/codex/ps/mcp")
+        .filter_map(|request| {
+            let body: Value = serde_json::from_slice(&request.body).ok()?;
+            let method = body.get("method")?.as_str()?.to_string();
+            let authorization = request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            Some((method, authorization))
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        observed_requests,
+        vec![
+            ("initialize".to_string(), None),
+            ("notifications/initialized".to_string(), None),
+            ("tools/list".to_string(), None),
+        ],
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn configured_chatgpt_base_url_does_not_grant_mcp_chatgpt_auth() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let untrusted_server = MockServer::start().await;
+    let untrusted_apps = AppsTestServer::mount(&untrusted_server).await?;
+    let untrusted_mcp_url = format!("{}/api/codex/ps/mcp", untrusted_apps.chatgpt_base_url);
+    let untrusted_chatgpt_base_url = untrusted_apps.chatgpt_base_url;
+
+    let fixture = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_pre_build_hook(move |codex_home| {
+            fs::write(
+                codex_home.join("config.toml"),
+                format!(
+                    r#"
+chatgpt_base_url = "{untrusted_chatgpt_base_url}"
+
+[mcp_servers.untrusted_origin]
+url = "{untrusted_mcp_url}"
+auth = "chatgpt"
+"#,
+                ),
+            )
+            .expect("write attacker-controlled MCP config");
+        })
+        .build(&server)
+        .await?;
+
+    wait_for_mcp_server(&fixture.codex, "untrusted_origin").await?;
+    let observed_requests = untrusted_server
+        .received_requests()
+        .await
+        .expect("mock server should capture MCP startup requests")
+        .into_iter()
+        .filter(|request| request.url.path() == "/api/codex/ps/mcp")
+        .filter_map(|request| {
+            let body: Value = serde_json::from_slice(&request.body).ok()?;
+            let method = body.get("method")?.as_str()?.to_string();
+            let authorization = request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            Some((method, authorization))
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        observed_requests,
+        vec![
+            ("initialize".to_string(), None),
+            ("notifications/initialized".to_string(), None),
+            ("tools/list".to_string(), None),
+        ],
+    );
 
     Ok(())
 }
@@ -2298,7 +2685,7 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
                 },
             );
         })
-        .build_with_remote_env(&server)
+        .build_with_auto_env(&server)
         .await?;
     // Phase 5: wait for MCP startup before the turn is submitted, which keeps
     // failures tied to server startup/discovery.
@@ -2387,11 +2774,10 @@ async fn start_streamable_http_test_server(
         }
     };
 
-    let environment = test_environment();
-    if let Some(container_name) = environment.docker_container_name() {
+    if let Some(container_name) = test_docker_container_name() {
         return Ok(Some(
             start_remote_streamable_http_test_server(
-                container_name,
+                &container_name,
                 &rmcp_http_server_bin,
                 expected_env_value,
                 expected_token,
@@ -2648,6 +3034,7 @@ async fn wait_for_remote_streamable_http_server(
             headers: Vec::new(),
             body: None,
             timeout_ms: Some(remaining.as_millis().clamp(1, 1_000) as u64),
+            redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "buffered-request".to_string(),
             stream_response: false,
         };

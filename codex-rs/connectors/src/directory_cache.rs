@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
-use codex_app_server_protocol::AppInfo;
 use serde::Deserialize;
 use serde::Serialize;
 use sha1::Digest;
 use sha1::Sha1;
 use tracing::warn;
 
+use crate::AppInfo;
 use crate::ConnectorDirectoryCacheKey;
 
 pub(crate) const CONNECTOR_DIRECTORY_DISK_CACHE_SCHEMA_VERSION: u8 = 1;
@@ -26,7 +26,8 @@ impl ConnectorDirectoryCacheContext {
         }
     }
 
-    pub(crate) fn cache_path(&self) -> PathBuf {
+    /// Returns the persisted connector directory cache path for this identity.
+    pub fn cache_path(&self) -> PathBuf {
         let cache_key_json = serde_json::to_string(&self.cache_key).unwrap_or_default();
         let cache_key_hash = sha1_hex(&cache_key_json);
         self.codex_home

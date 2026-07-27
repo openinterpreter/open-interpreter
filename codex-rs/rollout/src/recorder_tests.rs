@@ -3,6 +3,7 @@
 use super::*;
 use crate::config::RolloutConfig;
 use chrono::TimeZone;
+use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
@@ -14,6 +15,7 @@ use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::UserMessageEvent;
 use pretty_assertions::assert_eq;
@@ -36,6 +38,67 @@ fn test_config(codex_home: &Path) -> RolloutConfig {
     }
 }
 
+fn paginated_session_meta_item(thread_id: ThreadId, cwd: &Path) -> RolloutItem {
+    RolloutItem::SessionMeta(SessionMetaLine {
+        meta: SessionMeta {
+            session_id: thread_id.into(),
+            id: thread_id,
+            timestamp: "2026-07-09T00:00:00Z".to_string(),
+            cwd: cwd.to_path_buf(),
+            originator: "test".to_string(),
+            cli_version: "test".to_string(),
+            source: SessionSource::Exec,
+            history_mode: ThreadHistoryMode::Paginated,
+            ..SessionMeta::default()
+        },
+        git: None,
+    })
+}
+
+fn agent_message_item(message: &str) -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+        message: message.to_string(),
+        phase: None,
+        memory_citation: None,
+    }))
+}
+
+fn write_paginated_rollout(
+    path: &Path,
+    thread_id: ThreadId,
+    subsequent_ordinals: &[u64],
+) -> std::io::Result<()> {
+    let mut records = vec![RolloutLine {
+        timestamp: "2026-07-09T00:00:00Z".to_string(),
+        ordinal: Some(0),
+        item: paginated_session_meta_item(thread_id, path.parent().unwrap_or(path)),
+    }];
+    records.extend(
+        subsequent_ordinals
+            .iter()
+            .enumerate()
+            .map(|(index, ordinal)| RolloutLine {
+                timestamp: format!("2026-07-09T00:00:{:02}Z", index + 1),
+                ordinal: Some(*ordinal),
+                item: agent_message_item(format!("message-{index}").as_str()),
+            }),
+    );
+    let jsonl = records
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    fs::write(path, format!("{jsonl}\n"))
+}
+
+fn read_rollout_lines(path: &Path) -> std::io::Result<Vec<RolloutLine>> {
+    fs::read_to_string(path)?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).map_err(std::io::Error::other))
+        .collect()
+}
+
 fn write_session_file(root: &Path, ts: &str, uuid: Uuid) -> std::io::Result<PathBuf> {
     let day_dir = root.join("sessions/2025/01/03");
     fs::create_dir_all(&day_dir)?;
@@ -45,6 +108,7 @@ fn write_session_file(root: &Path, ts: &str, uuid: Uuid) -> std::io::Result<Path
         "timestamp": ts,
         "type": "session_meta",
         "payload": {
+            "session_id": uuid,
             "id": uuid,
             "timestamp": ts,
             "cwd": ".",
@@ -68,6 +132,18 @@ fn write_session_file(root: &Path, ts: &str, uuid: Uuid) -> std::io::Result<Path
     Ok(path)
 }
 
+#[test]
+fn append_repair_terminates_nonempty_rollout_tail() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    fs::write(&rollout_path, b"{\"type\":\"event_msg\"}")?;
+    drop(open_log_file(&rollout_path)?);
+    drop(open_log_file(&rollout_path)?);
+
+    assert_eq!(fs::read(&rollout_path)?, b"{\"type\":\"event_msg\"}\n");
+    Ok(())
+}
+
 #[tokio::test]
 async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
     let home = TempDir::new().expect("temp dir");
@@ -83,6 +159,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
 
     let session_meta_line = SessionMetaLine {
         meta: SessionMeta {
+            session_id: thread_id.into(),
             id: thread_id,
             forked_from_id: None,
             parent_thread_id: None,
@@ -98,18 +175,25 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
             model_provider: None,
             base_instructions: None,
             dynamic_tools: None,
+            selected_capability_roots: Vec::new(),
             memory_mode: None,
+            history_mode: Default::default(),
+            history_base: None,
+            subagent_history_start_ordinal: None,
             multi_agent_version: None,
+            context_window: None,
         },
         git: None,
     };
     let lines = [
         RolloutLine {
             timestamp: "2026-01-27T12:34:56Z".to_string(),
+            ordinal: None,
             item: RolloutItem::SessionMeta(session_meta_line),
         },
         RolloutLine {
             timestamp: "2026-01-27T12:34:57Z".to_string(),
+            ordinal: None,
             item: RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
                 client_id: None,
                 message: "hello from startup backfill".to_string(),
@@ -145,7 +229,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn load_rollout_items_skips_legacy_ghost_snapshot_lines() -> std::io::Result<()> {
+async fn load_rollout_items_defaults_legacy_session_id() -> std::io::Result<()> {
     let home = TempDir::new().expect("temp dir");
     let rollout_path = home.path().join("rollout.jsonl");
     let mut file = File::create(&rollout_path)?;
@@ -210,12 +294,52 @@ async fn load_rollout_items_skips_legacy_ghost_snapshot_lines() -> std::io::Resu
     assert_eq!(loaded_thread_id, Some(thread_id));
     assert_eq!(parse_errors, 0);
     assert_eq!(items.len(), 2);
-    assert!(matches!(items[0], RolloutItem::SessionMeta(_)));
+    let RolloutItem::SessionMeta(session_meta) = &items[0] else {
+        panic!("expected session metadata");
+    };
+    assert_eq!(session_meta.meta.session_id, SessionId::from(thread_id));
     assert!(matches!(
         items[1],
         RolloutItem::ResponseItem(ResponseItem::Message { .. })
     ));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_rollout_items_ignores_unknown_fork_source_history_mode() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::new_v4();
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let rollout_path = write_session_file(home.path(), "2025-01-03T12-00-00", uuid)?;
+    let mut file = fs::OpenOptions::new().append(true).open(&rollout_path)?;
+    let source_uuid = Uuid::new_v4();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp": "2025-01-03T12:00:01Z",
+            "type": "session_meta",
+            "payload": {
+                "session_id": source_uuid,
+                "id": source_uuid,
+                "timestamp": "2025-01-03T12:00:01Z",
+                "cwd": ".",
+                "originator": "test_originator",
+                "cli_version": "test_version",
+                "source": "cli",
+                "model_provider": "test-provider",
+                "history_mode": "future",
+            },
+        })
+    )?;
+
+    let (items, loaded_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_items(&rollout_path).await?;
+
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 1);
+    assert_eq!(items.len(), 2);
     Ok(())
 }
 
@@ -234,6 +358,7 @@ async fn load_rollout_items_preserves_legacy_guardian_assessment_lines() -> std:
             "timestamp": ts,
             "type": "session_meta",
             "payload": {
+                "session_id": thread_id,
                 "id": thread_id,
                 "timestamp": ts,
                 "cwd": ".",
@@ -297,6 +422,7 @@ async fn load_rollout_items_filters_legacy_ghost_snapshots_from_compaction_histo
             "timestamp": ts,
             "type": "session_meta",
             "payload": {
+                "session_id": thread_id,
                 "id": thread_id,
                 "timestamp": ts,
                 "cwd": ".",
@@ -365,7 +491,9 @@ async fn load_rollout_items_filters_legacy_ghost_snapshots_from_compaction_histo
 async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<()> {
     let home = TempDir::new().expect("temp dir");
     let config = test_config(home.path());
+    let session_id = SessionId::default();
     let thread_id = ThreadId::new();
+    let initial_window_id = Uuid::now_v7().to_string();
     let recorder = RolloutRecorder::new(
         &config,
         RolloutRecorderParams::new(
@@ -374,9 +502,13 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
             /*parent_thread_id*/ None,
             SessionSource::Exec,
             /*thread_source*/ None,
+            "test_originator".to_string(),
             BaseInstructions::default(),
             Vec::new(),
-        ),
+        )
+        .with_session_id(session_id)
+        .with_history_mode(ThreadHistoryMode::Paginated)
+        .with_initial_window_id(initial_window_id.clone()),
     )
     .await?;
 
@@ -421,9 +553,24 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
     assert!(rollout_path.exists(), "rollout file should be materialized");
 
     let text = std::fs::read_to_string(&rollout_path)?;
-    assert!(
-        text.contains("\"type\":\"session_meta\""),
-        "expected session metadata in rollout"
+    let lines = read_rollout_lines(&rollout_path)?;
+    assert_eq!(
+        lines.iter().map(|line| line.ordinal).collect::<Vec<_>>(),
+        vec![Some(0), Some(1), Some(2)]
+    );
+    let first_line = text.lines().next().expect("session metadata line");
+    let session_meta: RolloutLine = serde_json::from_str(first_line)?;
+    let RolloutItem::SessionMeta(session_meta) = session_meta.item else {
+        panic!("expected session metadata in rollout");
+    };
+    assert_eq!(session_meta.meta.session_id, session_id);
+    assert_eq!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated);
+    assert_eq!(
+        session_meta
+            .meta
+            .context_window
+            .map(|window| window.window_id),
+        Some(initial_window_id)
     );
     let buffered_idx = text
         .find("buffered-event")
@@ -443,6 +590,63 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
 }
 
 #[tokio::test]
+async fn recorder_omits_ordinals_from_legacy_rollouts() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let recorder = RolloutRecorder::new(
+        &config,
+        RolloutRecorderParams::new(
+            ThreadId::new(),
+            /*forked_from_id*/ None,
+            /*parent_thread_id*/ None,
+            SessionSource::Exec,
+            /*thread_source*/ None,
+            "test_originator".to_string(),
+            BaseInstructions::default(),
+            Vec::new(),
+        ),
+    )
+    .await?;
+    recorder
+        .record_canonical_items(&[agent_message_item("legacy")])
+        .await?;
+    recorder.flush().await?;
+
+    let text = fs::read_to_string(recorder.rollout_path())?;
+    let values = text
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(values.iter().all(|value| value.get("ordinal").is_none()));
+
+    recorder.shutdown().await
+}
+
+#[tokio::test]
+async fn resumed_empty_rollout_omits_ordinals() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let rollout_path = home.path().join("rollout.jsonl");
+    File::create(&rollout_path)?;
+
+    let recorder =
+        RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path.clone())).await?;
+    recorder
+        .record_canonical_items(&[agent_message_item("legacy")])
+        .await?;
+    recorder.flush().await?;
+
+    let text = fs::read_to_string(rollout_path)?;
+    let values = text
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(values.iter().all(|value| value.get("ordinal").is_none()));
+
+    recorder.shutdown().await
+}
+
+#[tokio::test]
 async fn persist_reports_filesystem_error_and_retries_buffered_items() -> std::io::Result<()> {
     let home = TempDir::new().expect("temp dir");
     let config = test_config(home.path());
@@ -455,6 +659,7 @@ async fn persist_reports_filesystem_error_and_retries_buffered_items() -> std::i
             /*parent_thread_id*/ None,
             SessionSource::Exec,
             /*thread_source*/ None,
+            "test_originator".to_string(),
             BaseInstructions::default(),
             Vec::new(),
         ),
@@ -502,13 +707,18 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
     let rollout_path = home.path().join("rollout.jsonl");
     File::create(&rollout_path)?;
     let read_only_file = std::fs::OpenOptions::new().read(true).open(&rollout_path)?;
-    let mut state = RolloutWriterState::new(
-        Some(tokio::fs::File::from_std(read_only_file)),
-        /*deferred_log_file_info*/ None,
-        /*meta*/ None,
-        home.path().to_path_buf(),
-        rollout_path.clone(),
-    );
+    let mut state = RolloutWriterState {
+        writer: Some(JsonlWriter {
+            file: tokio::fs::File::from_std(read_only_file),
+        }),
+        deferred_log_file_info: None,
+        pending_items: Vec::new(),
+        meta: None,
+        cwd: home.path().to_path_buf(),
+        rollout_path: rollout_path.clone(),
+        ordinal_state: RolloutOrdinalState::Legacy,
+        last_logged_error: None,
+    };
     state.add_items(vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
         AgentMessageEvent {
             message: "queued-after-writer-error".to_string(),
@@ -523,6 +733,154 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
         text_after_retry.contains("queued-after-writer-error"),
         "flush should retry after reopening and write buffered items"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resumed_paginated_rollout_continues_after_ordinal_gap() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let rollout_path = home.path().join("rollout.jsonl");
+    write_paginated_rollout(&rollout_path, ThreadId::new(), &[4])?;
+
+    let recorder =
+        RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path.clone())).await?;
+    recorder
+        .record_canonical_items(&[agent_message_item("after-resume")])
+        .await?;
+    recorder.flush().await?;
+
+    let lines = read_rollout_lines(&rollout_path)?;
+    assert_eq!(
+        lines.iter().map(|line| line.ordinal).collect::<Vec<_>>(),
+        vec![Some(0), Some(4), Some(5)]
+    );
+    recorder.shutdown().await
+}
+
+#[tokio::test]
+async fn resumed_paginated_rollout_repairs_unsafe_tail() -> std::io::Result<()> {
+    let valid_unterminated = serde_json::to_string(&RolloutLine {
+        timestamp: "2026-07-09T00:00:05Z".to_string(),
+        ordinal: Some(5),
+        item: agent_message_item("valid unterminated"),
+    })?;
+    for (name, tail, expected_ordinals) in [
+        (
+            "valid unterminated",
+            valid_unterminated,
+            vec![Some(0), Some(4), Some(5), Some(6)],
+        ),
+        (
+            "invalid unterminated",
+            "{\"timestamp\":\"unterminated\"".to_string(),
+            vec![Some(0), Some(4), Some(5)],
+        ),
+    ] {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let rollout_path = home.path().join("rollout.jsonl");
+        write_paginated_rollout(&rollout_path, ThreadId::new(), &[4])?;
+        let mut file = fs::OpenOptions::new().append(true).open(&rollout_path)?;
+        write!(file, "{tail}")?;
+        drop(file);
+
+        let recorder =
+            RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path.clone()))
+                .await?;
+        recorder
+            .record_canonical_items(&[agent_message_item("after-tail-repair")])
+            .await?;
+        recorder.flush().await?;
+
+        let contents = fs::read_to_string(&rollout_path)?;
+        assert!(contents.ends_with('\n'), "{name} tail should be terminated");
+        let ordinals = contents
+            .lines()
+            .filter_map(|line| serde_json::from_str::<RolloutLine>(line).ok())
+            .map(|line| line.ordinal)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordinals, expected_ordinals,
+            "unexpected ordinals after repairing {name} tail"
+        );
+        recorder.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn paginated_ordinal_overflow_fails_without_appending() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let rollout_path = home.path().join("rollout.jsonl");
+    write_paginated_rollout(&rollout_path, ThreadId::new(), &[u64::MAX])?;
+    let before = fs::read(&rollout_path)?;
+
+    let recorder =
+        RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path.clone())).await?;
+    recorder
+        .record_canonical_items(&[agent_message_item("overflow")])
+        .await?;
+    let err = recorder
+        .flush()
+        .await
+        .expect_err("ordinal overflow should fail the append");
+    assert!(err.to_string().contains("overflow"));
+    assert_eq!(fs::read(&rollout_path)?, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn resumed_paginated_subagent_rollout_rejects_incomplete_prefix() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let rollout_path = home.path().join("rollout.jsonl");
+    let thread_id = ThreadId::new();
+    let mut session_meta = paginated_session_meta_item(thread_id, home.path());
+    let RolloutItem::SessionMeta(meta_line) = &mut session_meta else {
+        panic!("fixture should be session metadata");
+    };
+    meta_line.meta.subagent_history_start_ordinal = Some(3);
+    let lines = [
+        RolloutLine {
+            timestamp: "2026-07-09T00:00:00Z".to_string(),
+            ordinal: Some(0),
+            item: session_meta,
+        },
+        RolloutLine {
+            timestamp: "2026-07-09T00:00:01Z".to_string(),
+            ordinal: Some(1),
+            item: agent_message_item("partial inherited prefix"),
+        },
+    ];
+    let jsonl = lines
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    fs::write(&rollout_path, format!("{jsonl}\n"))?;
+
+    let err = match RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path)).await
+    {
+        Ok(_) => panic!("incomplete prefix should fail resume"),
+        Err(err) => err,
+    };
+
+    assert!(err.to_string().contains("incomplete"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn append_rollout_item_to_path_assigns_next_paginated_ordinal() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    write_paginated_rollout(&rollout_path, ThreadId::new(), &[4])?;
+
+    append_rollout_item_to_path(&rollout_path, &agent_message_item("offline")).await?;
+
+    let lines = read_rollout_lines(&rollout_path)?;
+    assert_eq!(lines.last().and_then(|line| line.ordinal), Some(5));
     Ok(())
 }
 
@@ -732,6 +1090,7 @@ async fn list_threads_state_db_only_skips_jsonl_repair_scan() -> std::io::Result
         "timestamp": ts,
         "type": "session_meta",
         "payload": {
+            "session_id": uuid,
             "id": uuid,
             "timestamp": ts,
             "cwd": home.path().display().to_string(),
@@ -978,6 +1337,7 @@ fn fill_missing_thread_item_metadata_preserves_identity_and_prefers_state_git_fi
         git_sha: Some("filesystem-sha".to_string()),
         git_origin_url: Some("https://example.com/filesystem.git".to_string()),
         source: None,
+        history_mode: Default::default(),
         parent_thread_id: None,
         agent_nickname: None,
         agent_role: None,
@@ -997,6 +1357,7 @@ fn fill_missing_thread_item_metadata_preserves_identity_and_prefers_state_git_fi
         git_sha: Some("state-sha".to_string()),
         git_origin_url: Some("https://example.com/state.git".to_string()),
         source: Some(SessionSource::Exec),
+        history_mode: Default::default(),
         parent_thread_id: None,
         agent_nickname: Some("state-agent".to_string()),
         agent_role: Some("state-role".to_string()),
@@ -1135,6 +1496,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
     let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
     let turn_context = RolloutLine {
         timestamp: "2025-01-03T13:00:01Z".to_string(),
+        ordinal: None,
         item: RolloutItem::TurnContext(TurnContextItem {
             turn_id: Some("turn-1".to_string()),
             cwd: serde_json::from_value(serde_json::json!(&latest_cwd))
@@ -1143,6 +1505,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
             current_date: None,
             timezone: None,
             approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             permission_profile: None,
             network: None,
@@ -1152,6 +1515,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
             personality: None,
             collaboration_mode: None,
             multi_agent_version: None,
+            multi_agent_mode: None,
             realtime_active: None,
             effort: None,
             summary: codex_protocol::config_types::ReasoningSummary::Auto,

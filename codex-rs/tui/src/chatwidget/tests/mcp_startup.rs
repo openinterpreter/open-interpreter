@@ -8,6 +8,7 @@ fn notify_mcp_status(chat: &mut ChatWidget, name: &str, status: McpServerStartup
             name: name.to_string(),
             status,
             error: None,
+            failure_reason: None,
         }),
         /*replay_kind*/ None,
     );
@@ -20,6 +21,7 @@ fn notify_mcp_status_error(chat: &mut ChatWidget, name: &str, error: &str) {
             name: name.to_string(),
             status: McpServerStartupState::Failed,
             error: Some(error.to_string()),
+            failure_reason: None,
         }),
         /*replay_kind*/ None,
     );
@@ -51,6 +53,7 @@ async fn mcp_startup_ignores_status_for_other_thread() {
                 status,
                 error: matches!(status, McpServerStartupState::Failed)
                     .then(|| "sentry is not logged in".to_string()),
+                failure_reason: None,
             }),
             /*replay_kind*/ None,
         );
@@ -136,7 +139,7 @@ async fn mcp_startup_complete_does_not_clear_running_task() {
 
     assert!(chat.bottom_pane.is_task_running());
     assert!(chat.bottom_pane.status_indicator_visible());
-    assert_eq!(chat.status_state.current_status.header, "Interpreting");
+    assert_eq!(chat.status_state.current_status.header, "Working");
 }
 
 #[tokio::test]
@@ -155,7 +158,7 @@ async fn turn_start_preserves_active_mcp_startup_header() {
 
     notify_mcp_status(&mut chat, "schaltwerk", McpServerStartupState::Ready);
 
-    assert_eq!(chat.status_state.current_status.header, "Interpreting");
+    assert_eq!(chat.status_state.current_status.header, "Working");
 }
 
 #[tokio::test]
@@ -175,7 +178,7 @@ async fn turn_start_replaces_idle_completed_mcp_startup_header() {
     handle_turn_started(&mut chat, "turn-1");
 
     assert!(chat.bottom_pane.is_task_running());
-    assert_eq!(chat.status_state.current_status.header, "Interpreting");
+    assert_eq!(chat.status_state.current_status.header, "Working");
 }
 
 #[tokio::test]
@@ -275,7 +278,7 @@ async fn mcp_startup_failure_restores_running_status_header() {
 
     assert!(chat.bottom_pane.is_task_running());
     assert!(chat.bottom_pane.status_indicator_visible());
-    assert_eq!(chat.status_state.current_status.header, "Interpreting");
+    assert_eq!(chat.status_state.current_status.header, "Working");
 }
 
 #[tokio::test]

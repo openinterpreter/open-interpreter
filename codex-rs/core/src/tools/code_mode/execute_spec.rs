@@ -6,9 +6,10 @@ use std::collections::BTreeMap;
 
 pub(crate) fn create_code_mode_tool(
     enabled_tools: &[CodeModeToolDefinition],
+    deferred_tools: &[CodeModeToolDefinition],
     namespace_descriptions: &BTreeMap<String, codex_code_mode::ToolNamespaceDescription>,
+    default_exec_yield_time_ms: u64,
     code_mode_only: bool,
-    deferred_tools_available: bool,
 ) -> ToolSpec {
     const CODE_MODE_FREEFORM_GRAMMAR: &str = r#"
 start: pragma_source | plain_source
@@ -24,9 +25,10 @@ SOURCE: /[\s\S]+/
         name: codex_code_mode::PUBLIC_TOOL_NAME.to_string(),
         description: codex_code_mode::build_exec_tool_description(
             enabled_tools,
+            deferred_tools,
             namespace_descriptions,
+            default_exec_yield_time_ms,
             code_mode_only,
-            deferred_tools_available,
         ),
         format: FreeformToolFormat {
             r#type: "grammar".to_string(),
@@ -56,17 +58,19 @@ mod tests {
         assert_eq!(
             create_code_mode_tool(
                 &enabled_tools,
+                &[],
                 &BTreeMap::new(),
+                codex_code_mode::DEFAULT_EXEC_YIELD_TIME_MS,
                 /*code_mode_only*/ true,
-                /*deferred_tools_available*/ false,
             ),
             ToolSpec::Freeform(FreeformTool {
                 name: codex_code_mode::PUBLIC_TOOL_NAME.to_string(),
                 description: codex_code_mode::build_exec_tool_description(
                     &enabled_tools,
+                    &[],
                     &BTreeMap::new(),
+                    codex_code_mode::DEFAULT_EXEC_YIELD_TIME_MS,
                     /*code_mode_only*/ true,
-                    /*deferred_tools_available*/ false
                 ),
                 format: FreeformToolFormat {
                     r#type: "grammar".to_string(),

@@ -17,6 +17,7 @@ use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::ToolInfo;
 use pretty_assertions::assert_eq;
 use rmcp::model::JsonObject;
+use rmcp::model::Meta;
 use rmcp::model::Tool;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -30,6 +31,8 @@ fn app(id: &str) -> AppInfo {
         description: None,
         logo_url: None,
         logo_url_dark: None,
+        icon_assets: None,
+        icon_dark_assets: None,
         distribution_channel: None,
         install_url: None,
         branding: None,
@@ -68,6 +71,7 @@ fn codex_app_tool(
         callable_namespace: tool_namespace,
         namespace_description: None,
         tool: test_tool_definition(tool_name),
+        openai_file_input_optional_fields: Default::default(),
         connector_id: Some(connector_id.to_string()),
         connector_name: connector_name.map(ToOwned::to_owned),
         plugin_display_names: plugin_names(plugin_display_names),
@@ -112,6 +116,7 @@ fn accessible_connectors_from_mcp_tools_carries_plugin_display_names() {
             callable_namespace: "sample".to_string(),
             namespace_description: None,
             tool: test_tool_definition("echo"),
+            openai_file_input_optional_fields: Default::default(),
             connector_id: None,
             connector_name: None,
             plugin_display_names: plugin_names(&["ignored"]),
@@ -128,6 +133,8 @@ fn accessible_connectors_from_mcp_tools_carries_plugin_display_names() {
             description: None,
             logo_url: None,
             logo_url_dark: None,
+            icon_assets: None,
+            icon_dark_assets: None,
             distribution_channel: None,
             install_url: Some(connector_install_url("Google Calendar", "calendar")),
             branding: None,
@@ -137,6 +144,73 @@ fn accessible_connectors_from_mcp_tools_carries_plugin_display_names() {
             is_enabled: true,
             plugin_display_names: plugin_names(&["beta", "sample"]),
         }]
+    );
+}
+
+#[test]
+fn synthetic_links_are_exposed_to_the_agent_but_not_accessible_in_app_list() {
+    let mut synthetic_tool = codex_app_tool("gmail_batch_read_email", "gmail", Some("Gmail"), &[]);
+    synthetic_tool.tool.meta = Some(Meta(
+        serde_json::json!({
+            "resource_name": "gmail.batch_read_email",
+            "_codex_apps": {
+                "resource_uri": "/connector/gmail/batch_read_email",
+                "contains_mcp_source": false,
+                "synthetic_link": true
+            }
+        })
+        .as_object()
+        .expect("meta should be an object")
+        .clone(),
+    ));
+    let tools = vec![
+        synthetic_tool,
+        codex_app_tool("calendar_list_events", "calendar", Some("Calendar"), &[]),
+    ];
+
+    let calendar = AppInfo {
+        id: "calendar".to_string(),
+        name: "Calendar".to_string(),
+        description: None,
+        logo_url: None,
+        logo_url_dark: None,
+        icon_assets: None,
+        icon_dark_assets: None,
+        distribution_channel: None,
+        install_url: Some(connector_install_url("Calendar", "calendar")),
+        branding: None,
+        app_metadata: None,
+        labels: None,
+        is_accessible: true,
+        is_enabled: true,
+        plugin_display_names: Vec::new(),
+    };
+    assert_eq!(
+        accessible_connectors_for_app_list_from_mcp_tools(&tools),
+        vec![calendar.clone()]
+    );
+    assert_eq!(
+        accessible_connectors_from_mcp_tools(&tools),
+        vec![
+            calendar,
+            AppInfo {
+                id: "gmail".to_string(),
+                name: "Gmail".to_string(),
+                description: None,
+                logo_url: None,
+                logo_url_dark: None,
+                icon_assets: None,
+                icon_dark_assets: None,
+                distribution_channel: None,
+                install_url: Some(connector_install_url("Gmail", "gmail")),
+                branding: None,
+                app_metadata: None,
+                labels: None,
+                is_accessible: true,
+                is_enabled: true,
+                plugin_display_names: Vec::new(),
+            }
+        ]
     );
 }
 
@@ -179,6 +253,8 @@ async fn refresh_accessible_connectors_cache_from_mcp_tools_writes_latest_instal
                 description: None,
                 logo_url: None,
                 logo_url_dark: None,
+                icon_assets: None,
+                icon_dark_assets: None,
                 distribution_channel: None,
                 install_url: Some(connector_install_url("Google Calendar", "calendar")),
                 branding: None,
@@ -194,6 +270,8 @@ async fn refresh_accessible_connectors_cache_from_mcp_tools_writes_latest_instal
                 description: None,
                 logo_url: None,
                 logo_url_dark: None,
+                icon_assets: None,
+                icon_dark_assets: None,
                 distribution_channel: None,
                 install_url: Some(connector_install_url("Hidden", "connector_openai_hidden")),
                 branding: None,
@@ -221,6 +299,7 @@ fn accessible_connectors_from_mcp_tools_preserves_description() {
             "Create a calendar event",
             Arc::new(JsonObject::default()),
         ),
+        openai_file_input_optional_fields: Default::default(),
         connector_id: Some("calendar".to_string()),
         connector_name: Some("Calendar".to_string()),
         plugin_display_names: Vec::new(),
@@ -234,6 +313,8 @@ fn accessible_connectors_from_mcp_tools_preserves_description() {
             description: Some("Plan events".to_string()),
             logo_url: None,
             logo_url_dark: None,
+            icon_assets: None,
+            icon_dark_assets: None,
             distribution_channel: None,
             branding: None,
             app_metadata: None,

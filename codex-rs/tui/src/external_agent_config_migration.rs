@@ -1,5 +1,6 @@
 use crate::diff_render::display_path_for;
 use crate::external_agent_config_migration_model::ExternalAgentConfigMigrationGroupModel;
+use crate::external_agent_config_migration_model::external_agent_config_migration_count_summary;
 use crate::external_agent_config_migration_model::external_agent_config_migration_groups;
 use crate::external_agent_config_migration_model::external_agent_config_migration_item_detail;
 use crate::external_agent_config_migration_model::external_agent_config_migration_item_label;
@@ -599,6 +600,13 @@ impl ExternalAgentConfigMigrationScreen {
             .iter()
             .enumerate()
             .flat_map(|(idx, group)| {
+                let selected_items = group
+                    .item_indices
+                    .iter()
+                    .filter_map(|idx| self.items.get(*idx))
+                    .filter(|item| item.enabled)
+                    .map(|item| &item.item);
+                let count_summary = external_agent_config_migration_count_summary(selected_items);
                 [
                     RenderLineEntry {
                         item_idx: Some(idx),
@@ -613,6 +621,15 @@ impl ExternalAgentConfigMigrationScreen {
                         item_idx: None,
                         kind: RenderLineKind::ItemDetail,
                         line: Line::from(format!("      {}", group.description)),
+                    },
+                    RenderLineEntry {
+                        item_idx: None,
+                        kind: RenderLineKind::ItemDetail,
+                        line: Line::from(if count_summary.is_empty() {
+                            "      Importing: none".to_string()
+                        } else {
+                            format!("      Importing: {count_summary}")
+                        }),
                     },
                 ]
             })
@@ -791,6 +808,23 @@ mod tests {
         ]
     }
 
+    fn sample_items_with_memory() -> Vec<ExternalAgentConfigMigrationItem> {
+        let mut items = sample_items();
+        items.insert(
+            1,
+            ExternalAgentConfigMigrationItem {
+                item_type: ExternalAgentConfigMigrationItemType::Memory,
+                description: "Migrate memory files from /Users/alex/.claude/projects to /Users/alex/.codex/memories/extensions/external_agent_import/resources".to_string(),
+                cwd: None,
+                details: Some(codex_app_server_protocol::MigrationDetails {
+                    memory: vec!["project".to_string()],
+                    ..Default::default()
+                }),
+            },
+        );
+        items
+    }
+
     fn render_screen(
         screen: &ExternalAgentConfigMigrationScreen,
         width: u16,
@@ -815,7 +849,7 @@ mod tests {
 
     #[test]
     fn prompt_snapshot() {
-        let items = sample_items();
+        let items = sample_items_with_memory();
         let screen = ExternalAgentConfigMigrationScreen::new(
             FrameRequester::test_dummy(),
             &items,
@@ -832,7 +866,7 @@ mod tests {
 
     #[test]
     fn customize_snapshot() {
-        let items = sample_items();
+        let items = sample_items_with_memory();
         let mut screen = ExternalAgentConfigMigrationScreen::new(
             FrameRequester::test_dummy(),
             &items,
@@ -841,7 +875,7 @@ mod tests {
         );
         screen.customize();
 
-        let rendered = render_screen(&screen, /*width*/ 80, /*height*/ 30);
+        let rendered = render_screen(&screen, /*width*/ 80, /*height*/ 34);
         #[cfg(windows)]
         assert_snapshot!(
             "external_agent_config_migration_customize_windows",
@@ -849,6 +883,31 @@ mod tests {
         );
         #[cfg(not(windows))]
         assert_snapshot!("external_agent_config_migration_customize", rendered);
+    }
+
+    #[test]
+    fn secondary_source_customize_snapshot() {
+        let items = vec![ExternalAgentConfigMigrationItem {
+            item_type: ExternalAgentConfigMigrationItemType::Config,
+            description:
+                "Migrate /Users/alex/.cursor/cli-config.json into /Users/alex/.codex/config.toml"
+                    .to_string(),
+            cwd: None,
+            details: None,
+        }];
+        let mut screen = ExternalAgentConfigMigrationScreen::new(
+            FrameRequester::test_dummy(),
+            &items,
+            &items,
+            /*error*/ None,
+        );
+        screen.customize();
+
+        let rendered = render_screen(&screen, /*width*/ 80, /*height*/ 18);
+        assert_snapshot!(
+            "external_agent_config_migration_secondary_source_customize",
+            rendered
+        );
     }
 
     #[test]

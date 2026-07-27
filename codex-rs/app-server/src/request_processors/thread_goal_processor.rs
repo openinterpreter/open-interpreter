@@ -94,6 +94,26 @@ impl ThreadGoalRequestProcessor {
         (emit_thread_goal_update, thread_goal_state_db)
     }
 
+    pub(crate) async fn restore_inherited_goal_runtime(&self, thread_id: ThreadId) {
+        if let Err(err) = self
+            .goal_service
+            .restore_thread_runtime_after_resume(thread_id)
+            .await
+        {
+            warn!("failed to restore inherited goal runtime for {thread_id}: {err}");
+        }
+    }
+
+    pub(crate) async fn flush_goal_progress_for_fork(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<(), String> {
+        self.goal_service
+            .flush_thread_goal_progress_for_fork(thread_id)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
     async fn thread_goal_set_inner(
         &self,
         request_id: ConnectionRequestId,
@@ -135,6 +155,21 @@ impl ThreadGoalRequestProcessor {
             .await
             .map_err(goal_service_error)?;
         let goal = ThreadGoal::from(outcome.goal.clone());
+
+        let persist_result = match self.thread_manager.get_thread(thread_id).await {
+            Ok(thread) => {
+                // Live goal-first threads can be listed before any user turn is written.
+                // Use the live path so JSONL and SQLite preview metadata stay in sync.
+                thread
+                    .append_rollout_items(&[outcome.thread_goal_updated_item()])
+                    .await
+            }
+            Err(_) => Ok(()),
+        };
+        if let Err(err) = persist_result {
+            warn!("failed to persist goal update for live thread {thread_id}: {err}");
+        }
+
         self.outgoing
             .send_response(
                 request_id.clone(),
@@ -268,7 +303,7 @@ impl ThreadGoalRequestProcessor {
         Ok(())
     }
 
-    async fn emit_thread_goal_snapshot(&self, thread_id: ThreadId) {
+    pub(crate) async fn emit_thread_goal_snapshot(&self, thread_id: ThreadId) {
         let state_db = match self.state_db_for_materialized_thread(thread_id).await {
             Ok(state_db) => state_db,
             Err(err) => {

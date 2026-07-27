@@ -182,7 +182,7 @@ mod tests {
                 content: vec![ContentItem::InputText { text: text.clone() }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
                 id: None,
@@ -190,7 +190,7 @@ mod tests {
                 content: vec![ContentItem::InputText { text }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ];
 
@@ -208,7 +208,7 @@ mod tests {
             }],
             phase: None,
 
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         }];
 
         assert_eq!(parse_session_skills(&items), Vec::new());

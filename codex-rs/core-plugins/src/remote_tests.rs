@@ -33,6 +33,145 @@ fn build_remote_marketplace_preserves_directory_order_and_appends_installed_only
     );
 }
 
+#[test]
+fn installation_policy_source_is_preserved_across_remote_summary_paths() {
+    let mut directory_plugin = directory_plugin("plugin-linear", "linear");
+    directory_plugin.installation_policy_source =
+        Some(RemotePluginInstallPolicySource::ImplicitCanonicalApp);
+    let installed_plugin = RemotePluginInstalledItem {
+        plugin: directory_plugin.clone(),
+        enabled: true,
+        disabled_skill_names: Vec::new(),
+    };
+
+    let marketplace = build_remote_marketplace(
+        REMOTE_GLOBAL_MARKETPLACE_NAME,
+        REMOTE_GLOBAL_MARKETPLACE_DISPLAY_NAME,
+        vec![directory_plugin],
+        vec![installed_plugin.clone()],
+        /*include_installed_only*/ false,
+    )
+    .expect("marketplace should be valid")
+    .expect("marketplace should not be empty");
+    assert_eq!(
+        marketplace
+            .plugins
+            .into_iter()
+            .map(|plugin| plugin.install_policy_source)
+            .collect::<Vec<_>>(),
+        vec![Some(PluginInstallPolicySource::ImplicitCanonicalApp)]
+    );
+
+    let mut installed_plugin = installed_plugin;
+    installed_plugin.plugin.installation_policy_source =
+        Some(RemotePluginInstallPolicySource::WorkspaceSetting);
+    let installed_plugin = remote_installed_plugin_to_cache_entry(&installed_plugin)
+        .expect("installed plugin should be valid");
+    let marketplaces = group_remote_installed_plugins_by_marketplaces(
+        &[installed_plugin],
+        &[REMOTE_GLOBAL_MARKETPLACE_NAME],
+    );
+    assert_eq!(
+        marketplaces
+            .into_iter()
+            .flat_map(|marketplace| marketplace.plugins)
+            .map(|plugin| plugin.install_policy_source)
+            .collect::<Vec<_>>(),
+        vec![Some(PluginInstallPolicySource::WorkspaceSetting)]
+    );
+}
+
+#[test]
+fn installation_interstitial_requirement_is_preserved_across_remote_summary_paths() {
+    let mut directory_plugin = directory_plugin("plugin-linear", "linear");
+    directory_plugin.must_show_installation_interstitial = Some(true);
+    let marketplace = build_remote_marketplace(
+        REMOTE_GLOBAL_MARKETPLACE_NAME,
+        REMOTE_GLOBAL_MARKETPLACE_DISPLAY_NAME,
+        vec![directory_plugin.clone()],
+        Vec::new(),
+        /*include_installed_only*/ false,
+    )
+    .expect("marketplace should be valid")
+    .expect("marketplace should not be empty");
+    assert_eq!(
+        marketplace
+            .plugins
+            .into_iter()
+            .map(|plugin| plugin.must_show_installation_interstitial)
+            .collect::<Vec<_>>(),
+        vec![Some(true)]
+    );
+
+    directory_plugin.must_show_installation_interstitial = Some(false);
+    let installed_plugin = remote_installed_plugin_to_cache_entry(&RemotePluginInstalledItem {
+        plugin: directory_plugin,
+        enabled: true,
+        disabled_skill_names: Vec::new(),
+    })
+    .expect("installed plugin should be valid");
+    let marketplaces = group_remote_installed_plugins_by_marketplaces(
+        &[installed_plugin],
+        &[REMOTE_GLOBAL_MARKETPLACE_NAME],
+    );
+    assert_eq!(
+        marketplaces
+            .into_iter()
+            .flat_map(|marketplace| marketplace.plugins)
+            .map(|plugin| plugin.must_show_installation_interstitial)
+            .collect::<Vec<_>>(),
+        vec![Some(false)]
+    );
+}
+
+#[test]
+fn missing_installation_interstitial_requirement_deserializes_to_none() {
+    let plugin = directory_plugin("plugin-linear", "linear");
+    let mut plugin_json = serde_json::to_value(plugin).expect("plugin should serialize");
+    plugin_json
+        .as_object_mut()
+        .expect("plugin should serialize to an object")
+        .remove("must_show_installation_interstitial");
+
+    let plugin: RemotePluginDirectoryItem =
+        serde_json::from_value(plugin_json).expect("missing requirement should deserialize");
+
+    assert_eq!(plugin.must_show_installation_interstitial, None);
+}
+
+#[test]
+fn unknown_installation_policy_source_maps_to_none() {
+    let plugin = directory_plugin("plugin-linear", "linear");
+    let mut plugin_json = serde_json::to_value(plugin).expect("plugin should serialize");
+    plugin_json["installation_policy_source"] =
+        serde_json::Value::String("FUTURE_POLICY_SOURCE".to_string());
+    let plugin: RemotePluginDirectoryItem =
+        serde_json::from_value(plugin_json).expect("unknown source should deserialize");
+
+    let summary = build_remote_plugin_summary(&plugin, /*installed_plugin*/ None)
+        .expect("summary should be valid");
+
+    assert_eq!(summary.install_policy_source, None);
+}
+
+#[test]
+fn scheduled_task_metadata_distinguishes_unavailable_from_empty() {
+    let release = serde_json::json!({
+        "display_name": "Example",
+        "description": "Example plugin",
+        "interface": {},
+    });
+    let without_metadata: RemotePluginReleaseResponse =
+        serde_json::from_value(release.clone()).expect("release should deserialize");
+    assert_eq!(without_metadata.scheduled_tasks, None);
+
+    let mut with_empty_metadata = release;
+    with_empty_metadata["scheduled_tasks"] = serde_json::json!([]);
+    let with_empty_metadata: RemotePluginReleaseResponse =
+        serde_json::from_value(with_empty_metadata).expect("release should deserialize");
+    assert_eq!(with_empty_metadata.scheduled_tasks, Some(Vec::new()));
+}
+
 fn directory_plugin(id: &str, name: &str) -> RemotePluginDirectoryItem {
     RemotePluginDirectoryItem {
         id: id.to_string(),
@@ -44,6 +183,8 @@ fn directory_plugin(id: &str, name: &str) -> RemotePluginDirectoryItem {
         share_url: None,
         share_principals: None,
         installation_policy: PluginInstallPolicy::Available,
+        installation_policy_source: None,
+        must_show_installation_interstitial: None,
         authentication_policy: PluginAuthPolicy::OnUse,
         availability: PluginAvailability::Available,
         release: RemotePluginReleaseResponse {
@@ -69,12 +210,28 @@ fn directory_plugin(id: &str, name: &str) -> RemotePluginDirectoryItem {
                 default_prompts: None,
                 composer_icon_url: None,
                 logo_url: None,
+                logo_url_dark: None,
                 screenshot_urls: Vec::new(),
             },
             skills: Vec::new(),
             mcp_servers: Vec::new(),
+            scheduled_tasks: None,
         },
     }
+}
+
+#[test]
+fn remote_plugin_interface_maps_dark_logo_url() {
+    let mut plugin = directory_plugin("plugin-linear", "linear");
+    plugin.release.interface.logo_url_dark =
+        Some("https://example.com/linear/logo-dark.png".to_string());
+
+    assert_eq!(
+        remote_plugin_interface_to_info(&plugin)
+            .expect("plugin interface")
+            .logo_url_dark,
+        Some("https://example.com/linear/logo-dark.png".to_string())
+    );
 }
 fn item(name: &str, display_name: &str) -> RecommendedPluginItem {
     RecommendedPluginItem {

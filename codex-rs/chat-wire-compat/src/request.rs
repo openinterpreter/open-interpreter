@@ -104,7 +104,8 @@ pub(crate) struct ChatFunctionCall {
 pub(crate) fn convert_request(
     request: &ResponsesApiRequest,
 ) -> Result<(ChatCompletionRequest, ToolKinds), ApiError> {
-    let (tools, tool_kinds, original_function_names) = convert_tools(&request.tools)?;
+    let (tools, tool_kinds, original_function_names) =
+        convert_tools(request.tools.as_deref().unwrap_or_default())?;
     let mut messages = Vec::new();
     if !request.instructions.trim().is_empty() {
         messages.push(ChatMessage {
@@ -189,11 +190,12 @@ pub(crate) fn convert_request(
                 action,
                 ..
             } => {
-                let call_id = call_id.clone().or_else(|| id.clone()).ok_or_else(|| {
-                    ApiError::InvalidRequest {
+                let call_id = call_id
+                    .clone()
+                    .or_else(|| id.as_ref().map(ToString::to_string))
+                    .ok_or_else(|| ApiError::InvalidRequest {
                         message: "local_shell history item missing call id".to_string(),
-                    }
-                })?;
+                    })?;
                 let arguments = match action {
                     LocalShellAction::Exec(exec) => json!({
                         "command": exec.command,
@@ -298,6 +300,7 @@ pub(crate) fn convert_request(
             ResponseItem::WebSearchCall { .. }
             | ResponseItem::ImageGenerationCall { .. }
             | ResponseItem::AgentMessage { .. }
+            | ResponseItem::AdditionalTools { .. }
             | ResponseItem::Compaction { .. }
             | ResponseItem::CompactionTrigger { .. }
             | ResponseItem::ContextCompaction { .. }
@@ -438,6 +441,14 @@ fn convert_message_content(content: &[ContentItem]) -> Option<Value> {
                     }
                 ]));
             }
+            ContentItem::InputAudio { audio_url } => {
+                return Some(json!([
+                    {
+                        "type": "input_audio",
+                        "audio_url": audio_url
+                    }
+                ]));
+            }
         }
     }
 
@@ -452,6 +463,10 @@ fn convert_message_content(content: &[ContentItem]) -> Option<Value> {
                 ContentItem::InputImage { image_url, .. } => json!({
                     "type": "image_url",
                     "image_url": { "url": image_url },
+                }),
+                ContentItem::InputAudio { audio_url } => json!({
+                    "type": "input_audio",
+                    "audio_url": audio_url,
                 }),
             })
             .collect(),
@@ -815,6 +830,7 @@ fn verbosity_to_string(verbosity: OpenAiVerbosity) -> String {
 mod tests {
     use super::*;
     use codex_api::TextFormatType;
+    use codex_protocol::ResponseItemId;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -829,19 +845,20 @@ mod tests {
                     text: "hello".to_string(),
                 }],
                 phase: None,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
-            tools: vec![json!({
+            tools: Some(vec![json!({
                 "type": "function",
                 "name": "shell_command",
                 "description": "Run a shell command",
                 "parameters": { "type": "object" }
-            })],
+            })]),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
             stream: true,
+            stream_options: None,
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
@@ -874,14 +891,15 @@ mod tests {
                     text: "keep going".to_string(),
                 }],
                 phase: None,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
-            tools: Vec::new(),
+            tools: Some(Vec::new()),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
             stream: true,
+            stream_options: None,
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
@@ -909,16 +927,16 @@ mod tests {
                         text: "list files".to_string(),
                     }],
                     phase: None,
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Reasoning {
-                    id: Some("reasoning-1".to_string()),
+                    id: Some(ResponseItemId::with_suffix("rs", "1")),
                     summary: Vec::new(),
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: "I need to inspect the directory.".to_string(),
                     }]),
                     encrypted_content: None,
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
                     id: None,
@@ -926,26 +944,27 @@ mod tests {
                     namespace: None,
                     arguments: json!({ "command": "ls" }).to_string(),
                     call_id: "call-1".to_string(),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
                     call_id: "call-1".to_string(),
                     output: FunctionCallOutputPayload::from_text("file.txt".to_string()),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             ],
-            tools: vec![json!({
+            tools: Some(vec![json!({
                 "type": "function",
                 "name": "shell",
                 "description": "Run a command",
                 "parameters": { "type": "object" }
-            })],
+            })]),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
             stream: true,
+            stream_options: None,
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
@@ -978,9 +997,9 @@ mod tests {
                 namespace: Some("mcp__demo__".to_string()),
                 arguments: json!({ "order_id": "ord_123" }).to_string(),
                 call_id: "call-lookup".to_string(),
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
-            tools: vec![json!({
+            tools: Some(vec![json!({
                 "type": "namespace",
                 "name": "mcp__demo__",
                 "description": "Demo tools",
@@ -999,12 +1018,13 @@ mod tests {
                         }
                     }
                 ]
-            })],
+            })]),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
             stream: true,
+            stream_options: None,
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
@@ -1108,13 +1128,13 @@ mod tests {
             instructions: String::new(),
             input: vec![
                 ResponseItem::Reasoning {
-                    id: Some("reasoning-1".to_string()),
+                    id: Some(ResponseItemId::with_suffix("rs", "1")),
                     summary: Vec::new(),
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: "Need to inspect files.".to_string(),
                     }]),
                     encrypted_content: None,
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
                     id: None,
@@ -1123,7 +1143,7 @@ mod tests {
                         text: String::new(),
                     }],
                     phase: None,
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
                     id: None,
@@ -1131,20 +1151,21 @@ mod tests {
                     namespace: None,
                     arguments: json!({ "file_path": "/app/file.txt" }).to_string(),
                     call_id: "call-1".to_string(),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             ],
-            tools: vec![json!({
+            tools: Some(vec![json!({
                 "type": "function",
                 "name": "Read",
                 "description": "Read a file",
                 "parameters": { "type": "object" }
-            })],
+            })]),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
             stream: true,
+            stream_options: None,
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
@@ -1175,7 +1196,7 @@ mod tests {
                     namespace: None,
                     arguments: json!({ "file_path": "/app/legacy.py" }).to_string(),
                     call_id: "call-1".to_string(),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
                     id: None,
@@ -1183,7 +1204,7 @@ mod tests {
                     namespace: None,
                     arguments: json!({ "file_path": "/app/data.csv" }).to_string(),
                     call_id: "call-2".to_string(),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
                     id: None,
@@ -1192,16 +1213,16 @@ mod tests {
                         text: String::new(),
                     }],
                     phase: None,
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Reasoning {
-                    id: Some("reasoning-1".to_string()),
+                    id: Some(ResponseItemId::with_suffix("rs", "1")),
                     summary: Vec::new(),
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: "Need to inspect both files.".to_string(),
                     }]),
                     encrypted_content: None,
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
                     id: None,
@@ -1209,38 +1230,39 @@ mod tests {
                     namespace: None,
                     arguments: json!({ "file_path": "/app/config.ini" }).to_string(),
                     call_id: "call-3".to_string(),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
                     call_id: "call-1".to_string(),
                     output: FunctionCallOutputPayload::from_text("legacy".to_string()),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
                     call_id: "call-2".to_string(),
                     output: FunctionCallOutputPayload::from_text("data".to_string()),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
                     call_id: "call-3".to_string(),
                     output: FunctionCallOutputPayload::from_text("config".to_string()),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             ],
-            tools: vec![json!({
+            tools: Some(vec![json!({
                 "type": "function",
                 "name": "Read",
                 "description": "Read a file",
                 "parameters": { "type": "object" }
-            })],
+            })]),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
             stream: true,
+            stream_options: None,
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
@@ -1269,13 +1291,13 @@ mod tests {
             instructions: String::new(),
             input: vec![
                 ResponseItem::Reasoning {
-                    id: Some("reasoning-1".to_string()),
+                    id: Some(ResponseItemId::with_suffix("rs", "1")),
                     summary: Vec::new(),
                     content: Some(vec![ReasoningItemContent::ReasoningText {
                         text: "Need one more directory listing.".to_string(),
                     }]),
                     encrypted_content: None,
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
                     id: None,
@@ -1284,7 +1306,7 @@ mod tests {
                         text: "I will inspect the directory.".to_string(),
                     }],
                     phase: None,
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
                     id: None,
@@ -1292,7 +1314,7 @@ mod tests {
                     namespace: None,
                     arguments: json!({ "command": "ls" }).to_string(),
                     call_id: "call-1".to_string(),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
                     id: None,
@@ -1301,7 +1323,7 @@ mod tests {
                         text: " Then I will inspect hidden files.".to_string(),
                     }],
                     phase: None,
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
                     id: None,
@@ -1309,32 +1331,33 @@ mod tests {
                     namespace: None,
                     arguments: json!({ "command": "ls -a" }).to_string(),
                     call_id: "call-2".to_string(),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
                     call_id: "call-1".to_string(),
                     output: FunctionCallOutputPayload::from_text("file.txt".to_string()),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
                     call_id: "call-2".to_string(),
                     output: FunctionCallOutputPayload::from_text(".git".to_string()),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             ],
-            tools: vec![json!({
+            tools: Some(vec![json!({
                 "type": "function",
                 "name": "Bash",
                 "description": "Run a command",
                 "parameters": { "type": "object" }
-            })],
+            })]),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
             stream: true,
+            stream_options: None,
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
@@ -1373,7 +1396,7 @@ mod tests {
                     status: Some("completed".to_string()),
                     execution: "client".to_string(),
                     arguments: json!({ "query": "search tools" }),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::ToolSearchOutput {
                     id: None,
@@ -1381,18 +1404,19 @@ mod tests {
                     status: "completed".to_string(),
                     execution: "client".to_string(),
                     tools: vec![json!({ "name": "shell", "type": "function" })],
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             ],
-            tools: vec![json!({
+            tools: Some(vec![json!({
                 "type": "tool_search",
                 "description": "Search available tools"
-            })],
+            })]),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
             stream: true,
+            stream_options: None,
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,
@@ -1437,14 +1461,15 @@ mod tests {
                     text: "return structured output".to_string(),
                 }],
                 phase: None,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
-            tools: Vec::new(),
+            tools: Some(Vec::new()),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
             stream: true,
+            stream_options: None,
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,

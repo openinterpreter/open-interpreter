@@ -122,21 +122,9 @@ fn platform_native_pty_system() -> Box<dyn portable_pty::PtySystem + Send> {
     }
 }
 
-/// Spawn a process attached to a PTY, returning handles for stdin, split output, and exit.
+/// Spawn a process attached to a PTY, preserving selected inherited file
+/// descriptors across exec on Unix.
 pub async fn spawn_process(
-    program: &str,
-    args: &[String],
-    cwd: &Path,
-    env: &HashMap<String, String>,
-    arg0: &Option<String>,
-    size: TerminalSize,
-) -> Result<SpawnedProcess> {
-    spawn_process_with_inherited_fds(program, args, cwd, env, arg0, size, &[]).await
-}
-
-/// Spawn a process attached to a PTY, preserving any inherited file
-/// descriptors listed in `inherited_fds` across exec on Unix.
-pub async fn spawn_process_with_inherited_fds(
     program: &str,
     args: &[String],
     cwd: &Path,
@@ -217,7 +205,11 @@ async fn spawn_process_portable(
     let writer_handle: JoinHandle<()> = tokio::spawn({
         let writer = Arc::clone(&writer);
         async move {
+            #[cfg(windows)]
+            let mut windows_input = crate::WindowsTtyInputNormalizer::default();
             while let Some(bytes) = writer_rx.recv().await {
+                #[cfg(windows)]
+                let bytes = windows_input.normalize(&bytes);
                 let mut guard = writer.lock().await;
                 use std::io::Write;
                 let _ = guard.write_all(&bytes);

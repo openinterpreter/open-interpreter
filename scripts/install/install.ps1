@@ -94,11 +94,10 @@ function Assert-ValidReleaseVersion {
 function Find-ReleaseAssetMetadata {
     param(
         [string]$AssetName,
-        [string]$ResolvedVersion
+        [object]$ReleaseMetadata
     )
 
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/$ReleaseTagPrefix$ResolvedVersion"
-    $asset = $release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
+    $asset = $ReleaseMetadata.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
     if ($null -eq $asset) {
         return $null
     }
@@ -112,20 +111,6 @@ function Find-ReleaseAssetMetadata {
         Url = $asset.browser_download_url
         Sha256 = $digestMatch.Groups[1].Value.ToLowerInvariant()
     }
-}
-
-function Get-ReleaseAssetMetadata {
-    param(
-        [string]$AssetName,
-        [string]$ResolvedVersion
-    )
-
-    $metadata = Find-ReleaseAssetMetadata -AssetName $AssetName -ResolvedVersion $ResolvedVersion
-    if ($null -eq $metadata) {
-        throw "Could not find release asset $AssetName for $ProductName $ResolvedVersion."
-    }
-
-    return $metadata
 }
 
 function Test-ArchiveDigest {
@@ -231,14 +216,18 @@ function Remove-StaleInstallArtifacts {
     }
 }
 
-function Resolve-Version {
+function Resolve-Release {
     $normalizedVersion = Normalize-Version -RawVersion $Release
     Assert-ValidReleaseVersion -Version $normalizedVersion
-    if ($normalizedVersion -ne "latest") {
-        return $normalizedVersion
-    }
 
-    if ([string]::IsNullOrWhiteSpace($ReleaseTagPrefix)) {
+    if ($normalizedVersion -ne "latest") {
+        $resolvedVersion = $normalizedVersion
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/$ReleaseTagPrefix$resolvedVersion"
+        return [PSCustomObject]@{
+            Version = $resolvedVersion
+            Metadata = $release
+        }
+    } elseif ([string]::IsNullOrWhiteSpace($ReleaseTagPrefix)) {
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
     } else {
         $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases?per_page=100"
@@ -257,7 +246,10 @@ function Resolve-Version {
         exit 1
     }
     Assert-ValidReleaseVersion -Version $resolvedVersion
-    return $resolvedVersion
+    return [PSCustomObject]@{
+        Version = $resolvedVersion
+        Metadata = $release
+    }
 }
 
 function Get-VersionFromBinary {
@@ -637,6 +629,8 @@ function Test-PackageContentsAreComplete {
     $resourcesDir = if ([string]::IsNullOrWhiteSpace($metadata.resourcesDir)) { "codex-resources" } else { $metadata.resourcesDir }
 
     $expectedFiles = @(
+        "codex-package.json",
+        "bin\codex-code-mode-host.exe",
         "$pathDir\rg.exe",
         "$resourcesDir\codex-command-runner.exe",
         "$resourcesDir\codex-windows-sandbox-setup.exe"
@@ -808,6 +802,63 @@ function Test-VisibleCodexCommand {
     }
 }
 
+function Resolve-WindowsArchitecture {
+    param(
+        [AllowNull()]
+        [string]$RuntimeArchitecture,
+        [AllowNull()]
+        [string]$Wow64Architecture,
+        [AllowNull()]
+        [string]$ProcessArchitecture
+    )
+
+    $rawArchitecture = if (-not [string]::IsNullOrWhiteSpace($RuntimeArchitecture)) {
+        $RuntimeArchitecture
+    } elseif (-not [string]::IsNullOrWhiteSpace($Wow64Architecture)) {
+        $Wow64Architecture
+    } else {
+        $ProcessArchitecture
+    }
+
+    switch -Regex ([string]$rawArchitecture) {
+        "^(?i:arm64)$" { return "Arm64" }
+        "^(?i:(?:amd64|x64))$" { return "X64" }
+        default { throw "Unsupported architecture: $rawArchitecture" }
+    }
+}
+
+function Get-WindowsRuntimeArchitecture {
+    try {
+        $runtimeInformation = [type]::GetType(
+            "System.Runtime.InteropServices.RuntimeInformation, System.Runtime.InteropServices.RuntimeInformation",
+            $false
+        )
+        if ($null -eq $runtimeInformation) {
+            $runtimeInformation = [AppDomain]::CurrentDomain.GetAssemblies() |
+                ForEach-Object {
+                    $_.GetType("System.Runtime.InteropServices.RuntimeInformation", $false)
+                } |
+                Where-Object { $null -ne $_ } |
+                Select-Object -First 1
+        }
+        if ($null -eq $runtimeInformation) {
+            return $null
+        }
+
+        $property = $runtimeInformation.GetProperty(
+            "OSArchitecture",
+            [System.Reflection.BindingFlags]"Public,Static"
+        )
+        if ($null -eq $property) {
+            return $null
+        }
+
+        return $property.GetValue($null).ToString()
+    } catch {
+        return $null
+    }
+}
+
 if ($env:OS -ne "Windows_NT") {
     Write-Error "install.ps1 supports Windows only. Use install.sh on macOS or Linux."
     exit 1
@@ -818,7 +869,11 @@ if (-not [Environment]::Is64BitOperatingSystem) {
     exit 1
 }
 
-$architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+$architecture = Resolve-WindowsArchitecture `
+    (Get-WindowsRuntimeArchitecture) `
+    $env:PROCESSOR_ARCHITEW6432 `
+    $env:PROCESSOR_ARCHITECTURE
+
 $target = $null
 $platformLabel = $null
 $npmTag = $null
@@ -861,7 +916,9 @@ if (-not [string]::IsNullOrWhiteSpace($env:OPEN_INTERPRETER_INSTALL_DIR)) {
 }
 
 $currentVersion = Get-CurrentInstalledVersion -StandaloneCurrentDir $currentDir
-$resolvedVersion = Resolve-Version
+$resolvedRelease = Resolve-Release
+$resolvedVersion = $resolvedRelease.Version
+$releaseMetadata = $resolvedRelease.Metadata
 $releaseName = "$resolvedVersion-$target"
 $releaseDir = Join-Path $releasesDir $releaseName
 
@@ -880,12 +937,12 @@ $oldStandaloneBackup = $null
 
 $packageAsset = "$PackageAssetStem-$target.tar.gz"
 $checksumAsset = "codex-package_SHA256SUMS"
-$packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ResolvedVersion $resolvedVersion
-$checksumMetadata = Find-ReleaseAssetMetadata -AssetName $checksumAsset -ResolvedVersion $resolvedVersion
+$packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ReleaseMetadata $releaseMetadata
+$checksumMetadata = Find-ReleaseAssetMetadata -AssetName $checksumAsset -ReleaseMetadata $releaseMetadata
 $installLayout = "Package"
 if (($null -eq $packageMetadata -or $null -eq $checksumMetadata) -and $PackageAssetStem -eq "codex-package") {
     $packageAsset = "codex-npm-$npmTag-$resolvedVersion.tgz"
-    $packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ResolvedVersion $resolvedVersion
+    $packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ReleaseMetadata $releaseMetadata
     if ($null -ne $packageMetadata) {
         $installLayout = "LegacyPlatformNpm"
     } else {

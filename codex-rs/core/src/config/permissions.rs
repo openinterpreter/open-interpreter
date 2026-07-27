@@ -127,7 +127,7 @@ pub(crate) fn network_proxy_config_from_profile_network(
     // Profile `network.enabled` controls sandbox network access. Profiles may
     // provide proxy settings for the feature gate to consume when that network
     // access is enabled, but they do not start the managed proxy on their own.
-    config.network.enabled = false;
+    config.enabled = false;
     config
 }
 
@@ -274,7 +274,7 @@ fn insert_special_filesystem_permission_toml(
             insert_scoped_filesystem_permission_toml(
                 entries,
                 ":workspace_roots".to_string(),
-                subpath.unwrap_or_else(|| PathBuf::from(".")),
+                subpath.unwrap_or_else(|| ".".to_string()),
                 access,
             );
         }
@@ -303,7 +303,7 @@ fn insert_special_filesystem_permission_toml(
 fn insert_scoped_filesystem_permission_toml(
     entries: &mut BTreeMap<String, FilesystemPermissionToml>,
     path: String,
-    subpath: PathBuf,
+    subpath: String,
     access: FileSystemAccessMode,
 ) {
     let permission = entries
@@ -311,13 +311,10 @@ fn insert_scoped_filesystem_permission_toml(
         .or_insert_with(|| FilesystemPermissionToml::Scoped(BTreeMap::new()));
     match permission {
         FilesystemPermissionToml::Scoped(scoped_entries) => {
-            scoped_entries.insert(subpath.to_string_lossy().into_owned(), access);
+            scoped_entries.insert(subpath, access);
         }
         FilesystemPermissionToml::Access(_) => {
-            *permission = FilesystemPermissionToml::Scoped(BTreeMap::from([(
-                subpath.to_string_lossy().into_owned(),
-                access,
-            )]));
+            *permission = FilesystemPermissionToml::Scoped(BTreeMap::from([(subpath, access)]));
         }
     }
 }
@@ -346,7 +343,6 @@ pub(crate) fn network_proxy_config_for_profile_selection(
 pub(crate) fn compile_permission_profile(
     permissions: &PermissionsToml,
     profile_name: &str,
-    policy_cwd: &Path,
     startup_warnings: &mut Vec<String>,
 ) -> io::Result<(FileSystemSandboxPolicy, NetworkSandboxPolicy)> {
     let profile = resolve_permission_profile(permissions, profile_name)?;
@@ -383,7 +379,6 @@ pub(crate) fn compile_permission_profile(
                     .extend(compile_filesystem_permission(
                         path,
                         permission,
-                        policy_cwd,
                         startup_warnings,
                     )?);
             }
@@ -412,7 +407,6 @@ pub(crate) fn compile_permission_profile_selection(
     permissions: Option<&PermissionsToml>,
     profile_name: &str,
     workspace_write: Option<&SandboxWorkspaceWrite>,
-    policy_cwd: &Path,
     startup_warnings: &mut Vec<String>,
 ) -> io::Result<(FileSystemSandboxPolicy, NetworkSandboxPolicy)> {
     if let Some(permission_profile) = builtin_permission_profile(profile_name, workspace_write) {
@@ -426,7 +420,7 @@ pub(crate) fn compile_permission_profile_selection(
             "default_permissions requires a `[permissions]` table",
         )
     })?;
-    compile_permission_profile(permissions, profile_name, policy_cwd, startup_warnings)
+    compile_permission_profile(permissions, profile_name, startup_warnings)
 }
 
 pub(crate) fn compile_permission_profile_workspace_roots(
@@ -524,7 +518,6 @@ fn compile_network_sandbox_policy(
 fn compile_filesystem_permission(
     path: &str,
     permission: &FilesystemPermissionToml,
-    policy_cwd: &Path,
     startup_warnings: &mut Vec<String>,
 ) -> io::Result<Vec<FileSystemSandboxEntry>> {
     let mut entries = Vec::new();
@@ -548,9 +541,7 @@ fn compile_filesystem_permission(
                     // exact-path parser so existing path semantics stay intact.
                     let entry = FileSystemSandboxEntry {
                         path: FileSystemPath::GlobPattern {
-                            pattern: compile_scoped_filesystem_pattern(
-                                path, subpath, *access, policy_cwd,
-                            )?,
+                            pattern: compile_scoped_filesystem_pattern(path, subpath, *access)?,
                         },
                         access: *access,
                     };
@@ -614,7 +605,9 @@ fn compile_scoped_filesystem_path(
     }
 
     if let Some(special) = parse_special_path(path) {
-        let subpath = parse_relative_subpath(subpath)?;
+        let subpath = parse_relative_subpath(subpath)?
+            .to_string_lossy()
+            .into_owned();
         let special = match special {
             FileSystemSpecialPath::ProjectRoots { .. } => Ok(FileSystemPath::Special {
                 value: FileSystemSpecialPath::project_roots(Some(subpath)),
@@ -643,7 +636,6 @@ fn compile_scoped_filesystem_pattern(
     path: &str,
     subpath: &str,
     access: FileSystemAccessMode,
-    _policy_cwd: &Path,
 ) -> io::Result<String> {
     // Pattern entries currently mean deny-read only. Supporting broader access
     // modes here would imply glob-based read/write allow semantics that the
@@ -901,8 +893,7 @@ fn maybe_push_unknown_special_path_warning(
         startup_warnings,
         match subpath.as_deref() {
             Some(subpath) => format!(
-                "Configured filesystem path `{path}` with nested entry `{}` is not recognized by this version of Codex and will be ignored. Upgrade Codex if this path is required.",
-                subpath.display()
+                "Configured filesystem path `{path}` with nested entry `{subpath}` is not recognized by this version of Codex and will be ignored. Upgrade Codex if this path is required."
             ),
             None => format!(
                 "Configured filesystem path `{path}` is not recognized by this version of Codex and will be ignored. Upgrade Codex if this path is required."

@@ -245,6 +245,15 @@ where
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_screen_size_and_cursor_position_for_test(
+        backend: B,
+        screen_size: Size,
+        cursor_pos: Position,
+    ) -> Self {
+        Self::with_screen_size_and_cursor_position(backend, screen_size, cursor_pos)
+    }
+
     /// Get a Frame object which provides a consistent view into the terminal state for rendering.
     pub fn get_frame(&mut self) -> Frame<'_> {
         Frame {
@@ -492,22 +501,6 @@ where
         self.previous_buffer_mut().reset();
     }
 
-    /// Clear terminal scrollback (if supported) and force a full redraw.
-    pub fn clear_scrollback(&mut self) -> io::Result<()> {
-        if self.viewport_area.is_empty() {
-            return Ok(());
-        }
-        let home = Position { x: 0, y: 0 };
-        // Use an explicit cursor-home around scrollback purge for terminals that
-        // are sensitive to inline viewport cursor placement (e.g. Terminal.app).
-        self.set_cursor_position(home)?;
-        queue!(self.backend, Clear(crossterm::terminal::ClearType::Purge))?;
-        self.set_cursor_position(home)?;
-        std::io::Write::flush(&mut self.backend)?;
-        self.previous_buffer_mut().reset();
-        Ok(())
-    }
-
     /// Clear the entire visible screen (not just the viewport) and force a full redraw.
     pub fn clear_visible_screen(&mut self) -> io::Result<()> {
         let home = Position { x: 0, y: 0 };
@@ -540,10 +533,6 @@ where
         self.visible_history_rows = 0;
         self.previous_buffer_mut().reset();
         Ok(())
-    }
-
-    pub fn visible_history_rows(&self) -> u16 {
-        self.visible_history_rows
     }
 
     pub(crate) fn note_history_rows_inserted(&mut self, inserted_rows: u16) {

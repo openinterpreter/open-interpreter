@@ -38,6 +38,10 @@ jobs:
               /tmp/uv/bin/uv run --frozen --no-sync pytest
             '
 
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
   sdks:
     runs-on:
       group: ${{ github.event.repository.name }}-runners
@@ -155,6 +159,9 @@ jobs:
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
-          path: |
-            ~/.cache/bazel-repo-cache
+          path: ${{ steps.setup_bazel.outputs.repository-cache-path }}
           key: bazel-cache-x86_64-unknown-linux-gnu-${{ hashFiles('MODULE.bazel', 'codex-rs/Cargo.lock', 'codex-rs/Cargo.toml') }}
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree

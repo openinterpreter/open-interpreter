@@ -1,11 +1,56 @@
 ---
-title: Providers
-description: Supported provider ids, wire APIs, auth modes, and catalog generation.
+title: Model Providers
+description: Choose a provider, connect an account or API key, and use the right harness for its models.
 ---
 
-Open Interpreter separates the provider from the model. The active provider
-decides where requests are sent, how credentials are attached, which wire API
-is used, and which bundled model metadata seeds the picker.
+Providers connect Open Interpreter to model services. A provider decides where
+requests are sent and how you authenticate; a model is the model ID you run; a
+harness controls the agent-facing prompt, tools, and message behavior.
+
+For most providers, start Open Interpreter and use `/model`:
+
+```text
+> /model
+```
+
+Choose the provider, authenticate or set the requested environment variable,
+then choose a model. Open Interpreter automatically selects a provider-specific
+harness when one is configured for that model family. You can inspect or
+override it with `/harness`.
+
+## Provider Guides
+
+| Provider family | Authentication | Default behavior | Guide |
+| --- | --- | --- | --- |
+| Kimi K3 and Moonshot | Kimi Code sign-in, `KIMI_API_KEY`, or `MOONSHOT_API_KEY` | `kimi-code` harness | [Kimi K3](/docs/kimi-k3) |
+| DeepSeek | `DEEPSEEK_API_KEY` | `claude-code-bare` harness | [DeepSeek](/docs/deepseek) |
+| Z.AI, Zhipu AI, and GLM | `ZAI_API_KEY` or `ZHIPU_API_KEY` | Generic Chat, or `zcode` with a Messages endpoint | [Z.AI, GLM, and ZCode](/docs/zai-glm) |
+
+These guides cover the provider IDs, current model-selection path, API or
+subscription setup, harness behavior, direct CLI use, and common mistakes.
+
+Google AI Studio is available as provider `google`. Set `GEMINI_API_KEY`, then
+select Google and a current Gemini model with `/model`. Requests use Google's
+OpenAI-compatible Chat Completions endpoint and the generic chat harness.
+
+## Provider, Model, and Harness
+
+Keep the three layers separate when troubleshooting:
+
+| Layer | Example | What it controls |
+| --- | --- | --- |
+| Provider | `deepseek` | Endpoint, credentials, and wire API |
+| Model | `deepseek-v4-pro` | The model sent to that endpoint |
+| Harness | `claude-code-bare` | Agent prompt, tools, and request shaping |
+
+The provider's `wire_api` must support the selected harness. See
+[Harness](/docs/harness) for the compatibility matrix.
+
+## Provider Reference
+
+The active provider decides where requests are sent, how credentials are
+attached, which wire API is used, and which bundled model metadata seeds the
+picker.
 
 The source of truth is code, not this table:
 
@@ -85,6 +130,15 @@ Anthropic-style API-key auth uses the `x-api-key` header and automatically adds
 `anthropic-version: 2023-06-01`. Other API-key providers use
 `Authorization: Bearer ...`.
 
+Kimi has two distinct provider paths:
+
+- `kimi-for-coding` uses `https://api.kimi.com/coding/v1` and supports the
+  built-in Kimi sign-in flow for an eligible Kimi Code subscription. It can
+  also read a compatible token from `KIMI_API_KEY`.
+- `moonshotai` uses `https://api.moonshot.ai/v1` with a Moonshot Platform API
+  key from `MOONSHOT_API_KEY`. A Moonshot Platform key is not a Kimi Code
+  subscription token.
+
 Command-backed auth example:
 
 ```toml
@@ -121,10 +175,10 @@ Common generated providers include:
 | `perplexity-agent` | Perplexity Agent | `chat` | `PERPLEXITY_API_KEY` | 18 |
 | `requesty` | Requesty | `chat` | `REQUESTY_API_KEY` | 37 |
 | `deepseek` | DeepSeek | `chat` | `DEEPSEEK_API_KEY` | 4 |
-| `moonshotai` | Moonshot AI | `chat` | `MOONSHOT_API_KEY` | 16 |
+| `moonshotai` | Moonshot AI | `chat` | `MOONSHOT_API_KEY` | 17 |
 | `moonshotai-cn` | Moonshot AI (China) | `chat` | `MOONSHOT_API_KEY` | 7 |
 | `zhipuai` | Zhipu AI | `chat` | `ZHIPU_API_KEY` | 12 |
-| `zai` | Z.AI | `chat` | `ZHIPU_API_KEY` | 13 |
+| `zai` | Z.AI | `chat` | `ZAI_API_KEY` | 14 |
 | `siliconflow` | SiliconFlow | `chat` | `SILICONFLOW_API_KEY` | 76 |
 | `siliconflow-cn` | SiliconFlow (China) | `chat` | `SILICONFLOW_CN_API_KEY` | 77 |
 | `alibaba` | Alibaba | `chat` | `DASHSCOPE_API_KEY` | 43 |
@@ -173,7 +227,7 @@ Common generated providers include:
 | `inference` | Inference | `chat` | `INFERENCE_API_KEY` | 8 |
 | `io-net` | IO.NET | `chat` | `IOINTELLIGENCE_API_KEY` | 17 |
 | `kilo` | Kilo Gateway | `chat` | `KILO_API_KEY` | 258 |
-| `kimi-for-coding` | Kimi For Coding | `chat` | `KIMI_API_KEY` | 3 |
+| `kimi-for-coding` | Kimi For Coding | `chat` | `KIMI_API_KEY` | 6 |
 | `kuae-cloud-coding-plan` | KUAE Cloud Coding Plan | `chat` | `KUAE_API_KEY` | 1 |
 | `lilac` | Lilac | `chat` | `LILAC_API_KEY` | 4 |
 | `llmgateway` | LLM Gateway | `chat` | `LLMGATEWAY_API_KEY` | 156 |
@@ -211,7 +265,7 @@ Common generated providers include:
 | `xiaomi-token-plan-ams` | Xiaomi Token Plan (Europe) | `chat` | `XIAOMI_API_KEY` | 5 |
 | `xiaomi-token-plan-sgp` | Xiaomi Token Plan (Singapore) | `chat` | `XIAOMI_API_KEY` | 4 |
 | `xpersona` | Xpersona | `chat` | `XPERSONA_API_KEY` | 2 |
-| `zai-coding-plan` | Z.AI Coding Plan | `chat` | `ZHIPU_API_KEY` | 6 |
+| `zai-coding-plan` | Z.AI Coding Plan | `chat` | `ZAI_API_KEY` | 6 |
 | `zenmux` | ZenMux | `chat` | `ZENMUX_API_KEY` | 110 |
 | `zhipuai-coding-plan` | Zhipu AI Coding Plan | `chat` | `ZHIPU_API_KEY` | 7 |
 
@@ -237,9 +291,9 @@ harness mode from the provider/model family:
 | Match | Default harness |
 | --- | --- |
 | `wire_api = "messages"`, Anthropic provider/name/base URL, or `claude` model ids | `claude-code` |
-| `kimi`, `moonshot`, `api.kimi.com`, `api.moonshot.ai`, or `api.moonshot.cn` | `kimi-cli` |
+| `kimi`, `moonshot`, `api.kimi.com`, `api.moonshot.ai`, or `api.moonshot.cn` | `kimi-code` |
 | `qwen`, `qwq`, `dashscope`, or DashScope compatible-mode base URLs | `qwen-code` |
-| `deepseek` or `api.deepseek.com` | `deepseek-tui` |
+| `deepseek` or `api.deepseek.com` | `claude-code-bare` |
 
 You can override this with `harness = "..."` in config. See
 [Harness](/docs/harness) for route compatibility.
@@ -253,7 +307,16 @@ python3 scripts/write_provider_catalog.py
 python3 scripts/write_model_compatibility_catalog.py
 ```
 
+To refresh only selected hosted providers while preserving every other
+generated entry, repeat `--provider` as needed:
+
+```bash
+python3 scripts/write_provider_catalog.py \
+  --provider moonshotai \
+  --provider kimi-for-coding
+```
+
 Live sources require their documented provider auth environment variables. For
-example, Moonshot requires `MOONSHOT_API_KEY` or `KIMI_API_KEY`, and Groq
-requires `GROQ_API_KEY`. Missing auth is a generator failure, not a reason to
-silently keep stale data.
+example, Moonshot requires `MOONSHOT_API_KEY` or `KIMI_API_KEY`, Z.AI requires
+`ZAI_API_KEY` or `ZHIPU_API_KEY`, and Groq requires `GROQ_API_KEY`. Missing
+auth is a generator failure, not a reason to silently keep stale data.

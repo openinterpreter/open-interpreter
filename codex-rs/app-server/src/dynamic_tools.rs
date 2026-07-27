@@ -8,8 +8,12 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use tracing::error;
 
+use crate::image_url::REMOTE_IMAGE_URL_ERROR;
+use crate::image_url::is_remote_image_url;
 use crate::outgoing_message::ClientRequestResult;
 use crate::server_request_error::is_turn_transition_server_request_error;
+
+const INVALID_AUDIO_URL_ERROR: &str = "audio URLs must use an inline data URL";
 
 pub(crate) async fn on_call_response(
     call_id: String,
@@ -54,6 +58,38 @@ pub(crate) async fn on_call_response(
 
 fn decode_response(value: serde_json::Value) -> (DynamicToolCallResponse, Option<String>) {
     match serde_json::from_value::<DynamicToolCallResponse>(value) {
+        Ok(response)
+            if response.content_items.iter().any(|item| {
+                matches!(
+                    item,
+                    DynamicToolCallOutputContentItem::InputImage { image_url }
+                        if is_remote_image_url(image_url)
+                )
+            }) =>
+        {
+            error!(
+                message = REMOTE_IMAGE_URL_ERROR,
+                "dynamic tool response was invalid"
+            );
+            fallback_response(REMOTE_IMAGE_URL_ERROR)
+        }
+        Ok(response)
+            if response.content_items.iter().any(|item| {
+                matches!(
+                    item,
+                    DynamicToolCallOutputContentItem::InputAudio { audio_url }
+                        if !audio_url
+                            .get(.."data:".len())
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+                )
+            }) =>
+        {
+            error!(
+                message = INVALID_AUDIO_URL_ERROR,
+                "dynamic tool response was invalid"
+            );
+            fallback_response(INVALID_AUDIO_URL_ERROR)
+        }
         Ok(response) => (response, None),
         Err(err) => {
             error!("failed to deserialize DynamicToolCallResponse: {err}");

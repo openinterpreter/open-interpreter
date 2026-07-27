@@ -409,11 +409,13 @@ mod tests {
         };
         let read_thread = Thread {
             id: read_thread_id.to_string(),
+            extra: None,
             session_id: read_thread_id.to_string(),
             forked_from_id: None,
             parent_thread_id: None,
             preview: "read thread".to_string(),
             ephemeral: false,
+            history_mode: Default::default(),
             model_provider: "read-provider".to_string(),
             created_at: 1,
             updated_at: 2,
@@ -423,6 +425,7 @@ mod tests {
             cwd: test_path_buf("/tmp/read").abs(),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Unknown,
+            can_accept_direct_input: None,
             thread_source: None,
             agent_nickname: None,
             agent_role: None,

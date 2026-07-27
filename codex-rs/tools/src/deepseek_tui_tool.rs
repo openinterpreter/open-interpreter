@@ -64,7 +64,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn deepseek_tui_tool_surface_matches_captured_count_and_order() {
+    fn deepseek_tui_tool_surface_has_expected_count_and_order() {
         let tools = create_deepseek_tui_tools();
 
         assert_eq!(tools.len(), 84);

@@ -142,22 +142,24 @@ impl<T: HttpTransport> ChatCompletionsCompatClient<T> {
                 .await;
             let response = match response_result {
                 Ok(response) => response,
-                Err(error)
+                Err(error) => {
                     if let Some(retry_body) =
-                        openrouter_affordability_retry_body(is_openrouter, &body, &error) =>
-                {
-                    self.execute_with(
-                        Method::POST,
-                        "chat/completions",
-                        extra_headers,
-                        Some(retry_body),
-                        move |request| {
-                            request.compression = request_compression;
-                        },
-                    )
-                    .await?
+                        openrouter_affordability_retry_body(is_openrouter, &body, &error)
+                    {
+                        self.execute_with(
+                            Method::POST,
+                            "chat/completions",
+                            extra_headers,
+                            Some(retry_body),
+                            move |request| {
+                                request.compression = request_compression;
+                            },
+                        )
+                        .await?
+                    } else {
+                        return Err(error);
+                    }
                 }
-                Err(error) => return Err(error),
             };
             let sse = synthetic_sse_from_chat_completion_response(&response.body)?;
             let bytes = stream::once(async move { Ok(Bytes::from(sse)) });
@@ -186,26 +188,28 @@ impl<T: HttpTransport> ChatCompletionsCompatClient<T> {
             .await;
         let stream_response = match stream_result {
             Ok(response) => response,
-            Err(error)
+            Err(error) => {
                 if let Some(retry_body) =
-                    openrouter_affordability_retry_body(is_openrouter, &body, &error) =>
-            {
-                self.stream_with(
-                    Method::POST,
-                    "chat/completions",
-                    extra_headers,
-                    Some(retry_body),
-                    move |request| {
-                        request.headers.insert(
-                            http::header::ACCEPT,
-                            HeaderValue::from_static("text/event-stream"),
-                        );
-                        request.compression = request_compression;
-                    },
-                )
-                .await?
+                    openrouter_affordability_retry_body(is_openrouter, &body, &error)
+                {
+                    self.stream_with(
+                        Method::POST,
+                        "chat/completions",
+                        extra_headers,
+                        Some(retry_body),
+                        move |request| {
+                            request.headers.insert(
+                                http::header::ACCEPT,
+                                HeaderValue::from_static("text/event-stream"),
+                            );
+                            request.compression = request_compression;
+                        },
+                    )
+                    .await?
+                } else {
+                    return Err(error);
+                }
             }
-            Err(error) => return Err(error),
         };
 
         Ok(spawn_chat_stream(
@@ -336,7 +340,7 @@ fn sanitize_chat_body_for_provider(body: &mut Value, base_url: &str) {
     if !is_groq {
         return;
     }
-    cap_chat_token_limits(body, 32_768);
+    cap_chat_token_limits(body, /*cap*/ 32_768);
     if let Some(obj) = body.as_object_mut() {
         // `prompt_cache_key` is a Kimi/OpenAI extension (kimi-cli, kimi-code).
         obj.remove("prompt_cache_key");
@@ -777,7 +781,8 @@ mod tests {
         });
 
         let retry_body =
-            openrouter_affordability_retry_body(true, &body, &error).expect("retry body");
+            openrouter_affordability_retry_body(/*is_openrouter*/ true, &body, &error)
+                .expect("retry body");
 
         assert_eq!(retry_body["max_completion_tokens"], serde_json::json!(140));
         assert_eq!(retry_body["max_tokens"], serde_json::json!(140));
@@ -826,14 +831,15 @@ mod tests {
                     text: "hello".to_string(),
                 }],
                 phase: None,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
-            tools: Vec::new(),
+            tools: Some(Vec::new()),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
             stream: true,
+            stream_options: None,
             include: Vec::new(),
             service_tier: None,
             prompt_cache_key: None,

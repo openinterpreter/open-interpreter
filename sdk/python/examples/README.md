@@ -16,7 +16,7 @@ multimodal or structured input lists.
 - Python `>=3.10`
 - Install the SDK for the same Python interpreter you will use to run examples
 
-Install the published beta:
+Install the published SDK:
 
 ```bash
 python -m pip install openai-codex
@@ -72,7 +72,7 @@ python examples/01_quickstart_constructor/async.py
 - `06_thread_lifecycle_and_controls/`
   - thread lifecycle + control calls
 - `07_image_and_text/`
-  - remote image URL + text multimodal turn
+  - image data URL + text multimodal turn
 - `08_local_image_and_text/`
   - local image + text multimodal turn using a generated temporary sample image
 - `09_async_parity/`

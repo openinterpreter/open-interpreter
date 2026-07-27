@@ -8,7 +8,7 @@ pub mod model_presets;
 pub mod provider_catalog_models;
 pub mod test_support;
 
-pub use codex_app_server_protocol::AuthMode;
+pub use codex_protocol::auth::AuthMode;
 pub use config::ModelsManagerConfig;
 
 /// Load the bundled model catalog shipped with `codex-models-manager`.
@@ -19,10 +19,26 @@ pub fn bundled_models_response()
 
 /// Convert the client version string to a whole version string (e.g. "1.2.3-alpha.4" -> "1.2.3").
 pub fn client_version_to_whole() -> String {
-    format!(
-        "{}.{}.{}",
-        env!("CARGO_PKG_VERSION_MAJOR"),
-        env!("CARGO_PKG_VERSION_MINOR"),
-        env!("CARGO_PKG_VERSION_PATCH")
-    )
+    client_version_to_whole_for_product(codex_product_info::Product::current())
+}
+
+fn client_version_to_whole_for_product(product: codex_product_info::Product) -> String {
+    let compatibility_version = product.codex_compatibility_version();
+    compatibility_version
+        .split_once('-')
+        .map_or(compatibility_version, |(whole, _)| whole)
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_interpreter_advertises_embedded_codex_compatibility_version() {
+        assert_eq!(
+            client_version_to_whole_for_product(codex_product_info::Product::OpenInterpreter),
+            "0.145.0"
+        );
+    }
 }

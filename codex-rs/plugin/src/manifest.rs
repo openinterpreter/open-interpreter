@@ -17,7 +17,7 @@ pub struct PluginManifest<Resource> {
 /// Component resources declared by a plugin manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginManifestPaths<Resource> {
-    pub skills: Option<Resource>,
+    pub skills: Vec<Resource>,
     pub mcp_servers: Option<PluginManifestMcpServers<Resource>>,
     pub apps: Option<Resource>,
     pub hooks: Option<PluginManifestHooks<Resource>>,
@@ -53,6 +53,7 @@ pub struct PluginManifestInterface<Resource> {
     pub brand_color: Option<String>,
     pub composer_icon: Option<Resource>,
     pub logo: Option<Resource>,
+    pub logo_dark: Option<Resource>,
     pub screenshots: Vec<Resource>,
 }
 
@@ -72,6 +73,7 @@ impl<Resource> Default for PluginManifestInterface<Resource> {
             brand_color: None,
             composer_icon: None,
             logo: None,
+            logo_dark: None,
             screenshots: Vec::new(),
         }
     }
@@ -88,7 +90,8 @@ impl<Resource> PluginManifest<Resource> {
             .unwrap_or(&self.name)
     }
 
-    pub(crate) fn try_map_resources<Mapped, Error>(
+    /// Maps every path-bearing resource in the manifest.
+    pub fn try_map_resources<Mapped, Error>(
         self,
         mut map: impl FnMut(Resource) -> Result<Mapped, Error>,
     ) -> Result<PluginManifest<Mapped>, Error> {
@@ -141,6 +144,7 @@ impl<Resource> PluginManifest<Resource> {
                     brand_color,
                     composer_icon,
                     logo,
+                    logo_dark,
                     screenshots,
                 } = interface;
                 Some(PluginManifestInterface {
@@ -157,6 +161,7 @@ impl<Resource> PluginManifest<Resource> {
                     brand_color,
                     composer_icon: composer_icon.map(&mut map).transpose()?,
                     logo: logo.map(&mut map).transpose()?,
+                    logo_dark: logo_dark.map(&mut map).transpose()?,
                     screenshots: screenshots
                         .into_iter()
                         .map(&mut map)
@@ -172,7 +177,10 @@ impl<Resource> PluginManifest<Resource> {
             description,
             keywords,
             paths: PluginManifestPaths {
-                skills: skills.map(&mut map).transpose()?,
+                skills: skills
+                    .into_iter()
+                    .map(&mut map)
+                    .collect::<Result<Vec<_>, _>>()?,
                 mcp_servers,
                 apps: apps.map(&mut map).transpose()?,
                 hooks,

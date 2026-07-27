@@ -1,6 +1,7 @@
 use crate::acl::add_allow_ace;
 use crate::acl::add_deny_write_ace;
 use crate::acl::allow_null_device;
+use crate::acl::ensure_allow_write_aces;
 use crate::allow::AllowDenyPaths;
 use crate::allow::compute_allow_paths_for_permissions;
 use crate::cap::load_or_create_cap_sids;
@@ -294,7 +295,7 @@ pub(crate) fn apply_legacy_session_acl_rules(
                 let Some(root_sid) = matching_root_capability(p, acl_sids.write_root_sids) else {
                     continue;
                 };
-                let _ = add_allow_ace(p, root_sid.sid.as_ptr());
+                let _ = ensure_allow_write_aces(p, &[root_sid.sid.as_ptr()]);
             }
         }
         for p in &deny {
@@ -357,6 +358,7 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
     deny_read_paths_override: &[PathBuf],
     deny_write_paths_override: &[PathBuf],
     proxy_enforced: bool,
+    proxy_settings_mode: crate::WindowsSandboxProxySettingsMode,
 ) -> Result<ElevatedSpawnContext> {
     normalize_null_device_env(env_map);
     ensure_non_interactive_pager(env_map);
@@ -412,6 +414,7 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
             deny_write_paths_override
         },
         proxy_enforced,
+        proxy_settings_mode,
     )?;
     let caps = load_or_create_cap_sids(codex_home)?;
     let (psid_to_use, cap_sids) = if uses_write_capabilities {

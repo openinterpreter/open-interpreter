@@ -8,8 +8,8 @@
 //!   and rewrite only the declared arguments into the provided-file payload
 //!   shape expected by the downstream Apps tool.
 //!
-//! Model-visible schema masking is owned by `codex-mcp` alongside MCP tool
-//! inventory, so this module only handles the execution-time argument rewrite.
+//! The model-facing local-path schema is owned by `codex-mcp` alongside MCP tool inventory, so this
+//! module only handles uploading the files and rewriting the execution-time arguments.
 
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -18,14 +18,15 @@ use codex_api::upload_openai_file;
 use codex_login::CodexAuth;
 use codex_utils_path_uri::PathUri;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 
 pub(crate) async fn rewrite_mcp_tool_arguments_for_openai_files(
     sess: &Session,
     turn_context: &TurnContext,
     arguments_value: Option<JsonValue>,
-    openai_file_input_params: Option<&[String]>,
+    openai_file_input_optional_fields: Option<&HashMap<String, Vec<String>>>,
 ) -> Result<Option<JsonValue>, String> {
-    let Some(openai_file_input_params) = openai_file_input_params else {
+    let Some(openai_file_input_optional_fields) = openai_file_input_optional_fields else {
         return Ok(arguments_value);
     };
 
@@ -38,13 +39,18 @@ pub(crate) async fn rewrite_mcp_tool_arguments_for_openai_files(
     let auth = sess.services.auth_manager.auth().await;
     let mut rewritten_arguments = arguments.clone();
 
-    for field_name in openai_file_input_params {
+    for (field_name, optional_fields) in openai_file_input_optional_fields {
         let Some(value) = arguments.get(field_name) else {
             continue;
         };
-        let Some(uploaded_value) =
-            rewrite_argument_value_for_openai_files(turn_context, auth.as_ref(), field_name, value)
-                .await?
+        let Some(uploaded_value) = rewrite_argument_value_for_openai_files(
+            turn_context,
+            auth.as_ref(),
+            field_name,
+            optional_fields,
+            value,
+        )
+        .await?
         else {
             continue;
         };
@@ -62,6 +68,7 @@ async fn rewrite_argument_value_for_openai_files(
     turn_context: &TurnContext,
     auth: Option<&CodexAuth>,
     field_name: &str,
+    optional_fields: &[String],
     value: &JsonValue,
 ) -> Result<Option<JsonValue>, String> {
     match value {
@@ -71,6 +78,7 @@ async fn rewrite_argument_value_for_openai_files(
                 auth,
                 field_name,
                 /*index*/ None,
+                optional_fields,
                 file_path,
             )
             .await?;
@@ -87,6 +95,7 @@ async fn rewrite_argument_value_for_openai_files(
                     auth,
                     field_name,
                     Some(index),
+                    optional_fields,
                     file_path,
                 )
                 .await?;
@@ -103,6 +112,7 @@ async fn build_uploaded_argument_value(
     auth: Option<&CodexAuth>,
     field_name: &str,
     index: Option<usize>,
+    optional_fields: &[String],
     file_path: &str,
 ) -> Result<JsonValue, String> {
     let contextualize_error = |error: String| match index {
@@ -159,28 +169,46 @@ async fn build_uploaded_argument_value(
         .unwrap_or("file")
         .to_string();
     let upload_auth = codex_model_provider::auth_provider_from_auth(auth);
+    let http_client_factory = turn_context.config.http_client_factory();
     let uploaded = upload_openai_file(
         turn_context.config.chatgpt_base_url.trim_end_matches('/'),
         upload_auth.as_ref(),
+        &http_client_factory,
         file_name,
         metadata.size,
         contents,
     )
     .await
     .map_err(|error| contextualize_error(error.to_string()))?;
-    Ok(serde_json::json!({
-        "download_url": uploaded.download_url,
-        "file_id": uploaded.file_id,
-        "mime_type": uploaded.mime_type,
-        "file_name": uploaded.file_name,
-        "uri": uploaded.uri,
-        "file_size_bytes": uploaded.file_size_bytes,
-    }))
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "download_url".to_string(),
+        JsonValue::String(uploaded.download_url),
+    );
+    payload.insert("file_id".to_string(), JsonValue::String(uploaded.file_id));
+    if optional_fields
+        .iter()
+        .any(|optional_field| optional_field == "mime_type")
+        && let Some(mime_type) = uploaded.mime_type
+    {
+        payload.insert("mime_type".to_string(), JsonValue::String(mime_type));
+    }
+    if optional_fields
+        .iter()
+        .any(|optional_field| optional_field == "file_name")
+    {
+        payload.insert(
+            "file_name".to_string(),
+            JsonValue::String(uploaded.file_name),
+        );
+    }
+    Ok(JsonValue::Object(payload))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::environment_selection::TurnEnvironmentState;
     use crate::session::tests::make_session_and_context;
     use crate::session::turn_context::TurnEnvironment;
     use codex_utils_absolute_path::AbsolutePathBuf;
@@ -193,15 +221,15 @@ mod tests {
     fn set_primary_environment_cwd(turn_context: &mut TurnContext, cwd: &Path) {
         let cwd = AbsolutePathBuf::try_from(cwd).expect("absolute path");
         turn_context.permission_profile = codex_protocol::models::PermissionProfile::Disabled;
-        let primary = turn_context
-            .environments
-            .turn_environments
-            .first_mut()
-            .expect("primary environment");
+        let TurnEnvironmentState::Ready(primary) = &mut turn_context.environments.environments[0]
+        else {
+            panic!("expected ready primary environment");
+        };
         *primary = TurnEnvironment::new(
             primary.environment_id.clone(),
             Arc::clone(&primary.environment),
             PathUri::from_abs_path(&cwd),
+            Vec::new(),
             primary.shell.clone(),
         );
     }
@@ -217,7 +245,7 @@ mod tests {
             &session,
             &Arc::new(turn_context),
             arguments.clone(),
-            /*openai_file_input_params*/ None,
+            /*openai_file_input_optional_fields*/ None,
         )
         .await
         .expect("rewrite should succeed");
@@ -226,7 +254,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_uploaded_argument_value_uploads_environment_file() {
+    async fn build_uploaded_argument_value_includes_schema_declared_optional_fields() {
         use wiremock::Mock;
         use wiremock::MockServer;
         use wiremock::ResponseTemplate;
@@ -288,6 +316,7 @@ mod tests {
             Some(&auth),
             "file",
             /*index*/ None,
+            &["mime_type".to_string(), "file_name".to_string()],
             "file_report.csv",
         )
         .await
@@ -300,8 +329,6 @@ mod tests {
                 "file_id": "file_123",
                 "mime_type": "text/csv",
                 "file_name": "file_report.csv",
-                "uri": "sediment://file_123",
-                "file_size_bytes": 5,
             })
         );
     }
@@ -322,6 +349,7 @@ mod tests {
             Some(&auth),
             "file",
             /*index*/ None,
+            &[],
             "oversized.bin",
         )
         .await
@@ -332,7 +360,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rewrite_argument_value_for_openai_files_rewrites_scalar_path() {
+    async fn rewrite_argument_value_for_openai_files_omits_undeclared_optional_fields() {
         use wiremock::Mock;
         use wiremock::MockServer;
         use wiremock::ResponseTemplate;
@@ -392,6 +420,7 @@ mod tests {
             &turn_context,
             Some(&auth),
             "file",
+            &[],
             &serde_json::json!("file_report.csv"),
         )
         .await
@@ -402,10 +431,6 @@ mod tests {
             Some(serde_json::json!({
                 "download_url": format!("{}/download/file_123", server.uri()),
                 "file_id": "file_123",
-                "mime_type": "text/csv",
-                "file_name": "file_report.csv",
-                "uri": "sediment://file_123",
-                "file_size_bytes": 5,
             }))
         );
     }
@@ -506,6 +531,7 @@ mod tests {
             &turn_context,
             Some(&auth),
             "files",
+            &[],
             &serde_json::json!(["one.csv", "two.csv"]),
         )
         .await
@@ -517,18 +543,10 @@ mod tests {
                 {
                     "download_url": format!("{}/download/file_1", server.uri()),
                     "file_id": "file_1",
-                    "mime_type": "text/csv",
-                    "file_name": "one.csv",
-                    "uri": "sediment://file_1",
-                    "file_size_bytes": 3,
                 },
                 {
                     "download_url": format!("{}/download/file_2", server.uri()),
                     "file_id": "file_2",
-                    "mime_type": "text/csv",
-                    "file_name": "two.csv",
-                    "uri": "sediment://file_2",
-                    "file_size_bytes": 3,
                 }
             ]))
         );
@@ -546,7 +564,7 @@ mod tests {
             Some(serde_json::json!({
                 "file": "/definitely/missing/file.csv",
             })),
-            Some(&["file".to_string()]),
+            Some(&HashMap::from([("file".to_string(), Vec::new())])),
         )
         .await
         .expect_err("missing file should fail");

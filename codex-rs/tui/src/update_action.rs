@@ -14,6 +14,8 @@ pub enum UpdateAction {
     NpmGlobalLatest,
     /// Update via `bun install -g @openai/codex@latest`.
     BunGlobalLatest,
+    /// Update via `pnpm add -g @openai/codex@latest`.
+    PnpmGlobalLatest,
     /// Update via `brew upgrade codex`.
     BrewUpgrade,
     /// Update via `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh`.
@@ -35,11 +37,12 @@ impl UpdateAction {
     ) -> Option<Self> {
         let is_codex = product == codex_product_info::Product::Codex;
         match &context.method {
-            // npm, bun, and Homebrew distribute Codex; Open Interpreter ships
+            // npm, bun, pnpm, and Homebrew distribute Codex; Open Interpreter ships
             // only the standalone package and must never offer to "update" by
             // installing OpenAI's Codex.
             InstallMethod::Npm => is_codex.then_some(UpdateAction::NpmGlobalLatest),
             InstallMethod::Bun => is_codex.then_some(UpdateAction::BunGlobalLatest),
+            InstallMethod::Pnpm => is_codex.then_some(UpdateAction::PnpmGlobalLatest),
             InstallMethod::Brew => is_codex.then_some(UpdateAction::BrewUpgrade),
             InstallMethod::Standalone { platform, .. } => Some(match platform {
                 StandalonePlatform::Unix => UpdateAction::StandaloneUnix,
@@ -61,6 +64,7 @@ impl UpdateAction {
         match self {
             UpdateAction::NpmGlobalLatest => ("npm", &["install", "-g", "@openai/codex"]),
             UpdateAction::BunGlobalLatest => ("bun", &["install", "-g", "@openai/codex"]),
+            UpdateAction::PnpmGlobalLatest => ("pnpm", &["add", "-g", "@openai/codex"]),
             UpdateAction::BrewUpgrade => ("brew", &["upgrade", "--cask", "codex"]),
             UpdateAction::StandaloneUnix => ("sh", source.standalone_unix_update_args()),
             UpdateAction::StandaloneWindows => {
@@ -72,12 +76,6 @@ impl UpdateAction {
     /// Returns string representation of the command-line arguments for invoking the update.
     pub fn command_str(self) -> String {
         let (command, args) = self.command_args();
-        shlex::try_join(std::iter::once(command).chain(args.iter().copied()))
-            .unwrap_or_else(|_| format!("{command} {}", args.join(" ")))
-    }
-
-    pub(crate) fn command_str_for_source(self, source: ProductUpdateSource) -> String {
-        let (command, args) = self.command_args_for_source(source);
         shlex::try_join(std::iter::once(command).chain(args.iter().copied()))
             .unwrap_or_else(|_| format!("{command} {}", args.join(" ")))
     }
@@ -153,6 +151,13 @@ mod tests {
                 package_layout: None,
             }),
             Some(UpdateAction::BunGlobalLatest)
+        );
+        assert_eq!(
+            UpdateAction::from_install_context(&InstallContext {
+                method: InstallMethod::Pnpm,
+                package_layout: None,
+            }),
+            Some(UpdateAction::PnpmGlobalLatest)
         );
         assert_eq!(
             UpdateAction::from_install_context(&InstallContext {

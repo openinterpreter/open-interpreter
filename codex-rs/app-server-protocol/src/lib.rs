@@ -1,7 +1,7 @@
 mod experimental_api;
 mod export;
-mod jsonrpc_lite;
 mod protocol;
+pub mod rpc;
 mod schema_fixtures;
 
 pub use experimental_api::*;
@@ -12,11 +12,11 @@ pub use export::generate_json_with_experimental;
 pub use export::generate_ts;
 pub use export::generate_ts_with_options;
 pub use export::generate_types;
-pub use jsonrpc_lite::*;
 pub use protocol::common::*;
 pub use protocol::event_mapping::*;
 pub use protocol::item_builders::*;
 pub use protocol::thread_history::*;
+pub use protocol::thread_history_projection::*;
 pub use protocol::v1::ApplyPatchApprovalParams;
 pub use protocol::v1::ApplyPatchApprovalResponse;
 pub use protocol::v1::ClientInfo;
@@ -40,6 +40,7 @@ pub use protocol::v1::SandboxSettings;
 pub use protocol::v1::Tools;
 pub use protocol::v1::UserSavedConfig;
 pub use protocol::v2::*;
+pub use rpc::*;
 pub use schema_fixtures::SchemaFixtureOptions;
 #[doc(hidden)]
 pub use schema_fixtures::generate_typescript_schema_fixture_subtree_for_tests;

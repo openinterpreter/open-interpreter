@@ -71,6 +71,17 @@ files, run commands, review diffs, and resume work later.
 | Choose model/provider | `/model` |
 | Change permissions | `/permissions` |
 
+## Common setup answers
+
+| If you need to… | Go here |
+| --------------- | ------- |
+| Verify your installed version, update, or uninstall | [Install](/docs/install) |
+| Connect Ollama or LM Studio, including a remote local server | [Local models](/docs/models#local-models) |
+| Connect a hosted model provider | [Providers](/docs/providers) |
+| Set an API key or understand where credentials are stored | [Authentication](/docs/authentication) |
+| Configure command, filesystem, and network boundaries | [Sandbox & approvals](/docs/sandbox) |
+| Embed Open Interpreter in an application | [SDK](/docs/sdk) |
+
 ## Next pages
 
 <CardGroup cols={2}>

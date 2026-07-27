@@ -76,18 +76,26 @@ where
     codex_mcp_extension::install(&mut builder);
     codex_mcp_extension::install_executor_plugins(&mut builder, environment_manager);
     codex_web_search_extension::install(&mut builder, auth_manager.clone());
-    codex_image_generation_extension::install(&mut builder, auth_manager);
+    codex_image_generation_extension::install(&mut builder, auth_manager, |config: &Config| {
+        Some(config.codex_home.clone())
+    });
     let skill_providers = codex_skills_extension::SkillProviders::new()
         .with_executor_provider(executor_skill_provider)
         .with_orchestrator_provider(Arc::new(
             codex_skills_extension::OrchestratorSkillProvider::new(),
-        ));
-    codex_skills_extension::install_with_providers(
+        ))
+        .with_host_provider(Arc::new(codex_skills_extension::HostSkillProvider::new()));
+    codex_skills_extension::install_with_providers_and_metrics(
         &mut builder,
         skill_providers,
+        codex_otel::global(),
         |config: &Config| codex_skills_extension::SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
             bundled_skills_enabled: config.bundled_skills_enabled(),
+            orchestrator_skills_enabled: config.orchestrator_skills_enabled,
+            shadow_selection_enabled: config
+                .features
+                .enabled(codex_features::Feature::SkillSearch),
         },
     );
     Arc::new(builder.build())

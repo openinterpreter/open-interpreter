@@ -53,6 +53,10 @@ def runtime_binary_name() -> str:
     return "codex.exe" if _is_windows() else "codex"
 
 
+def runtime_code_mode_host_name() -> str:
+    return "codex-code-mode-host.exe" if _is_windows() else "codex-code-mode-host"
+
+
 def staged_runtime_package_root(root: Path) -> Path:
     return root / RUNTIME_PACKAGE_ROOT
 
@@ -276,6 +280,9 @@ def _validate_codex_package_layout(package_dir: Path, package_archive: Path) -> 
     package_binary = package_dir / "bin" / runtime_binary_name()
     if not package_binary.is_file():
         missing_entries.append(str(Path("bin") / runtime_binary_name()))
+    code_mode_host = package_dir / "bin" / runtime_code_mode_host_name()
+    if not code_mode_host.is_file():
+        missing_entries.append(str(Path("bin") / runtime_code_mode_host_name()))
     if missing_entries:
         missing = ", ".join(missing_entries)
         raise RuntimeError(f"Missing Codex package layout entries in {package_archive}: {missing}")
@@ -503,6 +510,33 @@ def _annotate_schema(value: Any, base: str | None = None) -> None:
         _annotate_schema(child, base)
 
 
+def _make_chatgpt_account_email_nullable(schema: dict[str, Any]) -> None:
+    definitions = schema.get("definitions")
+    if not isinstance(definitions, dict):
+        raise RuntimeError("Schema bundle is missing definitions")
+
+    account = definitions.get("Account")
+    if not isinstance(account, dict):
+        raise RuntimeError("Schema bundle is missing the Account definition")
+
+    for variant in account.get("oneOf", []):
+        if not isinstance(variant, dict):
+            continue
+        properties = variant.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        account_type = properties.get("type")
+        if not isinstance(account_type, dict) or account_type.get("enum") != ["chatgpt"]:
+            continue
+        email = properties.get("email")
+        if not isinstance(email, dict):
+            raise RuntimeError("ChatGPT account schema is missing email")
+        email["type"] = ["string", "null"]
+        return
+
+    raise RuntimeError("Schema bundle is missing the ChatGPT account variant")
+
+
 def generate_schema_from_pinned_runtime(schema_dir: Path) -> Path:
     """Generate app-server schemas by invoking the installed pinned runtime binary."""
     codex_path = pinned_runtime_codex_path()
@@ -525,6 +559,7 @@ def generate_schema_from_pinned_runtime(schema_dir: Path) -> Path:
 def _normalized_schema_bundle_text(schema_dir: Path) -> str:
     """Normalize the schema bundle before feeding it to the Python type generator."""
     schema = json.loads(schema_bundle_path(schema_dir).read_text())
+    _make_chatgpt_account_email_nullable(schema)
     definitions = schema.get("definitions", {})
     if isinstance(definitions, dict):
         for definition in definitions.values():
@@ -580,7 +615,94 @@ def generate_v2_all(schema_dir: Path) -> None:
             ],
             cwd=sdk_root(),
         )
+    _require_nullable_chatgpt_account_email(out_path)
+    _preserve_reasoning_effort_enum(out_path)
+    _preserve_thread_source_enum(out_path)
     _normalize_generated_timestamps(out_path)
+
+
+def _require_nullable_chatgpt_account_email(out_path: Path) -> None:
+    """Preserve required-but-nullable email semantics in the generated SDK model."""
+    source = out_path.read_text()
+    class_start = source.find("class ChatgptAccount(BaseModel):")
+    if class_start == -1:
+        raise RuntimeError("Generated SDK is missing ChatgptAccount")
+    class_end = source.find("\n\nclass ", class_start)
+    if class_end == -1:
+        class_end = len(source)
+
+    class_source = source[class_start:class_end]
+    nullable_with_default = "    email: str | None = None"
+    if class_source.count(nullable_with_default) != 1:
+        raise RuntimeError(
+            "Generated ChatgptAccount email did not have the expected nullable shape"
+        )
+    class_source = class_source.replace(
+        nullable_with_default,
+        "    email: str | None",
+        1,
+    )
+    out_path.write_text(source[:class_start] + class_source + source[class_end:])
+
+
+def _preserve_reasoning_effort_enum(out_path: Path) -> None:
+    """Keep the public effort constants while accepting future wire values."""
+    source = out_path.read_text()
+    class_start = source.find("class ReasoningEffort(RootModel[str]):")
+    if class_start == -1:
+        raise RuntimeError("Generated SDK is missing the open ReasoningEffort model")
+    class_end = source.find("\n\nclass ", class_start)
+    if class_end == -1:
+        class_end = len(source)
+
+    class_source = source[class_start:class_end]
+    if "min_length=1" not in class_source:
+        raise RuntimeError("Generated ReasoningEffort did not preserve the non-empty constraint")
+    open_enum = """class ReasoningEffort(str, Enum):
+    none = "none"
+    minimal = "minimal"
+    low = "low"
+    medium = "medium"
+    high = "high"
+    xhigh = "xhigh"
+
+    @classmethod
+    def _missing_(cls, value: object) -> ReasoningEffort | None:
+        if not isinstance(value, str) or not value:
+            return None
+        member = str.__new__(cls, value)
+        member._name_ = value
+        member._value_ = value
+        return member
+"""
+    out_path.write_text(source[:class_start] + open_enum + source[class_end:])
+
+
+def _preserve_thread_source_enum(out_path: Path) -> None:
+    """Keep the public thread-source constants while accepting future wire values."""
+    source = out_path.read_text()
+    class_start = source.find("class ThreadSource(RootModel[str]):")
+    if class_start == -1:
+        raise RuntimeError("Generated SDK is missing the open ThreadSource model")
+    class_end = source.find("\n\nclass ", class_start)
+    if class_end == -1:
+        class_end = len(source)
+
+    open_enum = """class ThreadSource(str, Enum):
+    user = "user"
+    subagent = "subagent"
+    memory_consolidation = "memory_consolidation"
+
+    @classmethod
+    def _missing_(cls, value: object) -> ThreadSource | None:
+        if not isinstance(value, str):
+            return None
+        member = str.__new__(cls, value)
+        member._name_ = value
+        member._value_ = value
+        return member
+"""
+    out_path.write_text(source[:class_start] + open_enum + source[class_end:])
 
 
 def _notification_specs(schema_dir: Path) -> list[tuple[str, str]]:
@@ -1157,7 +1279,7 @@ def generate_public_api_flat_methods() -> None:
     thread_fork_fields = _load_public_fields(
         "openai_codex.generated.v2_all",
         "ThreadForkParams",
-        exclude={"thread_id", *approval_fields},
+        exclude={"thread_id", "last_turn_id", *approval_fields},
     )
     thread_fork_fields = _replace_public_sandbox_field(thread_fork_fields, wire_name="sandbox")
     turn_start_fields = _load_public_fields(
@@ -1239,7 +1361,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help=(
             "Python SDK release version to write into the staged package. "
-            "Accepts PEP 440 versions such as 0.1.0b1."
+            "Accepts PEP 440 versions such as 0.144.4."
         ),
     )
 

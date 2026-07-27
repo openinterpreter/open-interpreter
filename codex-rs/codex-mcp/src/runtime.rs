@@ -1,30 +1,62 @@
 //! Runtime support for Model Context Protocol (MCP) servers.
 //!
-//! This module contains data that describes the runtime environment in which MCP
-//! servers execute, plus the sandbox state payload sent to capable servers and a
-//! tiny shared metrics helper. Transport startup and orchestration live in
-//! [`crate::rmcp_client`] and [`crate::connection_manager`].
+//! This module contains the thread-owned MCP runtime and data that describes the
+//! environment in which MCP servers execute. Transport startup lives in
+//! [`crate::rmcp_client`] and connection-set behavior lives in
+//! [`crate::connection_manager`].
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use codex_exec_server::Environment;
 use codex_exec_server::EnvironmentManager;
+use codex_exec_server::HttpClient;
+use codex_exec_server::ReqwestHttpClient;
 use codex_protocol::models::PermissionProfile;
-use codex_protocol::protocol::SandboxPolicy;
-
+use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+use crate::McpConnectionManager;
+
+/// Owns the currently published MCP connection set for one Codex thread.
+///
+/// Replacements are published atomically. Callers that already hold a snapshot
+/// keep the previous connection set alive until their work completes.
+pub struct McpRuntime {
+    connections: ArcSwap<McpConnectionManager>,
+}
+
+impl McpRuntime {
+    pub fn new(connections: Arc<McpConnectionManager>) -> Self {
+        Self {
+            connections: ArcSwap::from(connections),
+        }
+    }
+
+    pub fn snapshot(&self) -> Arc<McpConnectionManager> {
+        self.connections.load_full()
+    }
+
+    pub fn replace(&self, connections: McpConnectionManager) -> Arc<McpConnectionManager> {
+        let connections = Arc::new(connections);
+        self.connections.store(Arc::clone(&connections));
+        connections
+    }
+
+    pub async fn shutdown(&self) {
+        self.snapshot().shutdown().await;
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxState {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_profile: Option<PermissionProfile>,
-    pub sandbox_policy: SandboxPolicy,
+    pub permission_profile: PermissionProfile,
     pub codex_linux_sandbox_exe: Option<PathBuf>,
-    pub sandbox_cwd: PathBuf,
+    pub sandbox_cwd: PathUri,
     #[serde(default)]
     pub use_legacy_landlock: bool,
 }
@@ -67,9 +99,6 @@ impl McpRuntimeContext {
             .environment_manager
             .get_environment(&config.environment_id)
         {
-            if !config.is_local_environment() {
-                ensure_remote_stdio_cwd(server_name, config)?;
-            }
             return Ok(Some(environment));
         }
 
@@ -87,27 +116,20 @@ impl McpRuntimeContext {
             config.environment_id
         ))
     }
-}
 
-fn ensure_remote_stdio_cwd(
-    server_name: &str,
-    config: &codex_config::McpServerConfig,
-) -> Result<(), String> {
-    let codex_config::McpServerTransportConfig::Stdio { cwd, .. } = &config.transport else {
-        return Ok(());
-    };
-    let Some(cwd) = cwd else {
-        return Err(format!(
-            "remote stdio MCP server `{server_name}` requires an absolute cwd"
-        ));
-    };
-    if cwd.is_absolute() {
-        return Ok(());
+    /// Resolves the HTTP capability owned by the server's configured environment.
+    pub fn resolve_http_client(
+        &self,
+        server_name: &str,
+        config: &codex_config::McpServerConfig,
+    ) -> Result<Arc<dyn HttpClient>, String> {
+        Ok(self
+            .resolve_server_environment(server_name, config)?
+            .map_or_else(
+                || Arc::new(ReqwestHttpClient) as Arc<dyn HttpClient>,
+                |environment| environment.get_http_client(),
+            ))
     }
-    Err(format!(
-        "remote stdio MCP server `{server_name}` requires an absolute cwd, got `{}`",
-        cwd.display()
-    ))
 }
 
 pub(crate) fn emit_duration(metric: &str, duration: Duration, tags: &[(&str, &str)]) {
@@ -124,12 +146,14 @@ mod tests {
     use codex_config::McpServerConfig;
     use codex_config::McpServerTransportConfig;
     use codex_exec_server::EnvironmentManager;
+    use codex_utils_path_uri::LegacyAppPathString;
     use pretty_assertions::assert_eq;
 
     use super::*;
 
     fn stdio_server(environment_id: &str) -> McpServerConfig {
         McpServerConfig {
+            auth: Default::default(),
             transport: McpServerTransportConfig::Stdio {
                 command: "echo".to_string(),
                 args: Vec::new(),
@@ -156,6 +180,7 @@ mod tests {
 
     fn http_server(environment_id: &str) -> McpServerConfig {
         McpServerConfig {
+            auth: Default::default(),
             transport: McpServerTransportConfig::StreamableHttp {
                 url: "http://127.0.0.1:1".to_string(),
                 bearer_token_env_var: None,
@@ -237,7 +262,7 @@ mod tests {
         let McpServerTransportConfig::Stdio { cwd, .. } = &mut remote_stdio.transport else {
             unreachable!("stdio helper should build stdio transport");
         };
-        *cwd = Some(std::env::temp_dir());
+        *cwd = Some(LegacyAppPathString::from_path(&std::env::temp_dir()));
         for resolved_runtime in [
             runtime_context.resolve_server_environment("stdio", &remote_stdio),
             runtime_context.resolve_server_environment("http", &http_server("remote")),
@@ -248,6 +273,36 @@ mod tests {
             };
             assert!(resolved_runtime.is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn remote_stdio_accepts_foreign_absolute_cwd() {
+        let runtime_context = McpRuntimeContext::new(
+            Arc::new(
+                EnvironmentManager::create_for_tests(
+                    Some("ws://127.0.0.1:8765".to_string()),
+                    /*local_runtime_paths*/ None,
+                )
+                .await,
+            ),
+            PathBuf::from("/tmp"),
+        );
+        let mut remote_stdio = stdio_server("remote");
+        let McpServerTransportConfig::Stdio { cwd, .. } = &mut remote_stdio.transport else {
+            unreachable!("stdio helper should build stdio transport");
+        };
+        *cwd = Some(
+            PathUri::parse("file:///C:/plugins/demo")
+                .expect("foreign cwd URI")
+                .into(),
+        );
+
+        let resolved_runtime =
+            match runtime_context.resolve_server_environment("stdio", &remote_stdio) {
+                Ok(resolved_runtime) => resolved_runtime,
+                Err(error) => panic!("foreign cwd should resolve: {error}"),
+            };
+        assert!(resolved_runtime.is_some());
     }
 
     #[tokio::test]
@@ -264,33 +319,5 @@ mod tests {
             Err(error) => panic!("local stdio MCP should resolve: {error}"),
         };
         assert!(resolved_runtime.is_some());
-    }
-
-    #[tokio::test]
-    async fn remote_stdio_requires_absolute_cwd() {
-        let runtime_context = McpRuntimeContext::new(
-            Arc::new(
-                EnvironmentManager::create_for_tests(
-                    Some("ws://127.0.0.1:8765".to_string()),
-                    /*local_runtime_paths*/ None,
-                )
-                .await,
-            ),
-            PathBuf::from("/tmp"),
-        );
-        let mut remote_stdio = stdio_server("remote");
-        let McpServerTransportConfig::Stdio { cwd, .. } = &mut remote_stdio.transport else {
-            unreachable!("stdio helper should build stdio transport");
-        };
-        *cwd = Some(PathBuf::from("relative"));
-
-        let error = match runtime_context.resolve_server_environment("stdio", &remote_stdio) {
-            Ok(_) => panic!("remote stdio MCP should require absolute cwd"),
-            Err(error) => error,
-        };
-        assert_eq!(
-            error,
-            "remote stdio MCP server `stdio` requires an absolute cwd, got `relative`"
-        );
     }
 }

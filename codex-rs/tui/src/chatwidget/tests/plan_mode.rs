@@ -1,6 +1,12 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
+fn set_composer_text(chat: &mut ChatWidget, text: &str) {
+    chat.bottom_pane
+        .set_composer_text(text.to_string(), Vec::new(), Vec::new());
+    chat.refresh_plan_mode_nudge();
+}
+
 #[test]
 fn plan_mode_nudge_matches_only_standalone_plain_text_keyword() {
     assert!(contains_plan_keyword("plan"));
@@ -14,19 +20,19 @@ fn plan_mode_nudge_matches_only_standalone_plain_text_keyword() {
 #[tokio::test]
 async fn plan_mode_nudge_shows_only_for_eligible_default_mode_drafts() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
-    chat.set_composer_text("make a plan".to_string(), Vec::new(), Vec::new());
+    set_composer_text(&mut chat, "make a plan");
     chat.pre_draw_tick();
     assert!(chat.bottom_pane.plan_mode_nudge_visible());
 
-    chat.set_composer_text("/plan".to_string(), Vec::new(), Vec::new());
+    set_composer_text(&mut chat, "/plan");
     chat.pre_draw_tick();
     assert!(!chat.bottom_pane.plan_mode_nudge_visible());
 
-    chat.set_composer_text("!plan".to_string(), Vec::new(), Vec::new());
+    set_composer_text(&mut chat, "!plan");
     chat.pre_draw_tick();
     assert!(!chat.bottom_pane.plan_mode_nudge_visible());
 
-    chat.set_composer_text("make a plan".to_string(), Vec::new(), Vec::new());
+    set_composer_text(&mut chat, "make a plan");
     let plan_mask = collaboration_modes::plan_mask(chat.model_catalog.as_ref())
         .expect("expected plan collaboration mode");
     chat.set_collaboration_mask(plan_mask);
@@ -37,7 +43,7 @@ async fn plan_mode_nudge_shows_only_for_eligible_default_mode_drafts() {
 #[tokio::test]
 async fn plan_mode_nudge_hides_while_task_or_modal_is_active() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
-    chat.set_composer_text("make a plan".to_string(), Vec::new(), Vec::new());
+    set_composer_text(&mut chat, "make a plan");
     chat.pre_draw_tick();
     assert!(chat.bottom_pane.plan_mode_nudge_visible());
 
@@ -65,7 +71,7 @@ async fn plan_mode_nudge_dismissal_is_scoped_to_current_thread() {
     let first_thread = ThreadId::new();
     let second_thread = ThreadId::new();
     chat.thread_id = Some(first_thread);
-    chat.set_composer_text("make a plan".to_string(), Vec::new(), Vec::new());
+    set_composer_text(&mut chat, "make a plan");
     chat.pre_draw_tick();
     assert!(chat.bottom_pane.plan_mode_nudge_visible());
 
@@ -89,7 +95,7 @@ async fn plan_mode_nudge_dismissal_is_scoped_to_current_thread() {
 #[tokio::test]
 async fn plan_mode_nudge_shift_tab_uses_existing_mode_cycle_path() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
-    chat.set_composer_text("make a plan".to_string(), Vec::new(), Vec::new());
+    set_composer_text(&mut chat, "make a plan");
     chat.pre_draw_tick();
     assert!(chat.bottom_pane.plan_mode_nudge_visible());
 
@@ -105,7 +111,7 @@ async fn plan_mode_nudge_snapshot() {
     chat.set_token_info(Some(make_token_info(
         /*total_tokens*/ 50_000, /*context_window*/ 100_000,
     )));
-    chat.set_composer_text("make a plan".to_string(), Vec::new(), Vec::new());
+    set_composer_text(&mut chat, "make a plan");
     chat.pre_draw_tick();
 
     assert_chatwidget_snapshot!("plan_mode_nudge", render_bottom_popup(&chat, /*width*/ 80));
@@ -114,7 +120,7 @@ async fn plan_mode_nudge_snapshot() {
 #[tokio::test]
 async fn plan_mode_nudge_narrow_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
-    chat.set_composer_text("make a plan".to_string(), Vec::new(), Vec::new());
+    set_composer_text(&mut chat, "make a plan");
     chat.pre_draw_tick();
 
     assert_chatwidget_snapshot!(
@@ -337,10 +343,15 @@ async fn reasoning_selection_in_plan_mode_without_effort_change_does_not_open_sc
     assert!(
         events.iter().any(|event| matches!(
             event,
-            AppEvent::OpenHarnessPopup { model, effort }
-                if model == "gpt-5.4" && *effort == Some(ReasoningEffortConfig::Medium)
+            AppEvent::UpdateModel(model) if model == "gpt-5.4"
         )),
-        "expected harness popup event; events: {events:?}"
+        "expected model update event; events: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AppEvent::UpdateReasoningEffort(Some(_)))),
+        "expected reasoning update event; events: {events:?}"
     );
 }
 
@@ -423,6 +434,52 @@ async fn reasoning_shortcut_in_plan_mode_updates_plan_override_without_prompt_or
 }
 
 #[tokio::test]
+async fn advanced_reasoning_selection_in_plan_mode_uses_expected_scope() {
+    for effort in [ReasoningEffortConfig::Ultra, ReasoningEffortConfig::Max] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+        chat.thread_id = Some(ThreadId::new());
+        chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
+        let plan_mask = collaboration_modes::plan_mask(chat.model_catalog.as_ref())
+            .expect("expected plan collaboration mode");
+        chat.set_collaboration_mask(plan_mask);
+        let _ = drain_insert_history(&mut rx);
+
+        let mut preset = get_available_model(&chat, "gpt-5.4");
+        preset.supported_reasoning_efforts = vec![ReasoningEffortPreset {
+            effort: effort.clone(),
+            description: "Advanced reasoning".to_string(),
+        }];
+        chat.open_advanced_reasoning_popup(preset);
+        chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        if effort == ReasoningEffortConfig::Ultra {
+            assert!(events.iter().any(|event| matches!(
+                event,
+                AppEvent::ApplyAdvancedReasoning {
+                    model,
+                    effort: ReasoningEffortConfig::Ultra,
+                } if model == "gpt-5.4"
+            )));
+            assert!(events.iter().all(|event| !matches!(
+                event,
+                AppEvent::OpenPlanReasoningScopePrompt { .. }
+                    | AppEvent::PersistPlanModeReasoningEffort(_)
+                    | AppEvent::PersistModelSelection { .. }
+            )));
+        } else {
+            assert!(events.iter().any(|event| matches!(
+                event,
+                AppEvent::OpenPlanReasoningScopePrompt {
+                    model,
+                    effort: Some(ReasoningEffortConfig::Max),
+                } if model == "gpt-5.4"
+            )));
+        }
+    }
+}
+
+#[tokio::test]
 async fn plan_mode_reasoning_override_is_marked_current_in_reasoning_popup() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
@@ -464,16 +521,15 @@ async fn reasoning_selection_in_plan_mode_model_switch_does_not_open_scope_promp
     assert!(
         events.iter().any(|event| matches!(
             event,
-            AppEvent::OpenHarnessPopup { model, effort }
-                if model == "gpt-5.2" && *effort == Some(ReasoningEffortConfig::Medium)
+            AppEvent::UpdateModel(model) if model == "gpt-5.2"
         )),
-        "expected harness popup event; events: {events:?}"
+        "expected model update event; events: {events:?}"
     );
     assert!(
-        !events
+        events
             .iter()
-            .any(|event| matches!(event, AppEvent::OpenPlanReasoningScopePrompt { .. })),
-        "did not expect plan reasoning scope event; events: {events:?}"
+            .any(|event| matches!(event, AppEvent::UpdateReasoningEffort(Some(_)))),
+        "expected reasoning update event; events: {events:?}"
     );
 }
 
@@ -1119,6 +1175,28 @@ async fn plan_completion_restores_status_indicator_after_streaming_plan_output()
 }
 
 #[tokio::test]
+async fn unterminated_plan_delta_does_not_redraw_unchanged_stream_tail() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
+    let plan_mask = collaboration_modes::mask_for_kind(chat.model_catalog.as_ref(), ModeKind::Plan)
+        .expect("expected plan collaboration mask");
+    chat.set_collaboration_mask(plan_mask);
+    chat.on_plan_delta("| Step | Owner |\n".to_string());
+    assert!(chat.active_cell_is_stream_tail());
+    let revision = chat.transcript.active_cell_revision;
+
+    let (frame_requester, mut draw_rx) = FrameRequester::test_channel();
+    chat.frame_requester = frame_requester;
+    chat.on_plan_delta("| partial".to_string());
+
+    assert_eq!(chat.transcript.active_cell_revision, revision);
+    assert!(matches!(
+        draw_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
 async fn submit_user_message_queues_while_compaction_turn_is_running() {
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let thread_id = ThreadId::new();
@@ -1268,7 +1346,7 @@ async fn submit_user_message_emits_structured_plugin_mentions_from_bindings() {
 
 #[tokio::test]
 async fn enter_submits_when_plan_stream_is_not_active() {
-    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.thread_id = Some(ThreadId::new());
     chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
     let plan_mask = collaboration_modes::mask_for_kind(chat.model_catalog.as_ref(), ModeKind::Plan)
@@ -1350,7 +1428,7 @@ async fn mode_switch_surfaces_model_change_notification_when_effective_model_cha
 
 #[tokio::test]
 async fn mode_switch_surfaces_reasoning_change_notification_when_model_stays_same() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
     chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
     chat.set_reasoning_effort(Some(ReasoningEffortConfig::High));
 
@@ -1364,7 +1442,7 @@ async fn mode_switch_surfaces_reasoning_change_notification_when_model_stays_sam
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        plan_messages.contains("Model changed to gpt-5.3-codex medium for Plan mode."),
+        plan_messages.contains("Model changed to gpt-5.2 medium for Plan mode."),
         "expected reasoning-change notice in Plan mode, got: {plan_messages:?}"
     );
 }
@@ -1558,7 +1636,7 @@ async fn set_reasoning_effort_does_not_override_active_plan_override() {
 
 #[tokio::test]
 async fn collab_mode_is_sent_after_enabling() {
-    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.thread_id = Some(ThreadId::new());
     chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
 
@@ -1583,7 +1661,7 @@ async fn collab_mode_is_sent_after_enabling() {
 
 #[tokio::test]
 async fn collab_mode_applies_default_preset() {
-    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.thread_id = Some(ThreadId::new());
 
     chat.bottom_pane
@@ -1610,10 +1688,10 @@ async fn collab_mode_applies_default_preset() {
 
 #[tokio::test]
 async fn user_turn_includes_personality_from_config() {
-    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     chat.set_feature_enabled(Feature::Personality, /*enabled*/ true);
     chat.thread_id = Some(ThreadId::new());
-    chat.set_model("gpt-5.3-codex");
+    chat.set_model("gpt-5.4");
     chat.set_personality(Personality::Friendly);
 
     chat.bottom_pane

@@ -7,19 +7,20 @@ use codex_app_server_protocol::ReasoningEffortOption;
 use codex_core::ThreadManager;
 use codex_core::build_models_manager;
 use codex_core::config::Config;
+use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
 use codex_models_manager::manager::RefreshStrategy;
-use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffortPreset;
 
 pub async fn supported_models(
     thread_manager: Arc<ThreadManager>,
     include_hidden: bool,
+    http_client_factory: HttpClientFactory,
 ) -> Vec<Model> {
     models_from_presets(
         thread_manager
-            .list_models(RefreshStrategy::OnlineIfUncached)
+            .list_models(RefreshStrategy::OnlineIfUncached, http_client_factory)
             .await,
         include_hidden,
     )
@@ -30,39 +31,22 @@ pub async fn supported_models_for_provider(
     auth_manager: Arc<AuthManager>,
     provider_id: &str,
     include_hidden: bool,
+    http_client_factory: HttpClientFactory,
 ) -> Vec<Model> {
     let Some(provider) = config.model_providers.get(provider_id).cloned() else {
         return Vec::new();
     };
-    if let Some(cached_models) = provider_specific_cached_models(config, provider_id) {
-        return models_from_presets(
-            cached_models.into_iter().map(ModelPreset::from).collect(),
-            include_hidden,
-        );
-    }
-
     let mut provider_config = config.clone();
     provider_config.model_provider_id = provider_id.to_string();
     provider_config.model_provider = provider;
+    provider_config.codex_home = config.codex_home.join("models-cache").join(provider_id);
     let models_manager = build_models_manager(&provider_config, auth_manager);
     models_from_presets(
         models_manager
-            .list_models(RefreshStrategy::OnlineIfUncached)
+            .list_models(RefreshStrategy::OnlineIfUncached, http_client_factory)
             .await,
         include_hidden,
     )
-}
-
-fn provider_specific_cached_models(config: &Config, provider_id: &str) -> Option<Vec<ModelInfo>> {
-    let cache_path = config
-        .codex_home
-        .join("models-cache")
-        .join(provider_id)
-        .join("models_cache.json");
-    let bytes = std::fs::read(cache_path).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let models = value.get("models")?.clone();
-    serde_json::from_value(models).ok()
 }
 
 fn models_from_presets(presets: Vec<ModelPreset>, include_hidden: bool) -> Vec<Model> {

@@ -6,9 +6,9 @@ use serde::de::{self};
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::default_client::build_raw_auth_reqwest_client;
 use crate::pkce::PkceCodes;
 use crate::server::ServerOptions;
-use codex_client::build_reqwest_client_with_custom_ca;
 use std::io;
 
 const ANSI_BLUE: &str = "\x1b[94m";
@@ -145,20 +145,27 @@ async fn poll_for_token(
     }
 }
 
-fn print_device_code_prompt(verification_url: &str, code: &str) {
+fn device_code_prompt(verification_url: &str, code: &str) -> String {
     let version = env!("CARGO_PKG_VERSION");
-    println!(
+    format!(
         "\nWelcome to Codex [v{ANSI_GRAY}{version}{ANSI_RESET}]\n{ANSI_GRAY}OpenAI's command-line coding agent{ANSI_RESET}\n\
 \nFollow these steps to sign in with ChatGPT using device code authorization:\n\
 \n1. Open this link in your browser and sign in to your account\n   {ANSI_BLUE}{verification_url}{ANSI_RESET}\n\
 \n2. Enter this one-time code {ANSI_GRAY}(expires in 15 minutes){ANSI_RESET}\n   {ANSI_BLUE}{code}{ANSI_RESET}\n\
-\n{ANSI_GRAY}Device codes are a common phishing target. Never share this code.{ANSI_RESET}\n",
-    );
+\n{ANSI_GRAY}Continue only if you started this login in Codex. If a website or another person gave you this code, cancel.{ANSI_RESET}\n",
+    )
+}
+
+fn print_device_code_prompt(verification_url: &str, code: &str) {
+    let prompt = device_code_prompt(verification_url, code);
+    println!("{prompt}");
 }
 
 pub async fn request_device_code(opts: &ServerOptions) -> std::io::Result<DeviceCode> {
-    let client = build_reqwest_client_with_custom_ca(reqwest::Client::builder())?;
     let base_url = opts.issuer.trim_end_matches('/');
+    // The route selected for the issuer is reused for all device-auth endpoint paths; the endpoint
+    // paths are not resolved separately.
+    let client = build_raw_auth_reqwest_client(base_url, opts.auth_route_config.as_ref())?;
     let api_base_url = format!("{base_url}/api/accounts");
     let uc = request_user_code(&client, &api_base_url, &opts.client_id).await?;
 
@@ -174,8 +181,8 @@ pub async fn complete_device_code_login(
     opts: ServerOptions,
     device_code: DeviceCode,
 ) -> std::io::Result<()> {
-    let client = build_reqwest_client_with_custom_ca(reqwest::Client::builder())?;
     let base_url = opts.issuer.trim_end_matches('/');
+    let client = build_raw_auth_reqwest_client(base_url, opts.auth_route_config.as_ref())?;
     let api_base_url = format!("{base_url}/api/accounts");
 
     let code_resp = poll_for_token(
@@ -199,6 +206,7 @@ pub async fn complete_device_code_login(
         &redirect_uri,
         &pkce,
         &code_resp.authorization_code,
+        opts.auth_route_config.as_ref(),
     )
     .await
     .map_err(|err| std::io::Error::other(format!("device code exchange failed: {err}")))?;
@@ -227,3 +235,7 @@ pub async fn run_device_code_login(opts: ServerOptions) -> std::io::Result<()> {
     print_device_code_prompt(&device_code.verification_url, &device_code.user_code);
     complete_device_code_login(opts, device_code).await
 }
+
+#[cfg(test)]
+#[path = "device_code_auth_tests.rs"]
+mod tests;

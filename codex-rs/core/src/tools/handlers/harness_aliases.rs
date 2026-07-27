@@ -5,17 +5,22 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentStatus;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::user_input::UserInput;
 use codex_tools::AdditionalProperties;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
@@ -23,12 +28,18 @@ use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use regex_lite::Regex;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
+use uuid::Uuid;
 
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
+use crate::agent::role::apply_role_to_config;
 use crate::function_tool::FunctionCallError;
 use crate::harness::opencode::OPENCODE_SEARCH_AGENT_BASE_INSTRUCTIONS;
+use crate::harness::zcode::ZCODE_COMPACTED_SUMMARY_PREFIX;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -40,7 +51,11 @@ use crate::tools::handlers::RequestUserInputHandler;
 use crate::tools::handlers::WriteStdinHandler;
 use crate::tools::handlers::harness_fs;
 use crate::tools::handlers::harness_fs::WalkEntryKind;
+use crate::tools::handlers::multi_agents_common::apply_requested_spawn_agent_model_overrides;
+use crate::tools::handlers::multi_agents_common::apply_spawn_agent_runtime_overrides;
+use crate::tools::handlers::multi_agents_common::apply_spawn_agent_service_tier;
 use crate::tools::handlers::multi_agents_common::build_agent_spawn_config;
+use crate::tools::handlers::multi_agents_common::collab_spawn_error;
 use crate::tools::handlers::multi_agents_common::parse_collab_input;
 use crate::tools::handlers::multi_agents_common::thread_spawn_source;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
@@ -51,6 +66,11 @@ use crate::tools::registry::ToolExecutor;
 pub(crate) const HARNESS_NO_TRUNCATE_PREFIX: &str = "<open-interpreter-harness-no-truncate>\n";
 
 const DEFAULT_READ_LIMIT: usize = 1_000;
+const ZCODE_READ_MAX_TOKENS: usize = 25_000;
+const ZCODE_SKILL_CREATOR_VERSION: &str = "0.1.0";
+const ZCODE_SKILL_CREATOR_MD: &str = include_str!("../../harness/zcode_skill_creator.md");
+const ZCODE_CURRENT_FILE_HASH_CACHE_DIR: &str = ".zcode/oi-current-file-hashes";
+const ZCODE_TODO_CACHE_DIR: &str = ".zcode/oi-todos";
 static CLAUDE_TASKS: LazyLock<Mutex<HashMap<String, ClaudeTaskState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static CLAUDE_READ_FILES: LazyLock<Mutex<HashSet<PathBuf>>> =
@@ -58,6 +78,11 @@ static CLAUDE_READ_FILES: LazyLock<Mutex<HashSet<PathBuf>>> =
 static DEEPSEEK_CHECKLIST: LazyLock<Mutex<Vec<ChecklistItem>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 static DEEPSEEK_READ_FILE_COUNTS: LazyLock<Mutex<HashMap<PathBuf, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static ZCODE_TODOS: LazyLock<Mutex<Vec<ZCodeTodoItem>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+static ZCODE_CURRENT_FILES: LazyLock<Mutex<HashMap<String, HashSet<PathBuf>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static ZCODE_CURRENT_FILE_HASHES: LazyLock<Mutex<HashMap<String, HashMap<PathBuf, String>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone, Debug)]
@@ -87,6 +112,7 @@ pub enum HarnessAliasHandler {
     Grep,
     GrepLower,
     AskUserQuestion,
+    TaskList,
     TaskOutput,
     TaskStop,
     ChecklistAdd,
@@ -107,6 +133,12 @@ pub enum HarnessAliasHandler {
     DeepSeekWriteFile,
     OpenCodeTask,
     OpenCodeTodoWrite,
+    ZCodeTodoRead,
+    ZCodeTodoWrite,
+    ZCodeEnterPlanMode,
+    ZCodeExitPlanMode,
+    ZCodeReadSessionContext,
+    ZCodeSkill,
 }
 
 impl ToolExecutor<ToolInvocation> for HarnessAliasHandler {
@@ -127,6 +159,7 @@ impl ToolExecutor<ToolInvocation> for HarnessAliasHandler {
             Self::Grep => "Grep",
             Self::GrepLower => "grep",
             Self::AskUserQuestion => "AskUserQuestion",
+            Self::TaskList => "TaskList",
             Self::TaskOutput => "TaskOutput",
             Self::TaskStop => "TaskStop",
             Self::ChecklistAdd => "checklist_add",
@@ -147,6 +180,12 @@ impl ToolExecutor<ToolInvocation> for HarnessAliasHandler {
             Self::DeepSeekWriteFile => "write_file",
             Self::OpenCodeTask => "task",
             Self::OpenCodeTodoWrite => "todowrite",
+            Self::ZCodeTodoRead => "TodoRead",
+            Self::ZCodeTodoWrite => "TodoWrite",
+            Self::ZCodeEnterPlanMode => "EnterPlanMode",
+            Self::ZCodeExitPlanMode => "ExitPlanMode",
+            Self::ZCodeReadSessionContext => "ReadSessionContext",
+            Self::ZCodeSkill => "Skill",
         })
     }
 
@@ -179,6 +218,7 @@ impl HarnessAliasHandler {
             Self::Glob | Self::GlobLower => handle_glob(invocation).await,
             Self::Grep | Self::GrepLower => handle_grep(invocation).await,
             Self::AskUserQuestion => handle_ask_user_question(invocation).await,
+            Self::TaskList => handle_task_list(invocation).await,
             Self::TaskOutput => handle_task_output(invocation).await,
             Self::TaskStop => handle_task_stop(invocation).await,
             Self::ChecklistAdd => handle_checklist_add(invocation).await,
@@ -201,6 +241,12 @@ impl HarnessAliasHandler {
             Self::DeepSeekWriteFile => handle_deepseek_write_file(invocation).await,
             Self::OpenCodeTask => handle_opencode_task(invocation).await,
             Self::OpenCodeTodoWrite => handle_opencode_todowrite(invocation).await,
+            Self::ZCodeTodoRead => handle_zcode_todo_read(invocation).await,
+            Self::ZCodeTodoWrite => handle_zcode_todo_write(invocation).await,
+            Self::ZCodeEnterPlanMode => handle_zcode_enter_plan_mode(invocation).await,
+            Self::ZCodeExitPlanMode => handle_zcode_exit_plan_mode(invocation).await,
+            Self::ZCodeReadSessionContext => handle_zcode_read_session_context(invocation).await,
+            Self::ZCodeSkill => handle_zcode_skill(invocation).await,
         }
     }
 }
@@ -225,15 +271,38 @@ struct ClaudeAgentArgs {
     isolation: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct ZCodeReadSessionContextArgs {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    query: String,
+    #[serde(default = "default_zcode_read_session_context_strategy")]
+    strategy: String,
+    #[serde(
+        default = "default_zcode_read_session_context_max_tokens",
+        rename = "maxTokens"
+    )]
+    max_tokens: u32,
+}
+
 async fn handle_agent(
     invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
     let arguments = function_arguments(&invocation.payload)?;
     let args: ClaudeAgentArgs = parse_arguments(arguments)?;
+    let is_zcode = is_zcode(&invocation);
+    if is_zcode {
+        return handle_zcode_agent(invocation, args).await;
+    }
+    if is_kimi_code(&invocation) && !args.run_in_background {
+        return handle_kimi_code_foreground_agent(invocation, args).await;
+    }
+    let fork_turns = "all";
+    let task_name = args.description.clone();
     let mut translated = json!({
         "message": args.prompt,
-        "task_name": args.description,
-        "fork_turns": "all",
+        "task_name": task_name,
+        "fork_turns": fork_turns,
     });
     if let Some(subagent_type) = args
         .subagent_type
@@ -265,6 +334,214 @@ async fn handle_agent(
         .await
 }
 
+async fn handle_kimi_code_foreground_agent(
+    invocation: ToolInvocation,
+    args: ClaudeAgentArgs,
+) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    let ToolInvocation {
+        session,
+        turn,
+        call_id,
+        ..
+    } = invocation;
+    let role_name = args
+        .subagent_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|subagent_type| !subagent_type.is_empty())
+        .unwrap_or("coder");
+    let task_name = zcode_task_name(&args.description);
+    let child_depth = next_thread_spawn_depth(&turn.session_source);
+    let mut config =
+        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
+    apply_requested_spawn_agent_model_overrides(
+        &session,
+        turn.as_ref(),
+        &mut config,
+        args.model.as_deref(),
+        /*requested_reasoning_effort*/ None,
+    )
+    .await?;
+    apply_role_to_config(&mut config, Some(role_name))
+        .await
+        .map_err(FunctionCallError::RespondToModel)?;
+    apply_spawn_agent_service_tier(
+        &session,
+        &mut config,
+        turn.config.service_tier.as_deref(),
+        /*requested_service_tier*/ None,
+    )
+    .await?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+
+    let parent_thread_id = session.thread_id();
+    let spawn_source = thread_spawn_source(
+        parent_thread_id,
+        &turn.session_source,
+        child_depth,
+        Some(role_name),
+        Some(task_name),
+    )?;
+    let spawned = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
+        config,
+        vec![UserInput::Text {
+            text: args.prompt,
+            text_elements: Vec::new(),
+        }],
+        Some(spawn_source),
+        SpawnAgentOptions {
+            fork_parent_spawn_call_id: Some(call_id),
+            parent_thread_id: Some(parent_thread_id),
+            environments: Some(turn.environments.to_selections()),
+            ..Default::default()
+        },
+    ))
+    .await
+    .map_err(collab_spawn_error)?;
+    let status = wait_for_agent_final_status(&session.services.agent_control, spawned.thread_id)
+        .await
+        .unwrap_or(spawned.status);
+    let result = match status {
+        AgentStatus::Completed(Some(message)) => message,
+        AgentStatus::Completed(None) => String::new(),
+        AgentStatus::Errored(message) => return Err(FunctionCallError::RespondToModel(message)),
+        AgentStatus::Interrupted
+        | AgentStatus::NotFound
+        | AgentStatus::PendingInit
+        | AgentStatus::Running
+        | AgentStatus::Shutdown => {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "Agent ended with status {status:?}"
+            )));
+        }
+    };
+    Ok(boxed_tool_output(FunctionToolOutput::from_text(
+        format!(
+            "agent_id: {}\nactual_subagent_type: {role_name}\nstatus: completed\n\n[summary]\n{result}",
+            spawned.thread_id
+        ),
+        Some(true),
+    )))
+}
+
+async fn handle_zcode_agent(
+    invocation: ToolInvocation,
+    args: ClaudeAgentArgs,
+) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    let ToolInvocation {
+        session,
+        turn,
+        call_id,
+        ..
+    } = invocation;
+    let role_name = args
+        .subagent_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|subagent_type| !subagent_type.is_empty())
+        .unwrap_or("Explore");
+    let task_name = zcode_task_name(&args.description);
+    let child_depth = next_thread_spawn_depth(&turn.session_source);
+    let mut config =
+        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
+    apply_requested_spawn_agent_model_overrides(
+        &session,
+        turn.as_ref(),
+        &mut config,
+        args.model.as_deref(),
+        /*requested_reasoning_effort*/ None,
+    )
+    .await?;
+    apply_role_to_config(&mut config, Some(role_name))
+        .await
+        .map_err(FunctionCallError::RespondToModel)?;
+    apply_spawn_agent_service_tier(
+        &session,
+        &mut config,
+        turn.config.service_tier.as_deref(),
+        /*requested_service_tier*/ None,
+    )
+    .await?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+
+    let parent_thread_id = session.thread_id();
+    let spawn_source = thread_spawn_source(
+        parent_thread_id,
+        &turn.session_source,
+        child_depth,
+        Some(role_name),
+        Some(task_name),
+    )?;
+    let started_at = Instant::now();
+    let spawned = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
+        config,
+        vec![UserInput::Text {
+            text: args.prompt,
+            text_elements: Vec::new(),
+        }],
+        Some(spawn_source),
+        SpawnAgentOptions {
+            fork_parent_spawn_call_id: Some(call_id),
+            parent_thread_id: Some(parent_thread_id),
+            environments: Some(turn.environments.to_selections()),
+            ..Default::default()
+        },
+    ))
+    .await
+    .map_err(collab_spawn_error)?;
+    let status = wait_for_agent_final_status(&session.services.agent_control, spawned.thread_id)
+        .await
+        .unwrap_or(spawned.status);
+    let result = match status {
+        AgentStatus::Completed(Some(message)) => message,
+        AgentStatus::Completed(None) => String::new(),
+        AgentStatus::Errored(message) => return Err(FunctionCallError::RespondToModel(message)),
+        AgentStatus::Interrupted
+        | AgentStatus::NotFound
+        | AgentStatus::PendingInit
+        | AgentStatus::Running
+        | AgentStatus::Shutdown => {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "Agent ended with status {status:?}"
+            )));
+        }
+    };
+    let duration_ms = i64::try_from(started_at.elapsed().as_millis()).unwrap_or(i64::MAX);
+    let result = zcode_agent_result_with_footer(
+        &session.services.agent_control,
+        spawned.thread_id,
+        result,
+        duration_ms,
+    )
+    .await;
+
+    let _ = args.run_in_background;
+    let _ = args.isolation;
+    Ok(boxed_tool_output(FunctionToolOutput::from_text(
+        result,
+        Some(true),
+    )))
+}
+
+fn zcode_task_name(description: &str) -> String {
+    let name = description
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let name = name.trim_matches('_');
+    if name.is_empty() {
+        "task".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 #[derive(Deserialize)]
 struct BashArgs {
     command: String,
@@ -291,6 +568,11 @@ async fn handle_bash(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
     }
     if args.dangerously_disable_sandbox {
         translated["sandbox_permissions"] = json!("require_escalated");
+    }
+
+    let is_zcode = is_zcode(&invocation);
+    if is_zcode {
+        translated["max_output_tokens"] = json!(100_000);
     }
 
     let payload = ToolPayload::Function {
@@ -330,10 +612,19 @@ async fn handle_bash(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
         )));
     }
     let exit_code = result.get("exit_code").and_then(serde_json::Value::as_i64);
+    let raw_output_key = if is_zcode { "raw_output" } else { "output" };
     let raw_output = result
-        .get("output")
+        .get(raw_output_key)
+        .or_else(|| result.get("output"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
+    if is_zcode {
+        let (harness_output, success) = zcode_bash_output(&invocation, raw_output, exit_code)?;
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            format!("{HARNESS_NO_TRUNCATE_PREFIX}{harness_output}"),
+            success,
+        )));
+    }
     let is_deepseek_tui = is_deepseek_tui(&invocation);
     let harness_output = if exit_code != Some(0) && is_deepseek_tui {
         let stderr = raw_output.trim_end_matches('\n');
@@ -423,6 +714,15 @@ fn is_claude_code(invocation: &ToolInvocation) -> bool {
         .is_some_and(|harness| matches!(harness, "claude-code" | "claude-code-bare"))
 }
 
+fn is_kimi_code(invocation: &ToolInvocation) -> bool {
+    invocation
+        .turn
+        .config
+        .harness
+        .as_deref()
+        .is_some_and(|harness| harness == "kimi-code")
+}
+
 fn is_deepseek_tui(invocation: &ToolInvocation) -> bool {
     invocation
         .turn
@@ -451,6 +751,197 @@ fn compact_deepseek_exec_shell_output(raw_output: &str) -> String {
         "[exec_shell output compacted to protect context]\nSummary: {summary}\nSnippet: {head}\n\n[... output truncated for context ...]\n\n{tail}\n(Original: {char_count} chars, omitted: {} chars.)",
         char_count.saturating_sub(VISIBLE_ORIGINAL_CHARS)
     )
+}
+
+fn zcode_bash_output(
+    invocation: &ToolInvocation,
+    raw_output: &str,
+    exit_code: Option<i64>,
+) -> Result<(String, Option<bool>), FunctionCallError> {
+    const INLINE_SUCCESS_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+
+    let output = trim_zcode_bash_output(raw_output);
+    if exit_code.is_some_and(|code| code != 0) {
+        let output = defer_zcode_failure_marker_lines(output);
+        let exit_code_text = exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let body = if output.is_empty() {
+            format!("Exit code {exit_code_text}")
+        } else {
+            format!("Exit code {exit_code_text}\n{output}")
+        };
+        return Ok((body, Some(false)));
+    }
+    if output.is_empty() {
+        return Ok(("(Bash completed with no output)".to_string(), None));
+    }
+    if output.len() <= INLINE_SUCCESS_OUTPUT_LIMIT_BYTES {
+        return Ok((output.to_string(), None));
+    }
+
+    let artifact_path = zcode_persisted_output_path(invocation);
+    if let Some(parent) = artifact_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| FunctionCallError::RespondToModel(format!("Bash failed: {err}")))?;
+    }
+    std::fs::write(&artifact_path, output)
+        .map_err(|err| FunctionCallError::RespondToModel(format!("Bash failed: {err}")))?;
+
+    let size_kb = output.len() as f64 / 1024.0;
+    let preview = zcode_preview_first_2kb(output);
+    Ok((
+        format!(
+            "<persisted-output>\nOutput too large ({size_kb:.1}KB). Full output saved to: {}\n\nPreview (first 2KB):\n{preview}\n...\n</persisted-output>",
+            artifact_path.display()
+        ),
+        None,
+    ))
+}
+
+fn trim_zcode_bash_output(raw_output: &str) -> &str {
+    let mut output = raw_output.trim_end();
+    loop {
+        if output.is_empty() {
+            return output;
+        }
+        let Some(line_end) = output.find('\n') else {
+            return if output.trim().is_empty() { "" } else { output };
+        };
+        let (line, rest) = output.split_at(line_end);
+        if !line.trim().is_empty() {
+            return output;
+        }
+        output = &rest['\n'.len_utf8()..];
+    }
+}
+
+fn defer_zcode_failure_marker_lines(output: &str) -> String {
+    let (output, leading_diagnostics) = split_zcode_leading_failure_diagnostics(output);
+    let mut body = Vec::new();
+    let mut markers = Vec::new();
+    for line in output.lines() {
+        if line.trim_start().starts_with('✗') {
+            markers.push(line.to_string());
+        } else {
+            body.push(line.to_string());
+        }
+    }
+    if markers.is_empty() {
+        return output.to_string();
+    }
+    if let Some(first) = markers.first_mut() {
+        *first = first.trim_start().to_string();
+    }
+    let markers_len = markers.len();
+    let mut reordered = body.join("\n").trim_end().to_string();
+    if !reordered.is_empty() {
+        reordered.push('\n');
+    }
+    if leading_diagnostics.is_empty() {
+        reordered.push_str(&markers.join("\n"));
+    } else {
+        let mut marker_lines = Vec::new();
+        for (index, marker) in markers.into_iter().enumerate() {
+            marker_lines.push(marker);
+            if let Some(chunk) = leading_diagnostics.get(index) {
+                marker_lines.extend(chunk.iter().cloned());
+            }
+        }
+        for chunk in leading_diagnostics.iter().skip(markers_len) {
+            marker_lines.extend(chunk.iter().cloned());
+        }
+        reordered.push_str(&marker_lines.join("\n"));
+    }
+    reordered
+}
+
+fn split_zcode_leading_failure_diagnostics(output: &str) -> (&str, Vec<Vec<String>>) {
+    let Some(body_start) = output.find("\n\n") else {
+        return (output, Vec::new());
+    };
+    let leading = &output[..body_start];
+    if leading.is_empty() {
+        return (output, Vec::new());
+    }
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    for line in leading.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("Error:") && !current.is_empty() {
+            chunks.push(current);
+            current = Vec::new();
+        }
+        if !(trimmed.starts_with("Error:") || trimmed.starts_with("at ")) {
+            return (output, Vec::new());
+        }
+        current.push(line.to_string());
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.is_empty() {
+        (output, Vec::new())
+    } else {
+        (&output[body_start + 2..], chunks)
+    }
+}
+
+fn zcode_persisted_output_path(invocation: &ToolInvocation) -> PathBuf {
+    invocation
+        .turn
+        .config
+        .codex_home
+        .as_path()
+        .join(".zcode")
+        .join("cli")
+        .join("artifacts")
+        .join(format!("sess_{}", invocation.session.session_id()))
+        .join(format!(
+            "{}-tool-result-{}.json",
+            invocation.call_id,
+            Uuid::new_v4()
+        ))
+}
+
+fn zcode_maybe_persist_large_grep_output(
+    invocation: &ToolInvocation,
+    output: &str,
+) -> Result<String, FunctionCallError> {
+    const INLINE_GREP_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+    if output.len() <= INLINE_GREP_OUTPUT_LIMIT_BYTES {
+        return Ok(output.to_string());
+    }
+    let artifact_path = zcode_persisted_output_path(invocation);
+    if let Some(parent) = artifact_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| FunctionCallError::RespondToModel(format!("Grep failed: {err}")))?;
+    }
+    std::fs::write(&artifact_path, output)
+        .map_err(|err| FunctionCallError::RespondToModel(format!("Grep failed: {err}")))?;
+
+    let size_kb = zcode_format_decimal_kb(output.len());
+    let preview = zcode_preview_first_2kb(output);
+    Ok(format!(
+        "<persisted-output>\nOutput too large ({size_kb} KB). Full output saved to: {}\n\nPreview (first 2 KB):\n{preview}\n...\n</persisted-output>",
+        artifact_path.display()
+    ))
+}
+
+fn zcode_format_decimal_kb(bytes: usize) -> usize {
+    ((bytes as f64) / 1_000.0).round() as usize
+}
+
+fn zcode_preview_first_2kb(output: &str) -> String {
+    let mut preview = String::new();
+    for line in output.split_inclusive('\n') {
+        let next_len = preview.len() + line.len();
+        if next_len > 2_000 {
+            break;
+        }
+        preview.push_str(line);
+    }
+    preview.trim_end().to_string()
 }
 
 fn is_claude_code_bare(invocation: &ToolInvocation) -> bool {
@@ -533,7 +1024,7 @@ pub(crate) fn take_claude_code_bare_completed_task_notification() -> Option<Resp
         role: "user".to_string(),
         content: vec![ContentItem::InputText { text }],
         phase: Some(MessagePhase::Commentary),
-        metadata: None,
+        internal_chat_message_metadata_passthrough: None,
     })
 }
 
@@ -555,18 +1046,54 @@ fn normalize_task_output(output: &str) -> String {
 #[derive(Deserialize)]
 struct TaskOutputArgs {
     task_id: String,
-    #[serde(default = "default_task_output_block")]
-    block: bool,
-    #[serde(default = "default_task_output_timeout")]
-    timeout: u64,
+    block: Option<bool>,
+    timeout: Option<u64>,
 }
 
-fn default_task_output_block() -> bool {
+#[derive(Deserialize)]
+struct TaskListArgs {
+    #[serde(default = "default_task_list_active_only")]
+    active_only: bool,
+    #[serde(default = "default_task_list_limit")]
+    limit: usize,
+}
+
+fn default_task_list_active_only() -> bool {
     true
 }
 
-fn default_task_output_timeout() -> u64 {
-    30_000
+fn default_task_list_limit() -> usize {
+    20
+}
+
+async fn handle_task_list(
+    invocation: ToolInvocation,
+) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    let arguments = function_arguments(&invocation.payload)?;
+    let args: TaskListArgs = parse_arguments(arguments)?;
+    let tasks = CLAUDE_TASKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut entries = tasks.iter().collect::<Vec<_>>();
+    entries.sort_by_key(|(task_id, _)| *task_id);
+    entries.truncate(args.limit.clamp(1, 100));
+    let mut lines = vec![format!("background_tasks: {}", entries.len())];
+    for (task_id, task) in entries {
+        lines.extend([
+            format!("task_id: {task_id}"),
+            format!("description: {}", task.description),
+            "status: running".to_string(),
+            "detached: true".to_string(),
+            "kind: process".to_string(),
+            format!("command: {}", task.command),
+            format!("pid: {}", task.process_id),
+        ]);
+    }
+    let _ = args.active_only;
+    Ok(boxed_tool_output(FunctionToolOutput::from_text(
+        lines.join("\n"),
+        Some(true),
+    )))
 }
 
 async fn handle_task_output(
@@ -575,7 +1102,15 @@ async fn handle_task_output(
     let arguments = function_arguments(&invocation.payload)?;
     let args: TaskOutputArgs = parse_arguments(arguments)?;
     let task_state = claude_task_state(&args.task_id)?;
-    let yield_time_ms = if args.block { args.timeout } else { 100 };
+    let kimi_code = is_kimi_code(&invocation);
+    let block = args.block.unwrap_or(!kimi_code);
+    let timeout = args.timeout.unwrap_or(if kimi_code { 30 } else { 30_000 });
+    let timeout_ms = if kimi_code {
+        timeout.saturating_mul(1_000)
+    } else {
+        timeout
+    };
+    let yield_time_ms = if block { timeout_ms } else { 100 };
     let payload = ToolPayload::Function {
         arguments: json!({
             "session_id": task_state.process_id,
@@ -679,14 +1214,30 @@ async fn handle_read(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
     let path = harness_fs::checked_read_path(&invocation, &args.path, "Read")?;
     if let Some(task_id) = claude_task_id_from_output_path(&path) {
         let output = poll_claude_task_output(&invocation, task_id).await?;
-        let (body, _, _, _) = numbered_read_lines(&output, 1, DEFAULT_READ_LIMIT);
+        let (body, _, _, _) = numbered_read_lines(&output, /*offset*/ 1, DEFAULT_READ_LIMIT);
         return Ok(boxed_tool_output(FunctionToolOutput::from_text(
             body,
             Some(true),
         )));
     }
-    let data = std::fs::read(&path)
-        .map_err(|err| FunctionCallError::RespondToModel(format!("Read failed: {err}")))?;
+    let data = match std::fs::read(&path) {
+        Ok(data) => data,
+        Err(err) if is_zcode(&invocation) && err.kind() == std::io::ErrorKind::NotFound => {
+            let cwd = harness_fs::primary_cwd(&invocation);
+            return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                format!(
+                    "{HARNESS_NO_TRUNCATE_PREFIX}File does not exist. Note: your current working directory is {}.",
+                    cwd.display()
+                ),
+                Some(false),
+            )));
+        }
+        Err(err) => {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "Read failed: {err}"
+            )));
+        }
+    };
     if let Some(mime_type) = image_mime_type(&path) {
         let image_url = format!("data:{mime_type};base64,{}", BASE64_STANDARD.encode(data));
         record_claude_read_file(&path);
@@ -723,16 +1274,58 @@ async fn handle_read(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
             Some(true),
         )));
     }
-    let offset = args.line_offset.unwrap_or(1).max(1);
-    let limit = args
-        .n_lines
-        .unwrap_or(DEFAULT_READ_LIMIT)
-        .min(DEFAULT_READ_LIMIT);
-    let (body, lines_read, total_lines, end_reached) = numbered_read_lines(&text, offset, limit);
+    let zcode_zero_offset = is_zcode(&invocation) && args.line_offset == Some(0);
+    let offset = if zcode_zero_offset {
+        1
+    } else {
+        args.line_offset.unwrap_or(1).max(1)
+    };
+    let limit = if is_zcode(&invocation) {
+        args.n_lines.unwrap_or(usize::MAX)
+    } else {
+        args.n_lines
+            .unwrap_or(DEFAULT_READ_LIMIT)
+            .min(DEFAULT_READ_LIMIT)
+    };
+    let display_offset = if zcode_zero_offset { 0 } else { offset };
+    let (body, lines_read, total_lines, end_reached) =
+        numbered_read_lines_from(&text, offset, limit, display_offset);
     record_claude_read_file(&path);
     if is_claude_code_bare(&invocation) {
         return Ok(boxed_tool_output(FunctionToolOutput::from_text(
             body,
+            Some(true),
+        )));
+    }
+    if is_zcode(&invocation) {
+        let file_hash = zcode_file_hash(text.as_bytes());
+        if args.line_offset.is_none()
+            && args.n_lines.is_none()
+            && (zcode_current_file_hash_applies(&invocation, &path, &file_hash).await
+                || zcode_history_has_current_file_state(&invocation, &path, &file_hash).await)
+        {
+            return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                "Wasted call — file unchanged since your last Read. Refer to that earlier tool_result instead.".to_string(),
+                Some(true),
+            )));
+        }
+        record_zcode_current_file(&invocation, &path);
+        record_zcode_current_file_hash(&invocation, &path, file_hash);
+        let selected_text = selected_read_text(&text, offset, limit);
+        let token_count = zcode_estimate_tokens(&selected_text);
+        if token_count > ZCODE_READ_MAX_TOKENS
+            && (args.line_offset.is_some() || args.n_lines.is_some())
+        {
+            return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                format!(
+                    "{HARNESS_NO_TRUNCATE_PREFIX}{}",
+                    zcode_read_token_budget_error_text(token_count)
+                ),
+                Some(false),
+            )));
+        }
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            format!("{HARNESS_NO_TRUNCATE_PREFIX}{body}"),
             Some(true),
         )));
     }
@@ -753,33 +1346,7 @@ async fn handle_read(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
 async fn handle_read_media_file(
     invocation: ToolInvocation,
 ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
-    let arguments = function_arguments(&invocation.payload)?;
-    let args: ReadArgs = parse_arguments(arguments)?;
-    let path = harness_fs::checked_read_path(&invocation, &args.path, "ReadMediaFile")?;
-    let Some(mime_type) = image_mime_type(&path) else {
-        return Err(FunctionCallError::RespondToModel(format!(
-            "ReadMediaFile failed: `{}` is not a supported image file",
-            display_model_path(&invocation, &path)
-        )));
-    };
-    let data = std::fs::read(&path)
-        .map_err(|err| FunctionCallError::RespondToModel(format!("ReadMediaFile failed: {err}")))?;
-    let image_url = format!("data:{mime_type};base64,{}", BASE64_STANDARD.encode(data));
-    Ok(boxed_tool_output(FunctionToolOutput::from_content(
-        vec![
-            FunctionCallOutputContentItem::InputText {
-                text: format!(
-                    "<system>Read media file `{}` as {mime_type}.</system>",
-                    display_model_path(&invocation, &path)
-                ),
-            },
-            FunctionCallOutputContentItem::InputImage {
-                image_url,
-                detail: None,
-            },
-        ],
-        Some(true),
-    )))
+    super::kimi_code_media::handle(invocation).await
 }
 
 async fn poll_claude_task_output(
@@ -829,7 +1396,303 @@ fn claude_has_read_file(path: &Path) -> bool {
         .is_ok_and(|files| files.contains(path))
 }
 
+fn zcode_session_key(invocation: &ToolInvocation) -> String {
+    invocation.session.thread_id.to_string()
+}
+
+fn record_zcode_current_file(invocation: &ToolInvocation, path: &Path) {
+    if let Ok(mut files_by_session) = ZCODE_CURRENT_FILES.lock() {
+        files_by_session
+            .entry(zcode_session_key(invocation))
+            .or_default()
+            .insert(path.to_path_buf());
+    }
+}
+
+fn zcode_has_current_file(invocation: &ToolInvocation, path: &Path) -> bool {
+    ZCODE_CURRENT_FILES.lock().is_ok_and(|files_by_session| {
+        files_by_session
+            .get(&zcode_session_key(invocation))
+            .is_some_and(|files| files.contains(path))
+    })
+}
+
+async fn zcode_has_current_file_state(invocation: &ToolInvocation, path: &Path) -> bool {
+    if zcode_has_current_file(invocation, path) {
+        return true;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let current_hash = zcode_file_hash(&bytes);
+    zcode_current_file_hash(invocation, path).as_deref() == Some(current_hash.as_str())
+        || zcode_history_has_current_file_state(invocation, path, &current_hash).await
+}
+
+fn zcode_file_hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn record_zcode_current_file_hash(invocation: &ToolInvocation, path: &Path, hash: String) {
+    if let Ok(mut files_by_session) = ZCODE_CURRENT_FILE_HASHES.lock() {
+        files_by_session
+            .entry(zcode_session_key(invocation))
+            .or_default()
+            .insert(path.to_path_buf(), hash.clone());
+    }
+    if let Some(home) = zcode_harness_home() {
+        record_zcode_current_file_hash_at_home(&home, invocation, path, &hash);
+    }
+}
+
+fn zcode_current_file_hash(invocation: &ToolInvocation, path: &Path) -> Option<String> {
+    ZCODE_CURRENT_FILE_HASHES
+        .lock()
+        .ok()
+        .and_then(|files_by_session| {
+            files_by_session
+                .get(&zcode_session_key(invocation))
+                .and_then(|files| files.get(path).cloned())
+        })
+        .or_else(|| {
+            zcode_harness_home()
+                .and_then(|home| zcode_current_file_hash_at_home(&home, invocation, path))
+        })
+}
+
+fn zcode_harness_home() -> Option<PathBuf> {
+    std::env::var_os("OPEN_INTERPRETER_HOME")
+        .or_else(|| std::env::var_os("INTERPRETER_HOME"))
+        .or_else(|| std::env::var_os("CODEX_HOME"))
+        .map(PathBuf::from)
+}
+
+fn record_zcode_current_file_hash_at_home(
+    home: &Path,
+    invocation: &ToolInvocation,
+    path: &Path,
+    hash: &str,
+) {
+    let cache_path = zcode_current_file_hash_cache_path(home, invocation, path);
+    if let Some(parent) = cache_path.parent()
+        && std::fs::create_dir_all(parent).is_ok()
+    {
+        let _ = std::fs::write(cache_path, hash);
+    }
+}
+
+fn zcode_current_file_hash_at_home(
+    home: &Path,
+    invocation: &ToolInvocation,
+    path: &Path,
+) -> Option<String> {
+    let hash =
+        std::fs::read_to_string(zcode_current_file_hash_cache_path(home, invocation, path)).ok()?;
+    (!hash.is_empty()).then_some(hash)
+}
+
+fn zcode_current_file_hash_cache_path(
+    home: &Path,
+    invocation: &ToolInvocation,
+    path: &Path,
+) -> PathBuf {
+    let cwd = harness_fs::primary_cwd(invocation)
+        .canonicalize()
+        .unwrap_or_else(|_| harness_fs::primary_cwd(invocation));
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let key = format!(
+        "{}\0{}\0{}",
+        zcode_session_key(invocation),
+        cwd.display(),
+        path.display()
+    );
+    let hash = format!("{:x}", Sha256::digest(key.as_bytes()));
+    home.join(ZCODE_CURRENT_FILE_HASH_CACHE_DIR)
+        .join(format!("{hash}.txt"))
+}
+
+async fn zcode_history_has_current_file_state(
+    invocation: &ToolInvocation,
+    path: &Path,
+    current_hash: &str,
+) -> bool {
+    let history = invocation.session.clone_history().await.into_raw_items();
+    zcode_history_has_current_file_state_for_items(&history, invocation, path, current_hash)
+}
+
+async fn zcode_current_file_hash_applies(
+    invocation: &ToolInvocation,
+    path: &Path,
+    current_hash: &str,
+) -> bool {
+    if zcode_current_file_hash(invocation, path).as_deref() != Some(current_hash) {
+        return false;
+    }
+    let history = invocation.session.clone_history().await.into_raw_items();
+    if !zcode_history_has_compacted_summary(&history) {
+        return true;
+    }
+    zcode_history_retains_read_reminder_for_path(&history, invocation, path)
+}
+
+fn zcode_history_has_compacted_summary(history: &[ResponseItem]) -> bool {
+    history.iter().any(|item| {
+        let ResponseItem::Message { content, .. } = item else {
+            return false;
+        };
+        content.iter().any(|content| {
+            let ContentItem::InputText { text } = content else {
+                return false;
+            };
+            text.starts_with(ZCODE_COMPACTED_SUMMARY_PREFIX)
+        })
+    })
+}
+
+fn zcode_history_retains_read_reminder_for_path(
+    history: &[ResponseItem],
+    invocation: &ToolInvocation,
+    path: &Path,
+) -> bool {
+    history.iter().any(|item| {
+        let ResponseItem::Message { content, .. } = item else {
+            return false;
+        };
+        content.iter().any(|content| {
+            let ContentItem::InputText { text } = content else {
+                return false;
+            };
+            let Some(arguments) = zcode_retained_read_reminder_arguments(text) else {
+                return false;
+            };
+            let reminder_path = zcode_history_call_path(invocation, arguments);
+            reminder_path.is_some_and(|reminder_path| zcode_same_path(&reminder_path, path))
+        })
+    })
+}
+
+fn zcode_retained_read_reminder_arguments(text: &str) -> Option<&str> {
+    const PREFIX: &str = "<system-reminder>\nCalled the Read tool with the following input: ";
+    Some(
+        text.strip_prefix(PREFIX)?
+            .split_once("\nResult of calling the Read tool:")?
+            .0,
+    )
+}
+
+fn zcode_history_has_current_file_state_for_items(
+    history: &[ResponseItem],
+    invocation: &ToolInvocation,
+    path: &Path,
+    current_hash: &str,
+) -> bool {
+    let mut current = false;
+    let mut index = 0;
+    while index < history.len() {
+        let ResponseItem::FunctionCall {
+            name,
+            arguments,
+            call_id,
+            ..
+        } = &history[index]
+        else {
+            index += 1;
+            continue;
+        };
+        if !matches!(name.as_str(), "Read" | "Write" | "Edit") {
+            index += 1;
+            continue;
+        }
+        let Some(call_path) = zcode_history_call_path(invocation, arguments) else {
+            index += 1;
+            continue;
+        };
+        if !zcode_same_path(&call_path, path) {
+            index += 1;
+            continue;
+        }
+        let output = history.get(index + 1).and_then(|item| match item {
+            ResponseItem::FunctionCallOutput {
+                call_id: output_call_id,
+                output,
+                ..
+            } if output_call_id == call_id => Some(output),
+            _ => None,
+        });
+        current = match name.as_str() {
+            "Write" => output.is_some_and(|output| {
+                output.success != Some(false)
+                    && output
+                        .text_content()
+                        .is_some_and(|text| text.contains("file state is current in your context"))
+                    && zcode_history_write_content_hash(arguments).as_deref() == Some(current_hash)
+            }),
+            "Edit" => output.is_some_and(|output| {
+                output.success != Some(false)
+                    && output
+                        .text_content()
+                        .is_some_and(|text| text.contains("file state is current in your context"))
+            }),
+            "Read" => output.is_some_and(|output| {
+                output.success != Some(false)
+                    && output.text_content().is_some_and(|text| {
+                        text.starts_with(HARNESS_NO_TRUNCATE_PREFIX)
+                            || text
+                                == "Wasted call — file unchanged since your last Read. Refer to that earlier tool_result instead."
+                    })
+            }),
+            _ => current,
+        };
+        index += 2;
+    }
+    current
+}
+
+fn zcode_history_call_path(invocation: &ToolInvocation, arguments: &str) -> Option<PathBuf> {
+    let value = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+    let path = value
+        .get("file_path")
+        .or_else(|| value.get("filePath"))
+        .or_else(|| value.get("path"))?
+        .as_str()?;
+    Some(zcode_history_resolve_path(invocation, path))
+}
+
+fn zcode_history_resolve_path(invocation: &ToolInvocation, path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        dunce::canonicalize(harness_fs::primary_cwd(invocation))
+            .unwrap_or_else(|_| harness_fs::primary_cwd(invocation))
+            .join(path)
+    }
+}
+
+fn zcode_same_path(left: &Path, right: &Path) -> bool {
+    let left_candidates = harness_fs::policy_candidates_for_path(left);
+    let right_candidates = harness_fs::policy_candidates_for_path(right);
+    left_candidates
+        .iter()
+        .any(|left| right_candidates.iter().any(|right| left == right))
+}
+
+fn zcode_history_write_content_hash(arguments: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+    let content = value.get("content")?.as_str()?;
+    Some(zcode_file_hash(content.as_bytes()))
+}
+
 fn numbered_read_lines(text: &str, offset: usize, limit: usize) -> (String, usize, usize, bool) {
+    numbered_read_lines_from(text, offset, limit, offset)
+}
+
+fn numbered_read_lines_from(
+    text: &str,
+    offset: usize,
+    limit: usize,
+    display_offset: usize,
+) -> (String, usize, usize, bool) {
     let all_lines = if text.is_empty() {
         Vec::new()
     } else {
@@ -841,11 +1704,42 @@ fn numbered_read_lines(text: &str, offset: usize, limit: usize) -> (String, usiz
         .enumerate()
         .skip(offset.saturating_sub(1))
         .take(limit)
-        .map(|(index, line)| format!("{}\t{line}", index + 1))
+        .map(|(index, line)| format!("{}\t{line}", display_offset + index + 1 - offset))
         .collect::<Vec<_>>();
     let lines_read = selected.len();
     let end_reached = offset.saturating_sub(1) + lines_read >= total_lines;
     (selected.join("\n"), lines_read, total_lines, end_reached)
+}
+
+fn selected_read_text(text: &str, offset: usize, limit: usize) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+
+    text.split('\n')
+        .skip(offset.saturating_sub(1))
+        .take(limit)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn zcode_estimate_tokens(text: &str) -> usize {
+    let mut weighted_chars = 0usize;
+    for ch in text.chars() {
+        weighted_chars =
+            weighted_chars.saturating_add(if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
+                2
+            } else {
+                1
+            });
+    }
+    weighted_chars.div_ceil(3)
+}
+
+fn zcode_read_token_budget_error_text(token_count: usize) -> String {
+    format!(
+        "File content ({token_count} tokens) exceeds maximum allowed tokens ({ZCODE_READ_MAX_TOKENS}). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file."
+    )
 }
 
 #[derive(Deserialize)]
@@ -863,6 +1757,10 @@ async fn handle_write(
     let arguments = function_arguments(&invocation.payload)?;
     let args: WriteArgs = parse_arguments(arguments)?;
     let path = harness_fs::checked_write_path(&invocation, &args.path, "Write")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| FunctionCallError::RespondToModel(format!("Write failed: {err}")))?;
+    }
     let bytes_written = args.content.len();
     match args.mode.as_deref() {
         Some("append") => {
@@ -875,10 +1773,21 @@ async fn handle_write(
             file.write_all(args.content.as_bytes())
                 .map_err(|err| FunctionCallError::RespondToModel(format!("Write failed: {err}")))?;
         }
-        _ => std::fs::write(&path, args.content)
+        _ => std::fs::write(&path, &args.content)
             .map_err(|err| FunctionCallError::RespondToModel(format!("Write failed: {err}")))?,
     }
-    let message = if invocation.tool_name.name == "write" {
+    let message = if is_zcode(&invocation) {
+        record_zcode_current_file(&invocation, &path);
+        record_zcode_current_file_hash(
+            &invocation,
+            &path,
+            zcode_file_hash(args.content.as_bytes()),
+        );
+        format!(
+            "File created successfully at: {} (file state is current in your context — no need to Read it back)",
+            path.display()
+        )
+    } else if invocation.tool_name.name == "write" {
         if is_opencode(&invocation) {
             "Wrote file successfully.".to_string()
         } else if is_pi(&invocation) {
@@ -935,6 +1844,12 @@ async fn handle_edit(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
             Some(false),
         )));
     }
+    if is_zcode(&invocation) && !zcode_has_current_file_state(&invocation, &path).await {
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>".to_string(),
+            Some(false),
+        )));
+    }
     let text = std::fs::read_to_string(&path)
         .map_err(|err| FunctionCallError::RespondToModel(format!("Edit failed: {err}")))?;
     let replacements = edit_replacements(&args)?;
@@ -959,10 +1874,14 @@ async fn handle_edit(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
             updated.replacen(&replacement.old_text, &replacement.new_text, 1)
         };
     }
-    std::fs::write(&path, updated)
+    std::fs::write(&path, &updated)
         .map_err(|err| FunctionCallError::RespondToModel(format!("Edit failed: {err}")))?;
     record_claude_read_file(&path);
-    if is_claude_code_bare(&invocation) {
+    if is_zcode(&invocation) {
+        record_zcode_current_file(&invocation, &path);
+        record_zcode_current_file_hash(&invocation, &path, zcode_file_hash(updated.as_bytes()));
+    }
+    if is_claude_code_bare(&invocation) || is_zcode(&invocation) {
         return Ok(boxed_tool_output(FunctionToolOutput::from_text(
             format!(
                 "The file {} has been updated successfully. (file state is current in your context — no need to Read it back)",
@@ -1041,6 +1960,27 @@ async fn handle_glob(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
     collect_glob_matches(&root, &args.pattern, include_dirs, &mut matches)
         .map_err(|err| FunctionCallError::RespondToModel(format!("Glob failed: {err}")))?;
     matches.sort();
+    if is_zcode(&invocation) {
+        if matches.is_empty() {
+            return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                "No files found".to_string(),
+                Some(true),
+            )));
+        }
+        matches.sort_by(|left, right| right.cmp(left));
+        let truncated = matches.len() > 100;
+        matches.truncate(100);
+        let mut output = matches.join("\n");
+        if truncated {
+            output.push_str(
+                "\n(Results are truncated. Consider using a more specific path or pattern.)",
+            );
+        }
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            output,
+            Some(true),
+        )));
+    }
     matches.truncate(250);
     if invocation.tool_name.name == "glob" {
         let absolute_matches = matches
@@ -1065,6 +2005,12 @@ struct GrepArgs {
     path: Option<String>,
     #[serde(default)]
     glob: Option<String>,
+    #[serde(default)]
+    output_mode: Option<String>,
+    #[serde(default, rename = "-o")]
+    only_matching: bool,
+    #[serde(default)]
+    head_limit: Option<usize>,
 }
 
 async fn handle_grep(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
@@ -1078,6 +2024,12 @@ async fn handle_grep(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
             root
         }
     };
+    if is_zcode(&invocation) && !root.exists() {
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            format!("File not found: {}", root.display()),
+            Some(false),
+        )));
+    }
     let regex = Regex::new(&args.pattern)
         .map_err(|err| FunctionCallError::RespondToModel(format!("Grep failed: {err}")))?;
     let mut matches = Vec::new();
@@ -1098,6 +2050,101 @@ async fn handle_grep(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
         };
         return Ok(boxed_tool_output(FunctionToolOutput::from_text(
             format!("Found {} matches\n{body}{trailing_newline}", matches.len()),
+            Some(true),
+        )));
+    }
+    if is_zcode(&invocation) {
+        if args.output_mode.as_deref() == Some("content") {
+            let mut content_matches = Vec::new();
+            collect_zcode_grep_content_matches(
+                &root,
+                &args.pattern,
+                &regex,
+                args.glob.as_deref(),
+                args.only_matching,
+                &mut content_matches,
+            )
+            .map_err(|err| FunctionCallError::RespondToModel(format!("Grep failed: {err}")))?;
+            let pagination_limit = args.head_limit.filter(|limit| *limit > 0);
+            let truncated = pagination_limit.is_some_and(|limit| content_matches.len() > limit);
+            if let Some(limit) = pagination_limit {
+                content_matches.truncate(limit);
+            }
+            if content_matches.is_empty() {
+                return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                    "No files found".to_string(),
+                    Some(true),
+                )));
+            }
+            let mut body = content_matches.join("\n");
+            if truncated && let Some(limit) = pagination_limit {
+                body.push_str(&format!(
+                    "\n\n[Showing results with pagination = limit: {limit}]"
+                ));
+            }
+            return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                format!(
+                    "{HARNESS_NO_TRUNCATE_PREFIX}{}",
+                    zcode_maybe_persist_large_grep_output(&invocation, &body)?
+                ),
+                Some(true),
+            )));
+        }
+        if args.output_mode.as_deref() == Some("count") {
+            let display_root = if args.path.is_some() {
+                harness_fs::primary_cwd(&invocation)
+            } else {
+                root.clone()
+            };
+            let mut count_matches = Vec::new();
+            collect_zcode_grep_count_matches(
+                &display_root,
+                &root,
+                &regex,
+                args.glob.as_deref(),
+                &mut count_matches,
+            )
+            .map_err(|err| FunctionCallError::RespondToModel(format!("Grep failed: {err}")))?;
+            count_matches.sort();
+            count_matches.dedup();
+            let total_files = count_matches.len();
+            let total_occurrences: usize = count_matches
+                .iter()
+                .filter_map(|item| item.rsplit_once(':')?.1.parse::<usize>().ok())
+                .sum();
+            let truncated = count_matches.len() > 250;
+            count_matches.truncate(250);
+            if count_matches.is_empty() {
+                return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                    "No files found".to_string(),
+                    Some(true),
+                )));
+            }
+            let mut body = count_matches.join("\n");
+            if truncated {
+                body.push_str(&format!(
+                    "\n\nFound {total_occurrences} total occurrences across {total_files} files. with pagination = limit: 250"
+                ));
+            }
+            return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                body,
+                Some(true),
+            )));
+        }
+        if matches.is_empty() {
+            return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                "No files found".to_string(),
+                Some(true),
+            )));
+        }
+        let file_label = if matches.len() == 1 { "file" } else { "files" };
+        let body = format!(
+            "Found {} {file_label}\n{}",
+            matches.len(),
+            matches.join("\n")
+        );
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            body,
             Some(true),
         )));
     }
@@ -1257,6 +2304,494 @@ async fn handle_opencode_todowrite(
     )))
 }
 
+async fn handle_zcode_todo_read(
+    invocation: ToolInvocation,
+) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    let todos = zcode_todos(&invocation);
+    Ok(boxed_tool_output(FunctionToolOutput::from_text(
+        serde_json::to_string(&ZCodeTodoReadOutput { todos }).unwrap_or_else(|_| "{}".to_string()),
+        Some(true),
+    )))
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ZCodeTodoItem {
+    content: String,
+    status: String,
+    priority: String,
+}
+
+#[derive(Deserialize)]
+struct ZCodeTodoWriteArgs {
+    todos: Vec<ZCodeTodoItem>,
+}
+
+async fn handle_zcode_todo_write(
+    invocation: ToolInvocation,
+) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    let arguments = function_arguments(&invocation.payload)?;
+    let args: ZCodeTodoWriteArgs = parse_arguments(arguments)?;
+    let old_todos = zcode_todos(&invocation);
+    let old_todos = if old_todos.is_empty() {
+        latest_zcode_todos_from_history(
+            &invocation.session.clone_history().await.into_raw_items(),
+            &invocation.call_id,
+        )
+        .unwrap_or(old_todos)
+    } else {
+        old_todos
+    };
+    if let Ok(mut stored) = ZCODE_TODOS.lock() {
+        *stored = args.todos.clone();
+    }
+    record_zcode_todos(&invocation, &args.todos);
+    let summary = zcode_todo_summary(&args.todos);
+    Ok(boxed_tool_output(FunctionToolOutput::from_text(
+        serde_json::to_string(&ZCodeTodoWriteOutput {
+            old_todos,
+            todos: args.todos,
+            summary,
+        })
+        .unwrap_or_else(|_| "{}".to_string()),
+        Some(true),
+    )))
+}
+
+fn latest_zcode_todos_from_history(
+    history: &[ResponseItem],
+    current_call_id: &str,
+) -> Option<Vec<ZCodeTodoItem>> {
+    history.iter().rev().find_map(|item| {
+        let ResponseItem::FunctionCall {
+            name,
+            arguments,
+            call_id,
+            ..
+        } = item
+        else {
+            return None;
+        };
+        if name != "TodoWrite" || call_id == current_call_id {
+            return None;
+        }
+        serde_json::from_str::<ZCodeTodoWriteArgs>(arguments)
+            .ok()
+            .map(|args| args.todos)
+    })
+}
+
+fn zcode_todos(invocation: &ToolInvocation) -> Vec<ZCodeTodoItem> {
+    let stored = ZCODE_TODOS
+        .lock()
+        .map(|todos| todos.clone())
+        .unwrap_or_default();
+    if stored.is_empty() {
+        zcode_harness_home()
+            .and_then(|home| zcode_todos_at_home(&home, invocation))
+            .unwrap_or_default()
+    } else {
+        stored
+    }
+}
+
+fn record_zcode_todos(invocation: &ToolInvocation, todos: &[ZCodeTodoItem]) {
+    if let Some(home) = zcode_harness_home() {
+        record_zcode_todos_at_home(&home, invocation, todos);
+    }
+}
+
+fn record_zcode_todos_at_home(home: &Path, invocation: &ToolInvocation, todos: &[ZCodeTodoItem]) {
+    let cache_path = zcode_todo_cache_path(home, invocation);
+    if let Some(parent) = cache_path.parent()
+        && std::fs::create_dir_all(parent).is_ok()
+        && let Ok(serialized) = serde_json::to_string(todos)
+    {
+        let _ = std::fs::write(cache_path, serialized);
+    }
+}
+
+fn zcode_todos_at_home(home: &Path, invocation: &ToolInvocation) -> Option<Vec<ZCodeTodoItem>> {
+    let serialized = std::fs::read_to_string(zcode_todo_cache_path(home, invocation)).ok()?;
+    serde_json::from_str(&serialized).ok()
+}
+
+fn zcode_todo_cache_path(home: &Path, invocation: &ToolInvocation) -> PathBuf {
+    home.join(ZCODE_TODO_CACHE_DIR)
+        .join(format!("{}.json", zcode_session_key(invocation)))
+}
+
+#[derive(Serialize)]
+struct ZCodeTodoWriteOutput {
+    #[serde(rename = "oldTodos")]
+    old_todos: Vec<ZCodeTodoItem>,
+    todos: Vec<ZCodeTodoItem>,
+    summary: ZCodeTodoSummary,
+}
+
+#[derive(Serialize)]
+struct ZCodeTodoReadOutput {
+    todos: Vec<ZCodeTodoItem>,
+}
+
+#[derive(Serialize)]
+struct ZCodeTodoSummary {
+    total: usize,
+    pending: usize,
+    #[serde(rename = "inProgress")]
+    in_progress: usize,
+    completed: usize,
+}
+
+fn zcode_todo_summary(todos: &[ZCodeTodoItem]) -> ZCodeTodoSummary {
+    let pending = zcode_todo_status_count(todos, "pending");
+    let in_progress = zcode_todo_status_count(todos, "in_progress");
+    let completed = zcode_todo_status_count(todos, "completed");
+    ZCodeTodoSummary {
+        total: todos.len(),
+        pending,
+        in_progress,
+        completed,
+    }
+}
+
+fn zcode_todo_status_count(items: &[ZCodeTodoItem], status: &str) -> usize {
+    items.iter().filter(|item| item.status == status).count()
+}
+
+pub(crate) fn zcode_todo_reminder_text() -> String {
+    let todos = ZCODE_TODOS
+        .lock()
+        .map(|todos| todos.clone())
+        .unwrap_or_default();
+    let todo_lines = todos
+        .iter()
+        .enumerate()
+        .map(|(index, todo)| format!("{}. [{}] {}", index + 1, todo.status, todo.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "<system-reminder>\nThe TodoWrite tool hasn't been used recently. If you're working on tasks that would benefit from tracking progress, consider using the TodoWrite tool to track progress. Also consider cleaning up the todo list if has become stale and no longer matches what you are working on. Only use it if it's relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n\nHere are the existing contents of your todo list:\n\n[{todo_lines}]\n</system-reminder>"
+    )
+}
+
+async fn handle_zcode_enter_plan_mode(
+    _invocation: ToolInvocation,
+) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    Ok(boxed_tool_output(FunctionToolOutput::from_text(
+        "Entered plan mode. You should now focus on exploring the codebase and designing an implementation approach.\n\nIn plan mode, you should:\n1. Thoroughly explore the codebase to understand existing patterns\n2. Identify similar features and architectural approaches\n3. Consider multiple approaches and their trade-offs\n4. Use AskUserQuestion if you need to clarify the approach\n5. Design a concrete implementation strategy\n6. When ready, use ExitPlanMode to present your plan for approval\n\nRemember: DO NOT write or edit any files yet. This is a read-only exploration and planning phase.".to_string(),
+        Some(true),
+    )))
+}
+
+async fn handle_zcode_exit_plan_mode(
+    invocation: ToolInvocation,
+) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    let arguments = function_arguments(&invocation.payload)?;
+    let input: serde_json::Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
+    let plan = input
+        .get("plan")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    Ok(boxed_tool_output(FunctionToolOutput::from_text(
+        format!("Plan submitted for approval.\n\n{plan}"),
+        Some(true),
+    )))
+}
+
+async fn handle_zcode_read_session_context(
+    invocation: ToolInvocation,
+) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    let arguments = function_arguments(&invocation.payload)?;
+    let input: ZCodeReadSessionContextArgs = parse_arguments(arguments)?;
+    let max_tokens = input.max_tokens.clamp(1, 12_000);
+    let history = invocation.session.clone_history().await.into_raw_items();
+    let title = zcode_read_session_context_title(&history);
+    let cwd = harness_fs::primary_cwd(&invocation);
+    let extraction_prompt =
+        build_zcode_read_session_context_prompt(&history, &input, &cwd, arguments);
+    let client_session = invocation.session.services.model_client.new_session();
+    let extracted = client_session
+        .zcode_read_session_context(
+            extraction_prompt,
+            max_tokens,
+            &invocation.turn.model_info,
+            &invocation.turn.session_telemetry,
+        )
+        .await
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!("ReadSessionContext failed: {err}"))
+        })?;
+    Ok(boxed_tool_output(FunctionToolOutput::from_text(
+        format!(
+            "ReadSessionContext returned lite context for {}.\nTitle: {}\n{}",
+            input.session_id, title, extracted
+        ),
+        Some(true),
+    )))
+}
+
+fn default_zcode_read_session_context_strategy() -> String {
+    "relevant".to_string()
+}
+
+fn default_zcode_read_session_context_max_tokens() -> u32 {
+    4_000
+}
+
+fn build_zcode_read_session_context_prompt(
+    history: &[ResponseItem],
+    input: &ZCodeReadSessionContextArgs,
+    cwd: &Path,
+    current_arguments: &str,
+) -> String {
+    let title = zcode_read_session_context_title(history);
+    let cwd = cwd.display();
+    let mut transcript = format!(
+        "# Cleaned transcript\nSession: {title} ({})\nDirectory: {cwd}\nPath: {cwd}\nStrategy: {}\nQuery: {}",
+        input.session_id, input.strategy, input.query
+    );
+
+    let mut message_index = 1usize;
+    let mut item_index = 0usize;
+    while item_index < history.len() {
+        match &history[item_index] {
+            ResponseItem::Message { role, content, .. } if role == "user" => {
+                if let Some(text) = response_content_text(content) {
+                    if is_zcode_native_environment_context(&text) {
+                        item_index += 1;
+                        continue;
+                    }
+                    push_zcode_transcript_entry(
+                        &mut transcript,
+                        message_index,
+                        "user",
+                        &zcode_message_id(message_index),
+                        &text,
+                        /*step_finished*/ None,
+                        /*separator*/ true,
+                    );
+                    message_index += 1;
+                }
+            }
+            ResponseItem::Message { role, content, .. } if role == "assistant" => {
+                if let Some(text) = response_content_text(content) {
+                    push_zcode_transcript_entry(
+                        &mut transcript,
+                        message_index,
+                        "assistant",
+                        &zcode_message_id(message_index),
+                        &text,
+                        Some("stop"),
+                        /*separator*/ true,
+                    );
+                    message_index += 1;
+                }
+            }
+            ResponseItem::FunctionCall {
+                name,
+                arguments,
+                call_id,
+                ..
+            } => {
+                if let Some(output) = history.get(item_index + 1).and_then(|item| match item {
+                    ResponseItem::FunctionCallOutput {
+                        call_id: output_call_id,
+                        output,
+                        ..
+                    } if output_call_id == call_id => output.body.to_text(),
+                    _ => None,
+                }) {
+                    let input_text = zcode_tool_input_text(name, arguments);
+                    let text = format!(
+                        "Tool {name} completed\ninput: {input_text}\noutput: {output}\n\nStep finished: tool-calls"
+                    );
+                    push_zcode_transcript_entry(
+                        &mut transcript,
+                        message_index,
+                        "assistant",
+                        &zcode_message_id(message_index),
+                        &text,
+                        /*step_finished*/ None,
+                        /*separator*/ true,
+                    );
+                    message_index += 1;
+                    item_index += 1;
+                }
+            }
+            _ => {}
+        }
+        item_index += 1;
+    }
+
+    let current_input = zcode_tool_input_text("ReadSessionContext", current_arguments);
+    let text = format!("Tool ReadSessionContext running\ninput: {current_input}");
+    push_zcode_transcript_entry(
+        &mut transcript,
+        message_index,
+        "assistant",
+        &zcode_message_id(message_index),
+        &text,
+        /*step_finished*/ None,
+        /*separator*/ false,
+    );
+
+    format!(
+        "Target session: {title} ({})\nDirectory: {cwd}\nPath: {cwd}\nStrategy: {}\nQuery: {}\nMaterial: full cleaned transcript\n\nExtract only context relevant to the query.\nPrefer concrete facts: files, commands, decisions, errors, constraints, user preferences, and unresolved next steps.\nMention message ids when helpful.\n\nTranscript material:\n{transcript}",
+        input.session_id, input.strategy, input.query
+    )
+}
+
+fn zcode_read_session_context_title(history: &[ResponseItem]) -> String {
+    let first_user = history
+        .iter()
+        .filter_map(|item| match item {
+            ResponseItem::Message { role, content, .. } if role == "user" => {
+                response_content_text(content)
+            }
+            _ => None,
+        })
+        .find(|text| !is_zcode_native_environment_context(text))
+        .unwrap_or_default();
+    zcode_session_title(&first_user)
+}
+
+fn response_content_text(content: &[ContentItem]) -> Option<String> {
+    let text = content
+        .iter()
+        .filter_map(|item| match item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn is_zcode_native_environment_context(text: &str) -> bool {
+    text.trim_start().starts_with("<environment_context>")
+}
+
+fn zcode_session_title(text: &str) -> String {
+    let mut title = text.chars().take(57).collect::<String>();
+    if text.chars().count() > 57 {
+        title.push_str("...");
+    }
+    title
+}
+
+fn zcode_message_id(index: usize) -> String {
+    format!("msg_native_{index:04}")
+}
+
+fn push_zcode_transcript_entry(
+    transcript: &mut String,
+    index: usize,
+    role: &str,
+    message_id: &str,
+    text: &str,
+    step_finished: Option<&str>,
+    separator: bool,
+) {
+    transcript.push_str("\n[");
+    transcript.push_str(&index.to_string());
+    transcript.push_str("] ");
+    transcript.push_str(role);
+    transcript.push(' ');
+    transcript.push_str(message_id);
+    transcript.push_str("\ncreated: 2026-06-21T00:00:00.000Z\n");
+    transcript.push_str(text);
+    if let Some(step_finished) = step_finished {
+        transcript.push_str("\n\nStep finished: ");
+        transcript.push_str(step_finished);
+    }
+    if separator {
+        transcript.push_str("\n\n---\n");
+    }
+}
+
+fn zcode_tool_input_text(name: &str, arguments: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return arguments.to_string();
+    };
+    match name {
+        "Write" => {
+            let file_path = value
+                .get("file_path")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let content = value
+                .get("content")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            format!("{{\"file_path\":{file_path},\"content\":{content}}}")
+        }
+        "ReadSessionContext" => {
+            let session_id = value
+                .get("sessionId")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let query = value
+                .get("query")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let strategy = value
+                .get("strategy")
+                .cloned()
+                .unwrap_or_else(|| json!("relevant"));
+            let max_tokens = value
+                .get("maxTokens")
+                .cloned()
+                .unwrap_or_else(|| json!(4_000));
+            format!(
+                "{{\"sessionId\":{session_id},\"query\":{query},\"strategy\":{strategy},\"maxTokens\":{max_tokens}}}"
+            )
+        }
+        _ => value.to_string(),
+    }
+}
+
+async fn handle_zcode_skill(
+    invocation: ToolInvocation,
+) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
+    if is_kimi_code(&invocation) {
+        return super::kimi_code_skill::handle(invocation).await;
+    }
+    let arguments = function_arguments(&invocation.payload)?;
+    let input: serde_json::Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
+    let skill = input
+        .get("skill")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    if skill == "skill-creator" {
+        let body = ZCODE_SKILL_CREATOR_MD
+            .strip_prefix("---\n")
+            .and_then(|content| content.split_once("\n---\n").map(|(_, body)| body))
+            .unwrap_or(ZCODE_SKILL_CREATOR_MD)
+            .trim_start();
+        let home = std::env::var("OPEN_INTERPRETER_HOME")
+            .or_else(|_| std::env::var("INTERPRETER_HOME"))
+            .or_else(|_| std::env::var("CODEX_HOME"))
+            .unwrap_or_else(|_| "~".to_string());
+        let base_dir = Path::new(&home)
+            .join(".zcode/cli/plugins/cache/zcode-plugins-official/skill-creator")
+            .join(ZCODE_SKILL_CREATOR_VERSION)
+            .join("skills/skill-creator");
+        return Ok(boxed_tool_output(FunctionToolOutput::from_text(
+            format!(
+                "<skill_content name=\"skill-creator\">\n# Skill: skill-creator\n{body}Base directory for this skill: {}\nRelative paths in this skill are relative to this base directory.\n</skill_content>",
+                base_dir.display()
+            ),
+            Some(true),
+        )));
+    }
+    Ok(boxed_tool_output(FunctionToolOutput::from_text(
+        format!("Skill `{skill}` is not available through the native ZCode harness yet."),
+        Some(false),
+    )))
+}
+
 #[derive(Deserialize)]
 struct OpenCodeTaskArgs {
     description: String,
@@ -1345,6 +2880,74 @@ fn opencode_task_name(description: &str) -> String {
         "task".to_string()
     } else {
         name.to_string()
+    }
+}
+
+async fn zcode_agent_result_with_footer(
+    agent_control: &crate::agent::AgentControl,
+    thread_id: ThreadId,
+    result: String,
+    fallback_duration_ms: i64,
+) -> String {
+    let token_info = agent_control.get_agent_token_usage_info(thread_id).await;
+    let rollout_items = agent_control
+        .get_agent_rollout_items(thread_id)
+        .await
+        .unwrap_or_default();
+    let subagent_tokens = token_info
+        .map(|info| info.total_token_usage.total_tokens)
+        .unwrap_or_default();
+    let stats = zcode_agent_rollout_stats(&rollout_items, fallback_duration_ms);
+    let agent_id = format!("agent_{thread_id}");
+    format!(
+        "{}\nagentId: {} (use SendMessage with to: '{}' to continue this agent)\n<usage>subagent_tokens: {}\ntool_uses: {}\nduration_ms: {}</usage>",
+        result.trim_end(),
+        agent_id,
+        agent_id,
+        subagent_tokens,
+        stats.tool_uses,
+        stats.duration_ms
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ZCodeAgentRolloutStats {
+    tool_uses: usize,
+    duration_ms: i64,
+}
+
+fn zcode_agent_rollout_stats(
+    rollout_items: &[RolloutItem],
+    fallback_duration_ms: i64,
+) -> ZCodeAgentRolloutStats {
+    let mut tool_uses = 0usize;
+    let mut duration_ms = 0i64;
+    for item in rollout_items {
+        match item {
+            RolloutItem::ResponseItem(ResponseItem::FunctionCall { .. }) => {
+                tool_uses += 1;
+            }
+            RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
+                if let Some(turn_duration_ms) = event.duration_ms {
+                    duration_ms = duration_ms.saturating_add(turn_duration_ms);
+                }
+            }
+            RolloutItem::SessionMeta(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::Compacted(_)
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::WorldState(_)
+            | RolloutItem::EventMsg(_) => {}
+        }
+    }
+    if duration_ms == 0 {
+        duration_ms = fallback_duration_ms;
+    }
+    ZCodeAgentRolloutStats {
+        tool_uses,
+        duration_ms,
     }
 }
 
@@ -1679,6 +3282,15 @@ fn is_opencode(invocation: &ToolInvocation) -> bool {
         .harness
         .as_deref()
         .is_some_and(|harness| harness == "opencode")
+}
+
+fn is_zcode(invocation: &ToolInvocation) -> bool {
+    invocation
+        .turn
+        .config
+        .harness
+        .as_deref()
+        .is_some_and(|harness| harness == "zcode")
 }
 
 fn format_opencode_grep_matches(root: &Path, matches: &[String], pattern: &str) -> String {
@@ -2030,6 +3642,106 @@ fn collect_grep_matches(
     Ok(())
 }
 
+fn collect_zcode_grep_content_matches(
+    path: &Path,
+    pattern: &str,
+    regex: &Regex,
+    glob: Option<&str>,
+    only_matching: bool,
+    matches: &mut Vec<String>,
+) -> std::io::Result<()> {
+    if path.is_file() {
+        collect_zcode_grep_content_matches_for_file(
+            path,
+            path,
+            pattern,
+            regex,
+            only_matching,
+            matches,
+        );
+        return Ok(());
+    }
+    for entry in harness_fs::bounded_walk(path)? {
+        if entry.kind != WalkEntryKind::File {
+            continue;
+        }
+        let entry_path = entry.path;
+        let relative = entry_path
+            .strip_prefix(path)
+            .unwrap_or(entry_path.as_path());
+        let relative_text = relative.to_string_lossy();
+        if glob.is_none_or(|pattern| simple_glob_matches(pattern, &relative_text)) {
+            collect_zcode_grep_content_matches_for_file(
+                &entry_path,
+                &entry_path,
+                pattern,
+                regex,
+                only_matching,
+                matches,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn collect_zcode_grep_content_matches_for_file(
+    display_path: &Path,
+    path: &Path,
+    pattern: &str,
+    regex: &Regex,
+    only_matching: bool,
+    matches: &mut Vec<String>,
+) {
+    let Some(text) = harness_fs::read_search_file(path) else {
+        return;
+    };
+    for (line_index, line) in text.lines().enumerate() {
+        if only_matching {
+            if regex.is_match(line) {
+                matches.push(format!(
+                    "{}:{}:{}",
+                    display_path.display(),
+                    line_index + 1,
+                    pattern
+                ));
+            }
+        } else if regex.is_match(line) {
+            matches.push(format!(
+                "{}:{}:{}",
+                display_path.display(),
+                line_index + 1,
+                line
+            ));
+        }
+    }
+}
+
+fn collect_zcode_grep_count_matches(
+    display_root: &Path,
+    path: &Path,
+    regex: &Regex,
+    glob: Option<&str>,
+    matches: &mut Vec<String>,
+) -> std::io::Result<()> {
+    for entry in harness_fs::bounded_walk(path)? {
+        if entry.kind != WalkEntryKind::File {
+            continue;
+        }
+        let path = entry.path;
+        let relative = path.strip_prefix(display_root).unwrap_or(path.as_path());
+        let relative_text = relative.to_string_lossy();
+        if glob.is_none_or(|pattern| simple_glob_matches(pattern, &relative_text))
+            && let Some(text) = harness_fs::read_search_file(&path)
+        {
+            let count = text.lines().filter(|line| regex.is_match(line)).count();
+            if count > 0 {
+                matches.push(format!("{relative_text}:{count}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn collect_grep_line_matches(
     root: &Path,
     path: &Path,
@@ -2131,7 +3843,11 @@ fn harness_alias_spec(name: &str) -> ToolSpec {
         description: format!("Open Interpreter harness compatibility alias for {name}."),
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::object(properties, None, Some(AdditionalProperties::from(true))),
+        parameters: JsonSchema::object(
+            properties,
+            /*required*/ None,
+            Some(AdditionalProperties::from(true)),
+        ),
         output_schema: None,
     })
 }
@@ -2183,7 +3899,7 @@ fn task_stop_spec() -> ToolSpec {
         description: "\n- Stops a running background task by its ID\n- Takes a task_id parameter identifying the task to stop\n- Returns a success or failure status\n- Use this tool when you need to terminate a long-running task\n".to_string(),
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::object(properties, None, Some(AdditionalProperties::from(false))),
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(AdditionalProperties::from(false))),
         output_schema: None,
     })
 }
@@ -2334,9 +4050,11 @@ mod tests {
     use tokio::sync::Mutex;
     use tokio_util::sync::CancellationToken;
 
+    use crate::environment_selection::TurnEnvironmentState;
     use crate::session::tests::make_session_and_context;
     use crate::session::turn_context::TurnEnvironment;
     use crate::tools::context::ToolCallSource;
+    use crate::tools::context::ToolPayload;
     use crate::tools::registry::ToolExecutor;
     use crate::turn_diff_tracker::TurnDiffTracker;
 
@@ -2345,7 +4063,19 @@ mod tests {
         tool_name: &str,
         args: serde_json::Value,
     ) -> ToolInvocation {
+        invocation_with_harness(workspace, tool_name, args, /*harness*/ None).await
+    }
+
+    async fn invocation_with_harness(
+        workspace: &TempDir,
+        tool_name: &str,
+        args: serde_json::Value,
+        harness: Option<&str>,
+    ) -> ToolInvocation {
         let (session, mut turn) = make_session_and_context().await;
+        if let Some(harness) = harness {
+            Arc::make_mut(&mut turn.config).harness = Some(harness.to_string());
+        }
         let workspace_root = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(
             std::fs::canonicalize(workspace.path()).expect("workspace path should canonicalize"),
         )
@@ -2354,13 +4084,19 @@ mod tests {
         {
             turn.cwd = workspace_root.clone();
         }
-        let current = turn.environments.turn_environments[0].clone();
-        turn.environments.turn_environments[0] = TurnEnvironment::new(
+        let current = turn
+            .environments
+            .primary()
+            .expect("primary environment")
+            .clone();
+        let workspace_root_uri: codex_utils_path_uri::PathUri = workspace_root.clone().into();
+        turn.environments.environments[0] = TurnEnvironmentState::Ready(TurnEnvironment::new(
             current.environment_id,
             current.environment,
-            workspace_root.clone().into(),
+            workspace_root_uri.clone(),
+            vec![workspace_root_uri],
             current.shell,
-        );
+        ));
         let file_system_sandbox_policy =
             FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
                 path: FileSystemPath::Path {
@@ -2372,9 +4108,11 @@ mod tests {
             &file_system_sandbox_policy,
             NetworkSandboxPolicy::Restricted,
         );
+        let turn = Arc::new(turn);
         ToolInvocation {
             session: session.into(),
-            turn: turn.into(),
+            turn: Arc::clone(&turn),
+            step_context: crate::session::step_context::StepContext::for_test(Arc::clone(&turn)),
             cancellation_token: CancellationToken::new(),
             tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
             call_id: "call-harness-alias".to_string(),
@@ -2430,6 +4168,27 @@ mod tests {
             matches!(&err, FunctionCallError::RespondToModel(message) if message.contains("sandbox policy denied read access")),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn write_alias_creates_missing_parent_directories() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+
+        let output = handle_text(
+            &workspace,
+            HarnessAliasHandler::Write,
+            "Write",
+            json!({ "path": "tests/game-logic.test.js", "content": "assert(true);\n" }),
+        )
+        .await
+        .expect("write should create missing parent directories");
+
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("tests/game-logic.test.js"))
+                .expect("read written nested file"),
+            "assert(true);\n"
+        );
+        assert_eq!(output, "Wrote 14 bytes to tests/game-logic.test.js");
     }
 
     #[tokio::test]
@@ -2501,15 +4260,589 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zcode_failed_bash_keeps_large_stderr_inline() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let invocation = invocation(&workspace, "Bash", json!({})).await;
+        let raw_output = (0..900)
+            .map(|index| format!("ZCODE_LARGE_STDERR_{index:04}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let (output, success) =
+            zcode_bash_output(&invocation, &raw_output, Some(7)).expect("bash output");
+
+        assert_eq!(success, Some(false));
+        assert!(output.starts_with("Exit code 7\nZCODE_LARGE_STDERR_0000"));
+        assert!(output.contains("ZCODE_LARGE_STDERR_0899"));
+        assert!(!output.contains("<persisted-output>"));
+    }
+
+    #[tokio::test]
+    async fn zcode_failed_bash_trims_leading_blank_output() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let invocation = invocation(&workspace, "Bash", json!({})).await;
+
+        let (output, success) =
+            zcode_bash_output(&invocation, "\n# first line\n", Some(1)).expect("bash output");
+
+        assert_eq!(success, Some(false));
+        assert_eq!(output, "Exit code 1\n# first line");
+    }
+
+    #[tokio::test]
+    async fn zcode_failed_bash_defers_interleaved_failure_markers() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let invocation = invocation(&workspace, "Bash", json!({})).await;
+        let raw_output = "# energy cache pickup restores energy and clears cell\n  ✗ energy increased by ENERGY_PICKUP (expected 30, got 29)\n\n# exit is sealed until all relics are collected\n  ✗ at exit x (expected 9, got 1)\n\n========================================\nPassed: 115   Failed: 2\n\nFailures:\n  - energy increased by ENERGY_PICKUP (expected 30, got 29)\n  - at exit x (expected 9, got 1)\n";
+
+        let (output, success) =
+            zcode_bash_output(&invocation, raw_output, Some(1)).expect("bash output");
+
+        assert_eq!(success, Some(false));
+        assert_eq!(
+            output,
+            "Exit code 1\n# energy cache pickup restores energy and clears cell\n\n# exit is sealed until all relics are collected\n\n========================================\nPassed: 115   Failed: 2\n\nFailures:\n  - energy increased by ENERGY_PICKUP (expected 30, got 29)\n  - at exit x (expected 9, got 1)\n✗ energy increased by ENERGY_PICKUP (expected 30, got 29)\n  ✗ at exit x (expected 9, got 1)"
+        );
+    }
+
+    #[tokio::test]
+    async fn zcode_failed_bash_defers_leading_node_failure_diagnostics() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let invocation = invocation(&workspace, "Bash", json!({})).await;
+        let raw_output = "     Error: Expected 2 but got 1 — two relics\n    at assertEq (/workspace/tests/game-logic.test.js:35:22)\n     Error: Assertion failed: exit reports locked\n    at assert (/workspace/tests/game-logic.test.js:32:20)\n\nSignal Cartographer — game-logic tests\n  19 passed, 4 failed\n✗ collecting a relic consumes it and increments count\n  ✗ exit is locked until all relics are collected";
+
+        let (output, success) =
+            zcode_bash_output(&invocation, raw_output, Some(1)).expect("bash output");
+
+        assert_eq!(success, Some(false));
+        assert_eq!(
+            output,
+            "Exit code 1\nSignal Cartographer — game-logic tests\n  19 passed, 4 failed\n✗ collecting a relic consumes it and increments count\n     Error: Expected 2 but got 1 — two relics\n    at assertEq (/workspace/tests/game-logic.test.js:35:22)\n  ✗ exit is locked until all relics are collected\n     Error: Assertion failed: exit reports locked\n    at assert (/workspace/tests/game-logic.test.js:32:20)"
+        );
+    }
+
+    #[tokio::test]
+    async fn zcode_failed_bash_defers_all_captured_node_failure_diagnostics() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let invocation = invocation(&workspace, "Bash", json!({})).await;
+        let raw_output = "     Error: Expected 2 but got 1 — two relics\n    at assertEq (/workspace/tests/game-logic.test.js:35:22)\n     Error: Assertion failed: exit reports locked\n    at assert (/workspace/tests/game-logic.test.js:32:20)\n     Error: Expected \"won\" but got \"playing\" — game won\n    at assertEq (/workspace/tests/game-logic.test.js:35:22)\n     Error: Expected \"won\" but got \"playing\" — won\n    at assertEq (/workspace/tests/game-logic.test.js:35:22)\n\nSignal Cartographer — game-logic tests\n  19 passed, 4 failed\n✗ collecting a relic consumes it and increments count\n  ✗ exit is locked until all relics are collected\n  ✗ reaching exit after all relics wins and scores\n  ✗ score includes relic value and energy bonus";
+
+        let (output, success) =
+            zcode_bash_output(&invocation, raw_output, Some(1)).expect("bash output");
+
+        assert_eq!(success, Some(false));
+        assert_eq!(
+            output,
+            "Exit code 1\nSignal Cartographer — game-logic tests\n  19 passed, 4 failed\n✗ collecting a relic consumes it and increments count\n     Error: Expected 2 but got 1 — two relics\n    at assertEq (/workspace/tests/game-logic.test.js:35:22)\n  ✗ exit is locked until all relics are collected\n     Error: Assertion failed: exit reports locked\n    at assert (/workspace/tests/game-logic.test.js:32:20)\n  ✗ reaching exit after all relics wins and scores\n     Error: Expected \"won\" but got \"playing\" — game won\n    at assertEq (/workspace/tests/game-logic.test.js:35:22)\n  ✗ score includes relic value and energy bonus\n     Error: Expected \"won\" but got \"playing\" — won\n    at assertEq (/workspace/tests/game-logic.test.js:35:22)"
+        );
+    }
+
+    #[tokio::test]
+    async fn zcode_successful_bash_keeps_captured_large_stdout_inline() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let invocation = invocation(&workspace, "Bash", json!({})).await;
+        let raw_output = format!(
+            "0\tWEB_RESEARCH_ANIMATION | use the requestAnimationFrame timestamp\n{}\n1799\tWEB_RESEARCH_ANIMATION",
+            "x".repeat(61_000)
+        );
+
+        assert!(
+            raw_output.len() > 60_000 && raw_output.len() < 64 * 1024,
+            "fixture should cover captured ZCode inline stdout size without exceeding the inline limit"
+        );
+
+        let (output, success) =
+            zcode_bash_output(&invocation, &raw_output, Some(0)).expect("bash output");
+
+        assert_eq!(success, None);
+        assert!(output.starts_with("0\tWEB_RESEARCH_ANIMATION"));
+        assert!(output.contains("1799\tWEB_RESEARCH_ANIMATION"));
+        assert!(!output.contains("<persisted-output>"));
+    }
+
+    #[tokio::test]
+    async fn zcode_successful_bash_without_exit_code_matches_reference_shape() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let invocation = invocation(&workspace, "Bash", json!({})).await;
+
+        let (output, success) =
+            zcode_bash_output(&invocation, "hello\n", /*exit_code*/ None).expect("bash output");
+
+        assert_eq!(success, None);
+        assert_eq!(output, "hello");
+    }
+
+    #[tokio::test]
+    async fn zcode_successful_bash_trims_blank_lines_without_losing_indentation() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let invocation = invocation(&workspace, "Bash", json!({})).await;
+        let raw_output = "\n Tutorials\n \n \n";
+
+        let (output, success) =
+            zcode_bash_output(&invocation, raw_output, Some(0)).expect("bash output");
+
+        assert_eq!(success, None);
+        assert_eq!(output, " Tutorials");
+    }
+
+    #[tokio::test]
+    async fn zcode_successful_bash_trims_whitespace_only_first_line() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let invocation = invocation(&workspace, "Bash", json!({})).await;
+        let raw_output = " \n <html\n lang=\"en-US\"\n";
+
+        let (output, success) =
+            zcode_bash_output(&invocation, raw_output, Some(0)).expect("bash output");
+
+        assert_eq!(success, None);
+        assert_eq!(output, " <html\n lang=\"en-US\"");
+    }
+
+    #[tokio::test]
+    async fn zcode_repeated_read_returns_file_excerpt_again() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        std::fs::write(
+            workspace.path().join("read-target.txt"),
+            "alpha\nbeta\ngamma\n",
+        )
+        .expect("write read target");
+        let first_invocation = invocation_with_harness(
+            &workspace,
+            "Read",
+            json!({ "file_path": "read-target.txt", "offset": 1, "limit": 2 }),
+            Some("zcode"),
+        )
+        .await;
+        let second_invocation = first_invocation.clone();
+
+        let first = HarnessAliasHandler::Read
+            .handle(first_invocation)
+            .await
+            .expect("first read succeeds")
+            .log_preview();
+        let second = HarnessAliasHandler::Read
+            .handle(second_invocation)
+            .await
+            .expect("second read succeeds")
+            .log_preview();
+
+        assert_eq!(
+            first,
+            format!("{HARNESS_NO_TRUNCATE_PREFIX}1\talpha\n2\tbeta")
+        );
+        assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn zcode_whole_file_read_returns_wasted_call_when_file_state_is_current() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let write_invocation = invocation_with_harness(
+            &workspace,
+            "Write",
+            json!({
+                "file_path": "read-target.txt",
+                "content": "alpha\nbeta\ngamma\n",
+            }),
+            Some("zcode"),
+        )
+        .await;
+        let mut read_invocation = write_invocation.clone();
+        read_invocation.tool_name = codex_tools::ToolName::plain("Read");
+        read_invocation.payload = ToolPayload::Function {
+            arguments: json!({ "file_path": "read-target.txt" }).to_string(),
+        };
+
+        HarnessAliasHandler::Write
+            .handle(write_invocation)
+            .await
+            .expect("write succeeds");
+        let output = HarnessAliasHandler::Read
+            .handle(read_invocation)
+            .await
+            .expect("read succeeds")
+            .log_preview();
+
+        assert_eq!(
+            output,
+            "Wasted call — file unchanged since your last Read. Refer to that earlier tool_result instead."
+        );
+    }
+
+    #[tokio::test]
+    async fn zcode_history_marks_written_file_state_current_across_resume() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let invocation = invocation_with_harness(
+            &workspace,
+            "Read",
+            json!({ "file_path": "read-target.txt" }),
+            Some("zcode"),
+        )
+        .await;
+        let content = "alpha\nbeta\ngamma\n";
+        let current_hash = zcode_file_hash(content.as_bytes());
+        let target = std::fs::canonicalize(workspace.path())
+            .expect("workspace path should canonicalize")
+            .join("read-target.txt");
+        let history = vec![
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "Write".to_string(),
+                namespace: None,
+                arguments: json!({
+                    "file_path": "read-target.txt",
+                    "content": content,
+                })
+                .to_string(),
+                call_id: "call-write".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: "call-write".to_string(),
+                output: codex_protocol::models::FunctionCallOutputPayload::from_text(
+                    "File written successfully. The file state is current in your context."
+                        .to_string(),
+                ),
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ];
+
+        assert!(zcode_history_has_current_file_state_for_items(
+            &history,
+            &invocation,
+            &target,
+            &current_hash,
+        ));
+    }
+
+    #[tokio::test]
+    async fn zcode_file_state_hash_cache_persists_for_same_session() {
+        let home = tempfile::tempdir().expect("home temp dir");
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let path = workspace.path().join("read-target.txt");
+        std::fs::write(&path, "alpha\nbeta\ngamma\n").expect("write target file");
+        let first_invocation =
+            invocation_with_harness(&workspace, "Write", json!({}), Some("zcode")).await;
+        let second_invocation = first_invocation.clone();
+        let hash = zcode_file_hash(b"alpha\nbeta\ngamma\n");
+
+        record_zcode_current_file_hash_at_home(home.path(), &first_invocation, &path, &hash);
+
+        assert_eq!(
+            zcode_current_file_hash_at_home(home.path(), &second_invocation, &path).as_deref(),
+            Some(hash.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn zcode_compacted_history_retains_only_listed_read_files_for_stale_cache() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let retained_path = workspace.path().join("retained.txt");
+        let omitted_path = workspace.path().join("omitted.txt");
+        std::fs::write(&retained_path, "alpha").expect("write retained");
+        std::fs::write(&omitted_path, "beta").expect("write omitted");
+        let invocation =
+            invocation_with_harness(&workspace, "Read", json!({}), Some("zcode")).await;
+        let retained_arguments = json!({ "file_path": retained_path }).to_string();
+        let history = vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: ZCODE_COMPACTED_SUMMARY_PREFIX.to_string(),
+                },
+                ContentItem::InputText {
+                    text: format!(
+                        "<system-reminder>\nCalled the Read tool with the following input: {retained_arguments}\nResult of calling the Read tool:\n1\talpha\n</system-reminder>"
+                    ),
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }];
+
+        assert!(zcode_history_has_compacted_summary(&history));
+        assert!(zcode_history_retains_read_reminder_for_path(
+            &history,
+            &invocation,
+            &retained_path,
+        ));
+        assert!(!zcode_history_retains_read_reminder_for_path(
+            &history,
+            &invocation,
+            &omitted_path,
+        ));
+    }
+
+    #[tokio::test]
+    async fn zcode_read_missing_file_returns_captured_error_shape() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let invocation = invocation_with_harness(
+            &workspace,
+            "Read",
+            json!({ "file_path": "missing-file.txt" }),
+            Some("zcode"),
+        )
+        .await;
+        let call_id = invocation.call_id.clone();
+        let payload = invocation.payload.clone();
+        let output = HarnessAliasHandler::Read
+            .handle(invocation)
+            .await
+            .expect("read output");
+        let response = output.to_response_item(&call_id, &payload);
+
+        match response {
+            codex_protocol::models::ResponseInputItem::FunctionCallOutput { output, .. } => {
+                let expected_cwd =
+                    dunce::canonicalize(workspace.path()).expect("canonical workspace path");
+                let expected = format!(
+                    "{HARNESS_NO_TRUNCATE_PREFIX}File does not exist. Note: your current working directory is {}.",
+                    expected_cwd.display()
+                );
+                assert_eq!(output.success, Some(false));
+                assert_eq!(output.body.to_text().as_deref(), Some(expected.as_str()));
+            }
+            other => panic!("expected function output, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn zcode_read_explicit_range_over_token_cap_returns_captured_error_shape() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let content = "a".repeat(184_845);
+        std::fs::write(workspace.path().join("large-read.txt"), content).expect("write large file");
+        let invocation = invocation_with_harness(
+            &workspace,
+            "Read",
+            json!({ "file_path": "large-read.txt", "offset": 0, "limit": 1800 }),
+            Some("zcode"),
+        )
+        .await;
+        let call_id = invocation.call_id.clone();
+        let payload = invocation.payload.clone();
+        let output = HarnessAliasHandler::Read
+            .handle(invocation)
+            .await
+            .expect("read output");
+        let response = output.to_response_item(&call_id, &payload);
+
+        match response {
+            codex_protocol::models::ResponseInputItem::FunctionCallOutput { output, .. } => {
+                assert_eq!(output.success, Some(false));
+                let expected = format!(
+                    "{HARNESS_NO_TRUNCATE_PREFIX}{}",
+                    zcode_read_token_budget_error_text(/*token_count*/ 61_615)
+                );
+                assert_eq!(output.body.to_text().as_deref(), Some(expected.as_str()));
+            }
+            other => panic!("expected function output, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn zcode_read_offset_zero_numbers_first_line_zero() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        std::fs::write(
+            workspace.path().join("offset-zero.txt"),
+            "alpha\nbeta\ngamma\n",
+        )
+        .expect("write read target");
+        let invocation = invocation_with_harness(
+            &workspace,
+            "Read",
+            json!({ "file_path": "offset-zero.txt", "offset": 0, "limit": 2 }),
+            Some("zcode"),
+        )
+        .await;
+
+        let output = HarnessAliasHandler::Read
+            .handle(invocation)
+            .await
+            .expect("read output")
+            .log_preview();
+
+        assert_eq!(
+            output,
+            format!("{HARNESS_NO_TRUNCATE_PREFIX}0\talpha\n1\tbeta")
+        );
+    }
+
+    #[tokio::test]
+    async fn zcode_edit_without_prior_read_returns_captured_error_shape() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        std::fs::write(workspace.path().join("edit-target.txt"), "original")
+            .expect("write edit target");
+        let invocation = invocation_with_harness(
+            &workspace,
+            "Edit",
+            json!({
+                "file_path": "edit-target.txt",
+                "old_string": "NOT_PRESENT",
+                "new_string": "SHOULD_NOT_APPEAR",
+            }),
+            Some("zcode"),
+        )
+        .await;
+        let call_id = invocation.call_id.clone();
+        let payload = invocation.payload.clone();
+        let output = HarnessAliasHandler::Edit
+            .handle(invocation)
+            .await
+            .expect("edit output");
+        let response = output.to_response_item(&call_id, &payload);
+
+        match response {
+            codex_protocol::models::ResponseInputItem::FunctionCallOutput { output, .. } => {
+                assert_eq!(output.success, Some(false));
+                assert_eq!(
+                    output.body.to_text().as_deref(),
+                    Some(
+                        "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>"
+                    )
+                );
+            }
+            other => panic!("expected function output, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn zcode_grep_missing_path_returns_captured_error_shape() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let invocation = invocation_with_harness(
+            &workspace,
+            "Grep",
+            json!({ "pattern": "ZCODE_FAILURE_NEEDLE", "path": "missing-dir" }),
+            Some("zcode"),
+        )
+        .await;
+        let call_id = invocation.call_id.clone();
+        let payload = invocation.payload.clone();
+        let output = HarnessAliasHandler::Grep
+            .handle(invocation)
+            .await
+            .expect("grep output");
+        let response = output.to_response_item(&call_id, &payload);
+
+        match response {
+            codex_protocol::models::ResponseInputItem::FunctionCallOutput { output, .. } => {
+                let expected_path =
+                    dunce::canonicalize(workspace.path()).expect("canonical workspace path");
+                let expected = format!(
+                    "File not found: {}",
+                    expected_path.join("missing-dir").display()
+                );
+                assert_eq!(output.success, Some(false));
+                assert_eq!(output.body.to_text().as_deref(), Some(expected.as_str()));
+            }
+            other => panic!("expected function output, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn zcode_grep_content_only_matching_returns_captured_line_shape() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let target = workspace.path().join("diagnostics.txt");
+        std::fs::write(
+            &target,
+            "WEB_RESEARCH_CANVAS\nWEB_RESEARCH_ANIMATION first\nnone\nWEB_RESEARCH_ANIMATION second\n",
+        )
+        .expect("write grep target");
+        let invocation = invocation_with_harness(
+            &workspace,
+            "Grep",
+            json!({
+                "pattern": "WEB_RESEARCH_ANIMATION",
+                "path": "diagnostics.txt",
+                "output_mode": "content",
+                "-o": true,
+                "head_limit": 0,
+            }),
+            Some("zcode"),
+        )
+        .await;
+        let call_id = invocation.call_id.clone();
+        let payload = invocation.payload.clone();
+        let output = HarnessAliasHandler::Grep
+            .handle(invocation)
+            .await
+            .expect("grep output");
+        let response = output.to_response_item(&call_id, &payload);
+
+        match response {
+            codex_protocol::models::ResponseInputItem::FunctionCallOutput { output, .. } => {
+                let expected_path = dunce::canonicalize(&target).expect("canonical target");
+                let expected = format!(
+                    "{HARNESS_NO_TRUNCATE_PREFIX}{}:2:WEB_RESEARCH_ANIMATION\n{}:4:WEB_RESEARCH_ANIMATION",
+                    expected_path.display(),
+                    expected_path.display()
+                );
+                assert_eq!(output.body.to_text().as_deref(), Some(expected.as_str()));
+            }
+            other => panic!("expected function output, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn zcode_grep_content_head_limit_appends_captured_pagination_footer() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let target = workspace.path().join("diagnostics.txt");
+        std::fs::write(
+            &target,
+            "WEB_RESEARCH_ANIMATION first\nWEB_RESEARCH_ANIMATION second\nWEB_RESEARCH_ANIMATION third\n",
+        )
+        .expect("write grep target");
+        let invocation = invocation_with_harness(
+            &workspace,
+            "Grep",
+            json!({
+                "pattern": "WEB_RESEARCH_ANIMATION",
+                "path": "diagnostics.txt",
+                "output_mode": "content",
+                "head_limit": 2,
+            }),
+            Some("zcode"),
+        )
+        .await;
+        let call_id = invocation.call_id.clone();
+        let payload = invocation.payload.clone();
+        let output = HarnessAliasHandler::Grep
+            .handle(invocation)
+            .await
+            .expect("grep output");
+        let response = output.to_response_item(&call_id, &payload);
+
+        match response {
+            codex_protocol::models::ResponseInputItem::FunctionCallOutput { output, .. } => {
+                let expected_path = dunce::canonicalize(&target).expect("canonical target");
+                let expected = format!(
+                    "{HARNESS_NO_TRUNCATE_PREFIX}{}:1:WEB_RESEARCH_ANIMATION first\n{}:2:WEB_RESEARCH_ANIMATION second\n\n[Showing results with pagination = limit: 2]",
+                    expected_path.display(),
+                    expected_path.display()
+                );
+                assert_eq!(output.body.to_text().as_deref(), Some(expected.as_str()));
+            }
+            other => panic!("expected function output, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn kimi_read_media_file_alias_returns_image_payload() {
         let workspace = tempfile::tempdir().expect("workspace temp dir");
-        std::fs::write(workspace.path().join("red.png"), b"png-bytes").expect("write image file");
+        let image_path = workspace.path().join("red.png");
+        image::DynamicImage::new_rgb8(1, 1)
+            .save(&image_path)
+            .expect("write image file");
 
         let response_item = handle_response_item(
             &workspace,
             HarnessAliasHandler::ReadMediaFile,
             "ReadMediaFile",
-            json!({ "path": "red.png" }),
+            json!({
+                "path": "red.png",
+                "region": { "x": 0, "y": 0, "width": 1, "height": 1 },
+                "full_resolution": true,
+            }),
         )
         .await
         .expect("read media file succeeds");
@@ -2527,14 +4860,281 @@ mod tests {
         assert_eq!(
             items[0],
             FunctionCallOutputContentItem::InputText {
-                text: "<system>Read media file `red.png` as image/png.</system>".to_string(),
+                text: format!(
+                    "<image path=\"{}\">",
+                    dunce::canonicalize(&image_path)
+                        .expect("canonical image path")
+                        .display()
+                ),
             }
         );
         let FunctionCallOutputContentItem::InputImage { image_url, detail } = &items[1] else {
             panic!("expected image item");
         };
         assert!(image_url.starts_with("data:image/png;base64,"));
-        assert_eq!(*detail, None);
+        assert_eq!(*detail, Some(codex_protocol::models::ImageDetail::Original));
+        assert_eq!(
+            items[2],
+            FunctionCallOutputContentItem::InputText {
+                text: "</image>".to_string(),
+            }
+        );
+        let FunctionCallOutputContentItem::InputText { text } = &items[3] else {
+            panic!("expected media note");
+        };
+        assert!(text.contains("Original dimensions: 1x1 pixels."));
+        assert!(text.contains("Showing region (x=0, y=0, width=1, height=1)"));
+    }
+
+    #[tokio::test]
+    async fn kimi_read_media_file_accepts_all_provider_image_formats() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let image = image::DynamicImage::new_rgb8(2, 2);
+        for (filename, format) in [
+            ("sample.png", image::ImageFormat::Png),
+            ("sample.jpg", image::ImageFormat::Jpeg),
+            ("sample.webp", image::ImageFormat::WebP),
+        ] {
+            image
+                .save_with_format(workspace.path().join(filename), format)
+                .expect("write image fixture");
+        }
+        std::fs::write(
+            workspace.path().join("sample.gif"),
+            b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b",
+        )
+        .expect("write GIF fixture");
+
+        for (filename, mime_type) in [
+            ("sample.png", "image/png"),
+            ("sample.jpg", "image/jpeg"),
+            ("sample.gif", "image/gif"),
+            ("sample.webp", "image/webp"),
+        ] {
+            let response_item = handle_response_item(
+                &workspace,
+                HarnessAliasHandler::ReadMediaFile,
+                "ReadMediaFile",
+                json!({ "path": filename }),
+            )
+            .await
+            .expect("read media file succeeds");
+            let codex_protocol::models::ResponseInputItem::FunctionCallOutput { output, .. } =
+                response_item
+            else {
+                panic!("expected function call output");
+            };
+            let codex_protocol::models::FunctionCallOutputBody::ContentItems(items) = output.body
+            else {
+                panic!("expected content items");
+            };
+            let FunctionCallOutputContentItem::InputImage { image_url, .. } = &items[1] else {
+                panic!("expected image item");
+            };
+            assert!(
+                image_url.starts_with(format!("data:{mime_type};base64,").as_str()),
+                "unexpected image URL for {filename}: {image_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn zcode_read_session_context_prompt_has_expected_shape() {
+        let history = vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "<environment_context>\nignore native bootstrap\n</environment_context>"
+                        .to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "Create a note about ZCode session context".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "Write".to_string(),
+                namespace: None,
+                arguments: r#"{"content":"done","file_path":"notes.txt"}"#.to_string(),
+                call_id: "call-write".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: "call-write".to_string(),
+                output: codex_protocol::models::FunctionCallOutputPayload {
+                    body: codex_protocol::models::FunctionCallOutputBody::Text(
+                        "File written successfully.".to_string(),
+                    ),
+                    success: Some(true),
+                },
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ];
+        let input = ZCodeReadSessionContextArgs {
+            session_id: "session-123".to_string(),
+            query: "what changed?".to_string(),
+            strategy: "relevant".to_string(),
+            max_tokens: 4_000,
+        };
+        let current_arguments = r#"{"query":"what changed?","sessionId":"session-123"}"#;
+
+        let prompt = build_zcode_read_session_context_prompt(
+            &history,
+            &input,
+            Path::new("/tmp/workspace"),
+            current_arguments,
+        );
+
+        assert_eq!(
+            zcode_read_session_context_title(&history),
+            "Create a note about ZCode session context"
+        );
+        assert!(!prompt.contains("ignore native bootstrap"));
+        assert!(
+            prompt.contains(
+                "Target session: Create a note about ZCode session context (session-123)"
+            )
+        );
+        assert!(prompt.contains("[1] user msg_native_0001\ncreated: 2026-06-21T00:00:00.000Z\nCreate a note about ZCode session context"));
+        assert!(prompt.contains(
+            "Tool Write completed\ninput: {\"file_path\":\"notes.txt\",\"content\":\"done\"}\noutput: File written successfully.\n\nStep finished: tool-calls"
+        ));
+        assert!(prompt.contains(
+            "Tool ReadSessionContext running\ninput: {\"sessionId\":\"session-123\",\"query\":\"what changed?\",\"strategy\":\"relevant\",\"maxTokens\":4000}"
+        ));
+        assert!(!prompt.ends_with("---\n"));
+    }
+
+    #[test]
+    fn zcode_tool_input_text_preserves_key_order() {
+        assert_eq!(
+            zcode_tool_input_text("Write", r#"{"content":"body","file_path":"a.txt"}"#),
+            r#"{"file_path":"a.txt","content":"body"}"#
+        );
+        assert_eq!(
+            zcode_tool_input_text("ReadSessionContext", r#"{"query":"q","sessionId":"s"}"#),
+            r#"{"sessionId":"s","query":"q","strategy":"relevant","maxTokens":4000}"#
+        );
+    }
+
+    #[test]
+    fn zcode_agent_rollout_stats_counts_tools_and_turn_duration() {
+        let history = vec![
+            RolloutItem::ResponseItem(ResponseItem::FunctionCall {
+                id: None,
+                name: "Bash".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                call_id: "call-bash".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            }),
+            RolloutItem::ResponseItem(ResponseItem::FunctionCall {
+                id: None,
+                name: "Read".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                call_id: "call-read".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            }),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(
+                codex_protocol::protocol::TurnCompleteEvent {
+                    turn_id: "turn-1".to_string(),
+                    last_agent_message: Some("done".to_string()),
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: Some(12_345),
+                    time_to_first_token_ms: None,
+                    error: None,
+                },
+            )),
+        ];
+
+        assert_eq!(
+            zcode_agent_rollout_stats(&history, /*fallback_duration_ms*/ 99),
+            ZCodeAgentRolloutStats {
+                tool_uses: 2,
+                duration_ms: 12_345,
+            }
+        );
+    }
+
+    #[test]
+    fn zcode_todo_history_restore_excludes_current_write_call() {
+        let history = vec![
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "TodoWrite".to_string(),
+                namespace: None,
+                arguments: serde_json::json!({
+                    "todos": [
+                        {
+                            "content": "Prior task",
+                            "status": "completed",
+                            "priority": "high",
+                        },
+                    ],
+                })
+                .to_string(),
+                call_id: "previous-todo".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "TodoWrite".to_string(),
+                namespace: None,
+                arguments: serde_json::json!({
+                    "todos": [
+                        {
+                            "content": "Current task",
+                            "status": "in_progress",
+                            "priority": "high",
+                        },
+                    ],
+                })
+                .to_string(),
+                call_id: "current-todo".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ];
+
+        assert_eq!(
+            latest_zcode_todos_from_history(&history, "current-todo"),
+            Some(vec![ZCodeTodoItem {
+                content: "Prior task".to_string(),
+                status: "completed".to_string(),
+                priority: "high".to_string(),
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn zcode_todo_cache_persists_across_processes() {
+        let workspace = tempfile::tempdir().expect("workspace temp dir");
+        let home = tempfile::tempdir().expect("home temp dir");
+        let invocation =
+            invocation_with_harness(&workspace, "TodoRead", json!({}), Some("zcode")).await;
+        let todos = vec![ZCodeTodoItem {
+            content: "Carry todo state across resume".to_string(),
+            status: "completed".to_string(),
+            priority: "high".to_string(),
+        }];
+
+        record_zcode_todos_at_home(home.path(), &invocation, &todos);
+        if let Ok(mut stored) = ZCODE_TODOS.lock() {
+            stored.clear();
+        }
+
+        assert_eq!(zcode_todos_at_home(home.path(), &invocation), Some(todos));
     }
 
     #[tokio::test]
@@ -2598,7 +5198,7 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_tool_search_result_matches_captured_order() {
+    fn deepseek_tool_search_result_uses_expected_order() {
         assert_eq!(
             deepseek_tool_search_result(),
             r#"{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"apply_patch"},{"type":"tool_reference","tool_name":"edit_file"},{"type":"tool_reference","tool_name":"agent_open"},{"type":"tool_reference","tool_name":"handle_read"},{"type":"tool_reference","tool_name":"tool_agent"}]}"#

@@ -14,6 +14,7 @@ app-server-backed terminal UI.
 | `--image, -i <path[,path...]>` | Attach image files to the initial prompt. |
 | `--model, -m <model>` | Override the configured model. |
 | `--oss` | Use the configured local open source provider. |
+| `--local-provider <provider>` | Use `ollama` or `lmstudio` with `--oss`. |
 | `--profile, -p <name>` | Load a config profile. |
 | `--sandbox, -s <mode>` | Select `read-only`, `workspace-write`, or `danger-full-access`. |
 | `--ask-for-approval, -a <policy>` | Select `untrusted`, `on-request`, or `never`. |
@@ -40,7 +41,7 @@ app-server-backed terminal UI.
 | `interpreter app-server daemon` | Manage the optional shared [daemon](/docs/daemon) (`start`/`stop`/`restart`). |
 | `interpreter mcp` | Manage MCP server config. |
 | `interpreter mcp-server` | Expose Open Interpreter as an MCP server over stdio. |
-| `interpreter update` | Manage standalone updates. |
+| `interpreter update` | Run the configured installer for the latest release. |
 
 ## Resume
 
@@ -104,11 +105,11 @@ See [Agent Client Protocol](/docs/acp).
 ## Update
 
 ```bash
-interpreter update status
-interpreter update now
-interpreter update on
-interpreter update off
+interpreter update
 ```
+
+Automatic checks during interactive startup are controlled by
+`check_for_update_on_startup`.
 
 ## Notes on Codex Compatibility
 

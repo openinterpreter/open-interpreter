@@ -4,6 +4,7 @@ use codex_api::SearchCommands;
 use codex_api::SearchQuery;
 use codex_api::SearchRequest;
 use codex_api::SearchSettings;
+use codex_core::X_CODEX_TURN_METADATA_HEADER;
 use codex_core::web_search_action_detail;
 use codex_extension_api::ExtensionTurnItem;
 use codex_extension_api::FunctionCallError;
@@ -14,15 +15,22 @@ use codex_extension_api::ToolName;
 use codex_extension_api::ToolOutput;
 use codex_extension_api::ToolSpec;
 use codex_extension_api::parse_tool_input_schema_without_compaction;
+use codex_extension_items::ExtensionItem;
+use codex_extension_items::web_search::WebSearchAction;
+use codex_extension_items::web_search::WebSearchItem;
+use codex_login::default_client::add_originator_header;
 use codex_login::default_client::build_reqwest_client;
 use codex_model_provider::SharedModelProvider;
-use codex_protocol::items::WebSearchItem;
-use codex_protocol::models::WebSearchAction;
+use codex_protocol::models::WebSearchAction as CoreWebSearchAction;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::WebSearchBeginEvent;
+use codex_protocol::protocol::WebSearchEndEvent;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::ToolExposure;
 use codex_tools::default_namespace_description;
 use http::HeaderMap;
+use http::HeaderValue;
 use url::Url;
 
 use crate::history::recent_input;
@@ -32,11 +40,13 @@ use crate::schema::commands_schema;
 pub(crate) const WEB_NAMESPACE: &str = "web";
 pub(crate) const RUN_TOOL_NAME: &str = "run";
 const WEB_RUN_DESCRIPTION: &str = include_str!("../web_run_description.md");
+const RESULTS_PAYLOAD_BYTES_METRIC: &str = "codex.web_search.results.payload_bytes";
 
 pub(crate) struct WebSearchTool {
     pub(crate) session_id: String,
     pub(crate) provider: SharedModelProvider,
     pub(crate) settings: SearchSettings,
+    pub(crate) originator: Option<String>,
 }
 
 impl ToolExecutor<ToolCall> for WebSearchTool {
@@ -108,19 +118,82 @@ impl WebSearchTool {
                 u64::try_from(call.truncation_policy.token_budget()).unwrap_or(u64::MAX),
             ),
         };
+        let extra_headers = search_request_headers(
+            self.originator.as_deref(),
+            call.codex_turn_metadata.as_deref(),
+        );
         call.turn_item_emitter
-            .emit_started(web_search_item(&call.call_id, WebSearchAction::Other))
+            .emit_started(extension_turn_item(
+                WebSearchItem {
+                    id: call.call_id.clone(),
+                    query: String::new(),
+                    action: None,
+                    results: None,
+                },
+                EventMsg::WebSearchBegin(WebSearchBeginEvent {
+                    call_id: call.call_id.clone(),
+                }),
+            ))
             .await;
         let response = client
-            .search(&request, HeaderMap::new())
+            .search(&request, extra_headers)
             .await
             .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
+        let output = response.output;
+        let results = response.results;
+        if let Some(results) = results.as_ref()
+            && let Some(metrics) = codex_otel::global()
+            && let Ok(payload) = serde_json::to_vec(results)
+        {
+            let payload_bytes = i64::try_from(payload.len()).unwrap_or(i64::MAX);
+            let _ = metrics.histogram(RESULTS_PAYLOAD_BYTES_METRIC, payload_bytes, &[]);
+        }
+        let legacy_action = match &command_action {
+            WebSearchAction::Search { query, queries } => CoreWebSearchAction::Search {
+                query: query.clone(),
+                queries: queries.clone(),
+            },
+            WebSearchAction::OpenPage { url } => CoreWebSearchAction::OpenPage { url: url.clone() },
+            WebSearchAction::FindInPage { url, pattern } => CoreWebSearchAction::FindInPage {
+                url: url.clone(),
+                pattern: pattern.clone(),
+            },
+            WebSearchAction::Other => CoreWebSearchAction::Other,
+        };
+        let query = web_search_action_detail(&legacy_action);
         call.turn_item_emitter
-            .emit_completed(web_search_item(&call.call_id, command_action))
+            .emit_completed(extension_turn_item(
+                WebSearchItem {
+                    id: call.call_id.clone(),
+                    query: query.clone(),
+                    action: Some(command_action),
+                    results: results.clone(),
+                },
+                EventMsg::WebSearchEnd(WebSearchEndEvent {
+                    call_id: call.call_id.clone(),
+                    query,
+                    action: legacy_action,
+                    results,
+                }),
+            ))
             .await;
 
-        Ok(Box::new(SearchOutput::new(response.output)))
+        Ok(Box::new(SearchOutput::new(output)))
     }
+}
+
+fn search_request_headers(originator: Option<&str>, turn_metadata: Option<&str>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Some(turn_metadata) = turn_metadata
+        && let Ok(header_value) = HeaderValue::from_str(turn_metadata)
+    {
+        headers.insert(X_CODEX_TURN_METADATA_HEADER, header_value);
+    }
+
+    if let Some(originator) = originator {
+        add_originator_header(&mut headers, originator);
+    }
+    headers
 }
 
 fn parse_commands(call: &ToolCall) -> Result<SearchCommands, FunctionCallError> {
@@ -180,21 +253,39 @@ fn literal_url(ref_id: &str) -> Option<String> {
     Url::parse(ref_id).is_ok().then(|| ref_id.to_string())
 }
 
-fn web_search_item(call_id: &str, action: WebSearchAction) -> ExtensionTurnItem {
-    ExtensionTurnItem::WebSearch(WebSearchItem {
-        id: call_id.to_string(),
-        query: web_search_action_detail(&action),
-        action,
-    })
+fn extension_turn_item(item: WebSearchItem, legacy_event: EventMsg) -> ExtensionTurnItem {
+    ExtensionTurnItem {
+        item: ExtensionItem::WebSearch(item),
+        legacy_events: vec![legacy_event],
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use codex_api::SearchCommands;
-    use codex_protocol::models::WebSearchAction;
+    use codex_extension_items::web_search::WebSearchAction;
     use pretty_assertions::assert_eq;
 
     use super::command_action;
+    use super::search_request_headers;
+    use codex_core::X_CODEX_TURN_METADATA_HEADER;
+
+    #[test]
+    fn search_request_headers_forward_thread_originator_and_turn_metadata() {
+        let headers = search_request_headers(Some("chatgpt_cca"), Some("turn-metadata"));
+        assert_eq!(
+            headers
+                .get("originator")
+                .and_then(|value| value.to_str().ok()),
+            Some("chatgpt_cca")
+        );
+        assert_eq!(
+            headers
+                .get(X_CODEX_TURN_METADATA_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("turn-metadata")
+        );
+    }
 
     #[test]
     fn command_action_reports_queries_and_navigation_detail() {

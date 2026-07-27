@@ -41,17 +41,20 @@ pub struct TrackEventsContext {
     pub model_slug: String,
     pub thread_id: String,
     pub turn_id: String,
+    pub product_client_id: String,
 }
 
 pub fn build_track_events_context(
     model_slug: String,
     thread_id: String,
     turn_id: String,
+    product_client_id: String,
 ) -> TrackEventsContext {
     TrackEventsContext {
         model_slug,
         thread_id,
         turn_id,
+        product_client_id,
     }
 }
 
@@ -139,6 +142,7 @@ impl TurnCodexErrorFact {
 #[serde(rename_all = "snake_case")]
 pub enum CodexErrKind {
     TurnAborted,
+    SessionBudgetExceeded,
     Stream,
     ContextWindowExceeded,
     ThreadNotFound,
@@ -195,6 +199,7 @@ impl From<&CodexErr> for CodexErrKind {
     fn from(error: &CodexErr) -> Self {
         match error {
             CodexErr::TurnAborted => CodexErrKind::TurnAborted,
+            CodexErr::SessionBudgetExceeded => CodexErrKind::SessionBudgetExceeded,
             CodexErr::Stream(..) => CodexErrKind::Stream,
             CodexErr::ContextWindowExceeded => CodexErrKind::ContextWindowExceeded,
             CodexErr::ThreadNotFound(_) => CodexErrKind::ThreadNotFound,
@@ -415,6 +420,7 @@ pub struct CodexCompactionEvent {
     pub retained_image_count: Option<usize>,
     pub compaction_summary_tokens: Option<i64>,
     pub cached_input_tokens: Option<i64>,
+    pub cache_write_input_tokens: Option<i64>,
     pub started_at: u64,
     pub completed_at: u64,
     pub duration_ms: Option<u64>,
@@ -459,6 +465,7 @@ pub(crate) enum AnalyticsFact {
         connection_id: u64,
         request_id: RequestId,
         response: Box<ClientResponsePayload>,
+        thread_originator: Option<String>,
     },
     ErrorResponse {
         connection_id: u64,
@@ -503,6 +510,7 @@ pub(crate) enum CustomAnalyticsFact {
     AppUsed(AppUsedInput),
     HookRun(HookRunInput),
     PluginUsed(PluginUsedInput),
+    PluginInstallRequested(PluginInstallRequestedInput),
     PluginStateChanged(PluginStateChangedInput),
     PluginInstallFailed(PluginInstallFailedInput),
     ExternalAgentConfigImportCompleted(ExternalAgentConfigImportCompletedInput),
@@ -540,14 +548,50 @@ pub(crate) struct PluginUsedInput {
     pub plugin: PluginTelemetryMetadata,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginInstallRequestSource {
+    EndpointRecommendation,
+    LegacyDiscovery,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginInstallRequested {
+    pub suggestion_id: String,
+    pub plugins: Vec<PluginInstallRequestedPlugin>,
+    pub source: PluginInstallRequestSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginInstallRequestedPlugin {
+    pub plugin_id: String,
+    pub remote_plugin_id: Option<String>,
+    pub plugin_name: String,
+    pub connector_ids: Vec<String>,
+}
+
+pub(crate) struct PluginInstallRequestedInput {
+    pub tracking: TrackEventsContext,
+    pub request: PluginInstallRequested,
+}
+
 pub(crate) struct PluginStateChangedInput {
     pub plugin: PluginTelemetryMetadata,
     pub state: PluginState,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginInstallSource {
+    Manual,
+    ExternalAgentMigration,
+}
+
 pub(crate) struct PluginInstallFailedInput {
     pub plugin: PluginTelemetryMetadata,
+    pub source: PluginInstallSource,
     pub error_type: String,
+    pub sub_error_type: Option<String>,
 }
 
 pub struct ExternalAgentConfigImportCompletedInput {
@@ -564,6 +608,7 @@ pub struct ExternalAgentConfigImportFailureInput {
     pub item_type: String,
     pub failure_stage: String,
     pub error_type: String,
+    pub sub_error_type: Option<String>,
 }
 
 #[derive(Clone, Copy)]

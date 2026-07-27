@@ -9,9 +9,12 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::ReasoningSummaryCell;
 use crate::history_cell::UserHistoryCell;
+use crate::history_cell::split_reasoning_summary_parts;
+use crate::inline_visualization::InlineVisualizationContext;
 use crate::multi_agents::sub_agent_activity_summary;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::UserInput;
 use codex_protocol::ThreadId;
 use codex_protocol::items::UserMessageItem;
 use ratatui::style::Stylize as _;
@@ -29,36 +32,54 @@ pub(crate) async fn load_session_transcript(
     app_server: &mut AppServerSession,
     thread_id: ThreadId,
     raw_reasoning_visibility: RawReasoningVisibility,
+    codex_home: Option<&std::path::Path>,
 ) -> std::io::Result<TranscriptCells> {
     let thread = app_server
         .thread_read(thread_id, /*include_turns*/ true)
         .await
         .map_err(std::io::Error::other)?;
     Ok(thread_to_transcript_cells(
-        &thread,
+        thread,
         raw_reasoning_visibility,
+        codex_home,
     ))
 }
 
 pub(crate) fn thread_to_transcript_cells(
-    thread: &Thread,
+    thread: Thread,
     raw_reasoning_visibility: RawReasoningVisibility,
+    codex_home: Option<&std::path::Path>,
 ) -> TranscriptCells {
-    let cwd = thread.cwd.as_path();
+    let cwd = thread.cwd;
+    let inline_visualization_context = codex_home.and_then(|codex_home| {
+        ThreadId::from_string(&thread.id)
+            .ok()
+            .and_then(|thread_id| InlineVisualizationContext::new(codex_home, thread_id))
+    });
     let mut cells: TranscriptCells = Vec::new();
-    for item in thread.turns.iter().flat_map(|turn| turn.items.iter()) {
+    for item in thread.turns.into_iter().flat_map(|turn| turn.items) {
         match item {
             ThreadItem::UserMessage {
                 id,
                 client_id,
                 content,
             } => {
+                if content.iter().any(|input| {
+                    matches!(
+                        input,
+                        UserInput::Audio { .. } | UserInput::LocalAudio { .. }
+                    )
+                }) {
+                    tracing::warn!(
+                        user_message_id = id,
+                        "audio user inputs are not supported by the TUI and will be omitted"
+                    );
+                }
                 let item = UserMessageItem {
-                    id: id.clone(),
-                    client_id: client_id.clone(),
+                    id,
+                    client_id,
                     content: content
-                        .iter()
-                        .cloned()
+                        .into_iter()
                         .map(codex_app_server_protocol::UserInput::into_core)
                         .collect(),
                 };
@@ -70,43 +91,45 @@ pub(crate) fn thread_to_transcript_cells(
                 }));
             }
             ThreadItem::AgentMessage { text, .. } => {
-                let parsed = parse_assistant_markdown(text, cwd);
+                let parsed = parse_assistant_markdown(&text, cwd.as_path());
                 if !parsed.visible_markdown.trim().is_empty() {
-                    cells.push(Arc::new(AgentMarkdownCell::new(
+                    cells.push(Arc::new(AgentMarkdownCell::new_with_inline_visualizations(
                         parsed.visible_markdown,
-                        cwd,
+                        cwd.as_path(),
+                        inline_visualization_context.clone(),
                     )));
                 }
             }
             ThreadItem::Plan { text, .. } => {
                 if !text.trim().is_empty() {
                     cells.push(Arc::new(crate::history_cell::new_proposed_plan(
-                        text.clone(),
-                        cwd,
+                        text,
+                        cwd.as_path(),
                     )));
                 }
             }
             ThreadItem::Reasoning {
                 summary, content, ..
             } => {
-                let text = if matches!(raw_reasoning_visibility, RawReasoningVisibility::Visible)
-                    && !content.is_empty()
-                {
-                    content.join("\n\n")
-                } else {
-                    summary.join("\n\n")
-                };
+                let (header, text) =
+                    if matches!(raw_reasoning_visibility, RawReasoningVisibility::Visible)
+                        && !content.is_empty()
+                    {
+                        ("Reasoning".to_string(), content.join("\n\n"))
+                    } else {
+                        split_reasoning_summary_parts(&summary)
+                    };
                 if !text.trim().is_empty() {
                     cells.push(Arc::new(ReasoningSummaryCell::new(
-                        "Reasoning".to_string(),
+                        header,
                         text,
-                        cwd,
+                        cwd.as_path(),
                         /*transcript_only*/ false,
                     )));
                 }
             }
             other => {
-                if let Some(cell) = fallback_transcript_cell(other) {
+                if let Some(cell) = fallback_transcript_cell(&other) {
                     cells.push(Arc::new(cell));
                 }
             }
@@ -199,20 +222,24 @@ fn fallback_transcript_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
         } => {
             vec![sub_agent_activity_summary(*kind, agent_path).dim().into()]
         }
-        ThreadItem::WebSearch { query, .. } => {
-            vec![vec!["web search: ".dim(), query.clone().into()].into()]
+        ThreadItem::WebSearch(item) => {
+            vec![vec!["web search: ".dim(), item.query.clone().into()].into()]
         }
         ThreadItem::ImageView { path, .. } => {
-            vec![format!("image: {}", path.as_path().display()).dim().into()]
+            let path = path.render_for_ui();
+            vec![format!("image: {path}").dim().into()]
         }
-        ThreadItem::ImageGeneration {
-            status, saved_path, ..
-        } => {
-            let saved = saved_path
+        ThreadItem::ImageGeneration(item) => {
+            let saved = item
+                .saved_path
                 .as_ref()
                 .map(|path| format!(" · {}", path.as_path().display()))
                 .unwrap_or_default();
-            vec![format!("image generation: {status}{saved}").dim().into()]
+            vec![
+                format!("image generation: {}{saved}", item.status)
+                    .dim()
+                    .into(),
+            ]
         }
         ThreadItem::EnteredReviewMode { review, .. } => {
             vec![vec!["review started: ".dim(), review.clone().into()].into()]
@@ -227,7 +254,7 @@ fn fallback_transcript_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
         | ThreadItem::AgentMessage { .. }
         | ThreadItem::Plan { .. }
         | ThreadItem::Reasoning { .. }
-        | ThreadItem::Sleep { .. } => return None,
+        | ThreadItem::Sleep(_) => return None,
     };
     (!lines.is_empty()).then(|| PlainHistoryCell::new(lines))
 }

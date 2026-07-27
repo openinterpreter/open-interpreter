@@ -9,22 +9,26 @@ use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_plugins::PluginSkillRoot;
+use tokio::sync::Semaphore;
 use tracing::info;
 use tracing::instrument;
 use tracing::warn;
 
 use crate::HostSkillsSnapshot;
+use crate::PluginSkillSnapshots;
 use crate::SkillLoadOutcome;
 use crate::build_implicit_skill_path_indexes;
 use crate::config_rules::SkillConfigRules;
 use crate::config_rules::resolve_disabled_skill_paths;
 use crate::config_rules::skill_config_rules_from_stack;
+use crate::loader::MAX_CONCURRENT_ROOT_SCANS;
 use crate::loader::SkillRoot;
 use crate::loader::load_skills_from_roots;
-use crate::loader::skill_roots;
+use crate::loader::skill_roots_with_home_dir;
 use crate::system::install_system_skills;
 use crate::system::uninstall_system_skills;
 use codex_config::SkillsConfig;
+use dirs::home_dir;
 
 #[derive(Debug, Clone)]
 pub struct SkillsLoadInput {
@@ -32,6 +36,7 @@ pub struct SkillsLoadInput {
     pub effective_skill_roots: Vec<PluginSkillRoot>,
     pub config_layer_stack: ConfigLayerStack,
     pub bundled_skills_enabled: bool,
+    plugin_skill_snapshots: Option<PluginSkillSnapshots>,
 }
 
 impl SkillsLoadInput {
@@ -46,7 +51,17 @@ impl SkillsLoadInput {
             effective_skill_roots,
             config_layer_stack,
             bundled_skills_enabled,
+            plugin_skill_snapshots: None,
         }
+    }
+
+    /// Attaches plugin skill snapshots parsed during plugin loading, when available.
+    pub fn with_plugin_skill_snapshots(
+        mut self,
+        plugin_skill_snapshots: Option<PluginSkillSnapshots>,
+    ) -> Self {
+        self.plugin_skill_snapshots = plugin_skill_snapshots;
+        self
     }
 }
 
@@ -55,10 +70,13 @@ impl SkillsLoadInput {
 /// Source-specific model exposure remains the responsibility of the skills extension.
 pub struct SkillsService {
     codex_home: AbsolutePathBuf,
+    user_home: Option<AbsolutePathBuf>,
     restriction_product: Option<Product>,
     extra_roots: RwLock<Vec<AbsolutePathBuf>>,
     cache_by_cwd: RwLock<HashMap<AbsolutePathBuf, HostSkillsSnapshot>>,
     cache_by_config: RwLock<HashMap<ConfigSkillsCacheKey, HostSkillsSnapshot>>,
+    // Shared across cwds so root scheduling cannot multiply per-root I/O fanout.
+    root_scan_slots: Arc<Semaphore>,
 }
 
 impl SkillsService {
@@ -71,12 +89,47 @@ impl SkillsService {
         bundled_skills_enabled: bool,
         restriction_product: Option<Product>,
     ) -> Self {
+        let user_home =
+            home_dir().and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok());
+        Self::new_inner(
+            codex_home,
+            bundled_skills_enabled,
+            restriction_product,
+            user_home,
+        )
+    }
+
+    /// Creates a skills service whose user-installed skills are resolved from an explicit home.
+    ///
+    /// This is useful for isolated runtimes and tests that must not inspect the host process home.
+    pub fn new_with_restriction_product_and_user_home(
+        codex_home: AbsolutePathBuf,
+        bundled_skills_enabled: bool,
+        restriction_product: Option<Product>,
+        user_home: AbsolutePathBuf,
+    ) -> Self {
+        Self::new_inner(
+            codex_home,
+            bundled_skills_enabled,
+            restriction_product,
+            Some(user_home),
+        )
+    }
+
+    fn new_inner(
+        codex_home: AbsolutePathBuf,
+        bundled_skills_enabled: bool,
+        restriction_product: Option<Product>,
+        user_home: Option<AbsolutePathBuf>,
+    ) -> Self {
         let service = Self {
             codex_home,
+            user_home,
             restriction_product,
             extra_roots: RwLock::new(Vec::new()),
             cache_by_cwd: RwLock::new(HashMap::new()),
             cache_by_config: RwLock::new(HashMap::new()),
+            root_scan_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
         };
         if !bundled_skills_enabled {
             // The loader caches bundled skills under `skills/.system`. Clearing that directory is
@@ -105,7 +158,12 @@ impl SkillsService {
     /// This path uses a cache keyed by the effective skill-relevant config state rather than just
     /// cwd so role-local and session-local skill overrides cannot bleed across sessions that happen
     /// to share a directory.
-    #[instrument(level = "trace", skip_all)]
+    #[instrument(
+        name = "skills_for_config",
+        level = "info",
+        skip_all,
+        fields(otel.name = "skills_for_config")
+    )]
     pub async fn snapshot_for_config(
         &self,
         input: &SkillsLoadInput,
@@ -119,7 +177,8 @@ impl SkillsService {
         }
 
         let snapshot = HostSkillsSnapshot::new(Arc::new(
-            self.build_skill_outcome(roots, &skill_config_rules).await,
+            self.build_skill_outcome(input, roots, &skill_config_rules)
+                .await,
         ));
         let mut cache = self
             .cache_by_config
@@ -134,10 +193,11 @@ impl SkillsService {
         input: &SkillsLoadInput,
         fs: Option<Arc<dyn ExecutorFileSystem>>,
     ) -> Vec<SkillRoot> {
-        let mut roots = skill_roots(
+        let mut roots = skill_roots_with_home_dir(
             fs,
             &input.config_layer_stack,
             &input.cwd,
+            self.user_home.as_ref(),
             input.effective_skill_roots.clone(),
             self.extra_roots(),
         )
@@ -162,10 +222,11 @@ impl SkillsService {
             return snapshot;
         }
 
-        let mut roots = skill_roots(
+        let mut roots = skill_roots_with_home_dir(
             fs.clone(),
             &input.config_layer_stack,
             &input.cwd,
+            self.user_home.as_ref(),
             input.effective_skill_roots.clone(),
             self.extra_roots(),
         )
@@ -175,7 +236,8 @@ impl SkillsService {
         }
         let skill_config_rules = skill_config_rules_from_stack(&input.config_layer_stack);
         let snapshot = HostSkillsSnapshot::new(Arc::new(
-            self.build_skill_outcome(roots, &skill_config_rules).await,
+            self.build_skill_outcome(input, roots, &skill_config_rules)
+                .await,
         ));
         if use_cwd_cache {
             let mut cache = self
@@ -190,13 +252,18 @@ impl SkillsService {
     #[instrument(level = "trace", skip_all)]
     async fn build_skill_outcome(
         &self,
+        input: &SkillsLoadInput,
         roots: Vec<SkillRoot>,
         skill_config_rules: &SkillConfigRules,
     ) -> SkillLoadOutcome {
-        let outcome = crate::filter_skill_load_outcome_for_product(
-            load_skills_from_roots(roots).await,
-            self.restriction_product,
-        );
+        let outcome = load_skills_from_roots(
+            roots,
+            input.plugin_skill_snapshots.as_ref(),
+            Arc::clone(&self.root_scan_slots),
+        )
+        .await;
+        let outcome =
+            crate::filter_skill_load_outcome_for_product(outcome, self.restriction_product);
         let disabled_paths = resolve_disabled_skill_paths(&outcome.skills, skill_config_rules);
         finalize_skill_outcome(outcome, disabled_paths)
     }
@@ -251,7 +318,7 @@ impl SkillsService {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ConfigSkillsCacheKey {
-    roots: Vec<(AbsolutePathBuf, u8, Option<String>)>,
+    roots: Vec<(AbsolutePathBuf, u8, Option<String>, Option<String>)>,
     skill_config_rules: SkillConfigRules,
 }
 
@@ -291,7 +358,12 @@ fn config_skills_cache_key(
                     SkillScope::System => 2,
                     SkillScope::Admin => 3,
                 };
-                (root.path.clone(), scope_rank, root.plugin_id.clone())
+                (
+                    root.path.clone(),
+                    scope_rank,
+                    root.plugin_id.clone(),
+                    root.plugin_namespace.clone(),
+                )
             })
             .collect(),
         skill_config_rules: skill_config_rules.clone(),
@@ -303,8 +375,16 @@ fn finalize_skill_outcome(
     disabled_paths: HashSet<AbsolutePathBuf>,
 ) -> SkillLoadOutcome {
     outcome.disabled_paths = disabled_paths;
-    let (by_scripts_dir, by_doc_path) =
-        build_implicit_skill_path_indexes(outcome.allowed_skills_for_implicit_invocation());
+    // Usage-event detection should see any enabled skill file/script read, even when the
+    // skill is not model-routable through implicit invocation.
+    let (by_scripts_dir, by_doc_path) = build_implicit_skill_path_indexes(
+        outcome
+            .skills
+            .iter()
+            .filter(|skill| outcome.is_skill_enabled(skill))
+            .cloned()
+            .collect(),
+    );
     outcome.implicit_skills_by_scripts_dir = Arc::new(by_scripts_dir);
     outcome.implicit_skills_by_doc_path = Arc::new(by_doc_path);
     outcome

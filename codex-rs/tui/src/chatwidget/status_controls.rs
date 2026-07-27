@@ -9,14 +9,15 @@ use super::*;
 impl ChatWidget {
     /// Update the status indicator header and details.
     ///
-    /// Passing `None` clears any existing details.
+    /// Passing `None` clears any existing details. Returns whether the visible status indicator
+    /// requested a redraw.
     pub(super) fn set_status(
         &mut self,
         header: String,
         details: Option<String>,
         details_capitalization: StatusDetailsCapitalization,
         details_max_lines: usize,
-    ) {
+    ) -> bool {
         let details = details
             .filter(|details| !details.is_empty())
             .map(|details| {
@@ -33,7 +34,7 @@ impl ChatWidget {
             details: details.clone(),
             details_max_lines,
         });
-        self.bottom_pane.update_status(
+        let status_indicator_updated = self.bottom_pane.update_status(
             header,
             details,
             StatusDetailsCapitalization::Preserve,
@@ -51,17 +52,19 @@ impl ChatWidget {
         if title_uses_status {
             self.refresh_status_surfaces();
         }
+        status_indicator_updated
     }
 
     /// Convenience wrapper around [`Self::set_status`];
-    /// updates the status indicator header and clears any existing details.
-    pub(super) fn set_status_header(&mut self, header: String) {
+    /// updates the status indicator header and clears any existing details, returning whether the
+    /// visible status indicator requested a redraw.
+    pub(super) fn set_status_header(&mut self, header: String) -> bool {
         self.set_status(
             header,
             /*details*/ None,
             StatusDetailsCapitalization::CapitalizeFirst,
             STATUS_DETAILS_DEFAULT_MAX_LINES,
-        );
+        )
     }
 
     /// Sets the currently rendered footer status-line value.
@@ -247,9 +250,21 @@ impl ChatWidget {
         self.add_to_history(cell);
     }
 
-    pub(crate) fn finish_status_rate_limit_refresh(&mut self, request_id: u64) {
-        if self.refreshing_status_outputs.is_empty() {
+    pub(crate) fn finish_status_rate_limit_refresh(
+        &mut self,
+        request_id: u64,
+        snapshots: Vec<RateLimitSnapshot>,
+    ) {
+        if !self
+            .refreshing_status_outputs
+            .iter()
+            .any(|(pending_request_id, _)| *pending_request_id == request_id)
+        {
             return;
+        }
+
+        for snapshot in snapshots {
+            self.on_rate_limit_snapshot(Some(snapshot));
         }
 
         let rate_limit_snapshots: Vec<RateLimitSnapshotDisplay> = self

@@ -17,11 +17,16 @@ use codex_config::CloudRequirementsFragment;
 use codex_config::CloudRequirementsTomlBundle;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
+use codex_login::auth::AgentIdentityAuth;
+use codex_login::auth::AgentIdentityAuthRecord;
+use codex_login::auth::ExternalAuth;
+use codex_login::auth::ExternalAuthRefreshContext;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::VecDeque;
 use std::future::pending;
 use std::path::Path;
+use std::sync::RwLock;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use tempfile::tempdir;
@@ -48,8 +53,10 @@ async fn auth_manager_with_api_key() -> Arc<AuthManager> {
             tmp.path().to_path_buf(),
             /*enable_codex_api_key_env*/ false,
             AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
         )
         .await,
     )
@@ -77,8 +84,10 @@ async fn auth_manager_with_plan_and_identity(
             tmp.path().to_path_buf(),
             /*enable_codex_api_key_env*/ false,
             AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
         )
         .await,
     )
@@ -86,6 +95,29 @@ async fn auth_manager_with_plan_and_identity(
 
 async fn auth_manager_with_plan(plan_type: &str) -> Arc<AuthManager> {
     auth_manager_with_plan_and_identity(plan_type, Some("user-12345"), Some("account-12345")).await
+}
+
+async fn auth_manager_with_agent_identity_business_plan() -> Arc<AuthManager> {
+    let key_material =
+        codex_agent_identity::generate_agent_key_material().expect("generate agent key material");
+    AuthManager::from_auth_for_testing(CodexAuth::AgentIdentity(
+        AgentIdentityAuth::from_record(
+            AgentIdentityAuthRecord {
+                agent_runtime_id: "agent-runtime-123".to_string(),
+                agent_private_key: key_material.private_key_pkcs8_base64,
+                account_id: "account-12345".to_string(),
+                chatgpt_user_id: "user-12345".to_string(),
+                email: Some("user@example.com".to_string()),
+                plan_type: PlanType::Business,
+                chatgpt_account_is_fedramp: false,
+                task_id: Some("task-123".to_string()),
+            },
+            "https://auth.openai.com/api/accounts",
+            /*auth_route_config*/ None,
+        )
+        .await
+        .expect("agent identity record should be complete"),
+    ))
 }
 
 fn chatgpt_auth_json(
@@ -113,26 +145,20 @@ fn chatgpt_auth_json_with_last_refresh(
     refresh_token: &str,
     last_refresh: &str,
 ) -> serde_json::Value {
-    chatgpt_auth_json_with_mode(
-        plan_type,
-        chatgpt_user_id,
-        account_id,
-        access_token,
-        refresh_token,
-        last_refresh,
-        /*auth_mode*/ None,
-    )
+    let fake_jwt = fake_chatgpt_jwt(plan_type, chatgpt_user_id, b"sig");
+    json!({
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "id_token": fake_jwt,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "account_id": account_id,
+        },
+        "last_refresh": last_refresh,
+    })
 }
 
-fn chatgpt_auth_json_with_mode(
-    plan_type: &str,
-    chatgpt_user_id: Option<&str>,
-    account_id: Option<&str>,
-    access_token: &str,
-    refresh_token: &str,
-    last_refresh: &str,
-    auth_mode: Option<&str>,
-) -> serde_json::Value {
+fn fake_chatgpt_jwt(plan_type: &str, chatgpt_user_id: Option<&str>, signature: &[u8]) -> String {
     let header = json!({ "alg": "none", "typ": "JWT" });
     let auth_payload = json!({
         "chatgpt_plan_type": plan_type,
@@ -145,23 +171,8 @@ fn chatgpt_auth_json_with_mode(
     });
     let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("header"));
     let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("payload"));
-    let signature_b64 = URL_SAFE_NO_PAD.encode(b"sig");
-    let fake_jwt = format!("{header_b64}.{payload_b64}.{signature_b64}");
-
-    let mut auth_json = json!({
-        "OPENAI_API_KEY": null,
-        "tokens": {
-            "id_token": fake_jwt,
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "account_id": account_id,
-        },
-        "last_refresh": last_refresh,
-    });
-    if let Some(auth_mode) = auth_mode {
-        auth_json["auth_mode"] = serde_json::Value::String(auth_mode.to_string());
-    }
-    auth_json
+    let signature_b64 = URL_SAFE_NO_PAD.encode(signature);
+    format!("{header_b64}.{payload_b64}.{signature_b64}")
 }
 
 fn test_bundle() -> CloudConfigBundle {
@@ -290,6 +301,39 @@ struct UnauthorizedBundleClient {
     request_count: AtomicUsize,
 }
 
+struct TestExternalChatgptAuth {
+    current: RwLock<CodexAuth>,
+    refreshed: CodexAuth,
+    refresh_count: AtomicUsize,
+}
+
+impl ExternalAuth for TestExternalChatgptAuth {
+    fn resolve(&self) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async {
+            self.current
+                .read()
+                .map(|auth| auth.clone())
+                .map_err(|_| std::io::Error::other("external auth lock is poisoned"))
+        })
+    }
+
+    fn refresh(
+        &self,
+        _context: ExternalAuthRefreshContext,
+    ) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async {
+            let refreshed = self.refreshed.clone();
+            *self
+                .current
+                .write()
+                .map_err(|_| std::io::Error::other("external auth lock is poisoned"))? =
+                refreshed.clone();
+            self.refresh_count.fetch_add(1, Ordering::SeqCst);
+            Ok(refreshed)
+        })
+    }
+}
+
 impl BundleClient for UnauthorizedBundleClient {
     async fn get_bundle(&self, _auth: &CodexAuth) -> Result<CloudConfigBundle, BundleRequestError> {
         self.request_count.fetch_add(1, Ordering::SeqCst);
@@ -406,6 +450,28 @@ async fn get_bundle_allows_eligible_workspace_plans_and_writes_cache() {
             "plan_type: {plan_type}"
         );
     }
+}
+
+#[tokio::test]
+async fn get_bundle_allows_agent_identity_business_plan() {
+    let bundle = test_bundle();
+    let fetcher = Arc::new(StaticBundleClient::new(bundle.clone()));
+    let codex_home = tempdir().expect("tempdir");
+    let service = CloudConfigBundleService::new(
+        auth_manager_with_agent_identity_business_plan().await,
+        fetcher.clone(),
+        codex_home.path().to_path_buf(),
+        CLOUD_CONFIG_BUNDLE_TIMEOUT,
+    );
+
+    assert_eq!(service.load_startup_bundle().await, Ok(Some(bundle)));
+    assert_eq!(fetcher.request_count.load(Ordering::SeqCst), 1);
+    assert!(
+        codex_home
+            .path()
+            .join(CLOUD_CONFIG_BUNDLE_CACHE_FILENAME)
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -635,8 +701,10 @@ async fn get_bundle_recovers_after_unauthorized_reload() {
             auth_home.path().to_path_buf(),
             /*enable_codex_api_key_env*/ false,
             AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
         )
         .await,
     );
@@ -690,8 +758,10 @@ async fn get_bundle_recovers_after_unauthorized_reload_updates_cache_identity() 
             auth_home.path().to_path_buf(),
             /*enable_codex_api_key_env*/ false,
             AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
         )
         .await,
     );
@@ -753,8 +823,10 @@ async fn get_bundle_surfaces_auth_recovery_message() {
             auth_home.path().to_path_buf(),
             /*enable_codex_api_key_env*/ false,
             AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
         )
         .await,
     );
@@ -798,36 +870,46 @@ async fn get_bundle_surfaces_auth_recovery_message() {
 }
 
 #[tokio::test]
-async fn get_bundle_unauthorized_without_recovery_uses_generic_message() {
+async fn get_bundle_refreshes_external_auth_after_unauthorized() {
     let auth_home = tempdir().expect("tempdir");
-    write_auth_json(
-        auth_home.path(),
-        chatgpt_auth_json_with_mode(
-            "enterprise",
-            Some("user-12345"),
-            Some("account-12345"),
-            "test-access-token",
-            "test-refresh-token",
-            "2025-01-01T00:00:00Z",
-            Some("chatgptAuthTokens"),
-        ),
-    )
-    .expect("write auth");
     let auth_manager = Arc::new(
         AuthManager::new(
             auth_home.path().to_path_buf(),
             /*enable_codex_api_key_env*/ false,
-            AuthCredentialsStoreMode::File,
+            AuthCredentialsStoreMode::Ephemeral,
+            /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
         )
         .await,
     );
+    let initial_auth = CodexAuth::from_external_chatgpt_tokens(
+        &fake_chatgpt_jwt("enterprise", Some("user-12345"), b"initial"),
+        "account-12345",
+        Some("enterprise"),
+    )
+    .expect("initial external auth");
+    let refreshed_token = fake_chatgpt_jwt("enterprise", Some("user-12345"), b"refreshed");
+    let refreshed_auth = CodexAuth::from_external_chatgpt_tokens(
+        &refreshed_token,
+        "account-12345",
+        Some("enterprise"),
+    )
+    .expect("refreshed external auth");
+    let external_auth = Arc::new(TestExternalChatgptAuth {
+        current: RwLock::new(initial_auth),
+        refreshed: refreshed_auth,
+        refresh_count: AtomicUsize::new(0),
+    });
+    auth_manager
+        .set_external_auth(external_auth.clone())
+        .await
+        .expect("set external auth");
 
-    let fetcher = Arc::new(UnauthorizedBundleClient {
-        message:
-            "GET https://chatgpt.com/backend-api/wham/config/bundle failed: 401; content-type=text/html; body=<html>nope</html>"
-                .to_string(),
+    let fetcher = Arc::new(TokenBundleClient {
+        expected_token: refreshed_token,
+        bundle: test_bundle(),
         request_count: AtomicUsize::new(0),
     });
     let codex_home = tempdir().expect("tempdir");
@@ -838,19 +920,9 @@ async fn get_bundle_unauthorized_without_recovery_uses_generic_message() {
         CLOUD_CONFIG_BUNDLE_TIMEOUT,
     );
 
-    let err = service
-        .load_startup_bundle()
-        .await
-        .expect_err("cloud config bundle should fail closed");
-    assert_eq!(
-        err,
-        CloudConfigBundleLoadError::new(
-            CloudConfigBundleLoadErrorCode::Auth,
-            Some(401),
-            CLOUD_CONFIG_BUNDLE_AUTH_RECOVERY_FAILED_MESSAGE,
-        )
-    );
-    assert_eq!(fetcher.request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(service.load_startup_bundle().await, Ok(Some(test_bundle())));
+    assert_eq!(fetcher.request_count.load(Ordering::SeqCst), 2);
+    assert_eq!(external_auth.refresh_count.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -978,6 +1050,7 @@ fn bundle_response_conversion_preserves_fragment_order() {
                     "model = \"low\"".to_string(),
                 ),
             ])),
+            managed_layers: None,
         }))),
         requirements_toml: Some(Some(Box::new(
             codex_backend_client::DeliveredRequirementsToml {
@@ -986,6 +1059,7 @@ fn bundle_response_conversion_preserves_fragment_order() {
                     "High requirements".to_string(),
                     "allowed_approval_policies = [\"never\"]".to_string(),
                 )])),
+                managed_layers: None,
             },
         ))),
     };

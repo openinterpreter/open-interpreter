@@ -17,9 +17,15 @@ impl ChatWidget {
             && !key_hint::ctrl(KeyCode::Char('r')).is_press(key_event)
             && !key_hint::ctrl(KeyCode::Char('u')).is_press(key_event)
         {
+            let should_pause_active_goal = self
+                .bottom_pane
+                .active_view_will_interrupt_turn_on_key_event(key_event);
             self.bottom_pane.handle_key_event(key_event);
+            if should_pause_active_goal {
+                self.pause_active_goal_for_interrupt();
+            }
             if self.bottom_pane.no_modal_or_popup_active() {
-                self.maybe_send_next_queued_input();
+                self.on_modal_or_popup_closed();
             }
             return;
         }
@@ -133,7 +139,9 @@ impl ChatWidget {
             && !self.should_handle_vim_insert_escape(key_event)
         {
             self.input_queue.submit_pending_steers_after_interrupt = true;
-            if !self.submit_op(AppCommand::interrupt()) {
+            if self.submit_op(AppCommand::interrupt()) {
+                self.pause_active_goal_for_interrupt();
+            } else {
                 self.input_queue.submit_pending_steers_after_interrupt = false;
             }
             return;
@@ -160,12 +168,21 @@ impl ChatWidget {
                 && !self.bottom_pane.is_task_running()
                 && self.bottom_pane.no_modal_or_popup_active() =>
             {
-                self.cycle_collaboration_mode();
-                self.refresh_plan_mode_nudge();
+                if self.blocks_direct_input {
+                    self.add_error_message(PARENT_OWNED_INPUT_MESSAGE.to_string());
+                } else {
+                    self.cycle_collaboration_mode();
+                    self.refresh_plan_mode_nudge();
+                }
             }
             _ => {
                 let had_modal_or_popup = !self.bottom_pane.no_modal_or_popup_active();
+                let should_pause_active_goal =
+                    self.bottom_pane.should_interrupt_running_task(key_event);
                 let input_result = self.bottom_pane.handle_key_event(key_event);
+                if should_pause_active_goal {
+                    self.pause_active_goal_for_interrupt();
+                }
                 self.handle_composer_input_result(input_result, had_modal_or_popup);
             }
         }
@@ -242,14 +259,6 @@ impl ChatWidget {
         self.copy_last_agent_markdown_with(crate::clipboard_copy::copy_to_clipboard);
     }
 
-    pub(crate) fn truncate_agent_copy_history_to_user_turn_count(
-        &mut self,
-        user_turn_count: usize,
-    ) {
-        self.transcript
-            .truncate_copy_history_to_user_turn_count(user_turn_count);
-    }
-
     /// Inner implementation with an injectable clipboard backend for testing.
     pub(super) fn copy_last_agent_markdown_with(
         &mut self,
@@ -268,11 +277,6 @@ impl ChatWidget {
                     "Copy failed: {error}"
                 ))),
             },
-            _ if self.transcript.copy_history_evicted_by_rollback => {
-                self.add_to_history(history_cell::new_error_event(format!(
-                    "Cannot copy that response after rewinding. Only the most recent {MAX_AGENT_COPY_HISTORY} responses are available to /copy."
-                )));
-            }
             _ => self.add_to_history(history_cell::new_error_event(
                 "No agent response to copy".into(),
             )),
@@ -360,6 +364,12 @@ impl ChatWidget {
     fn on_ctrl_c(&mut self) {
         let key = key_hint::ctrl(KeyCode::Char('c'));
         let modal_or_popup_active = !self.bottom_pane.no_modal_or_popup_active();
+        let should_pause_active_goal = self
+            .bottom_pane
+            .active_view_will_interrupt_turn_on_key_event(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ));
         if self.bottom_pane.on_ctrl_c() == CancellationEvent::Handled {
             if DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED {
                 if modal_or_popup_active {
@@ -370,6 +380,12 @@ impl ChatWidget {
                     self.arm_quit_shortcut(key);
                 }
             }
+            if should_pause_active_goal {
+                self.pause_active_goal_for_interrupt();
+            }
+            if modal_or_popup_active && self.bottom_pane.no_modal_or_popup_active() {
+                self.on_modal_or_popup_closed();
+            }
             return;
         }
 
@@ -378,8 +394,9 @@ impl ChatWidget {
                 self.quit_shortcut_expires_at = None;
                 self.quit_shortcut_key = None;
                 self.bottom_pane.clear_quit_shortcut_hint();
-                self.pause_active_goal_for_interrupt();
-                self.submit_op(AppCommand::interrupt_and_restore_prompt_if_no_output());
+                if self.submit_op(AppCommand::interrupt()) {
+                    self.pause_active_goal_for_interrupt();
+                }
             } else {
                 self.request_quit_without_confirmation();
             }
@@ -395,9 +412,8 @@ impl ChatWidget {
 
         self.arm_quit_shortcut(key);
 
-        if self.is_cancellable_work_active() {
+        if self.is_cancellable_work_active() && self.submit_op(AppCommand::interrupt()) {
             self.pause_active_goal_for_interrupt();
-            self.submit_op(AppCommand::interrupt_and_restore_prompt_if_no_output());
         }
     }
 

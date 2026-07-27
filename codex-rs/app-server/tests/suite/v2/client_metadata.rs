@@ -59,11 +59,17 @@ async fn turn_start_forwards_client_metadata_to_responses_request_v2() -> Result
         /*supports_websockets*/ false,
     )?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
-        .send_thread_start_request(ThreadStartParams::default())
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            thread_source: Some(ThreadSource::Feature("automation".to_string())),
+            ..Default::default()
+        })
         .await?;
     let thread_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
@@ -75,7 +81,6 @@ async fn turn_start_forwards_client_metadata_to_responses_request_v2() -> Result
     let client_metadata = HashMap::from([
         ("fiber_run_id".to_string(), "fiber-start-123".to_string()),
         ("origin".to_string(), "gaas".to_string()),
-        ("thread_source".to_string(), "client-supplied".to_string()),
     ]);
     let turn_req = mcp
         .send_turn_start_request(TurnStartParams {
@@ -110,7 +115,7 @@ async fn turn_start_forwards_client_metadata_to_responses_request_v2() -> Result
         .expect("x-codex-turn-metadata header should be present");
     assert_eq!(metadata["fiber_run_id"].as_str(), Some("fiber-start-123"));
     assert_eq!(metadata["origin"].as_str(), Some("gaas"));
-    assert_eq!(metadata["thread_source"].as_str(), Some("client-supplied"));
+    assert_eq!(metadata["thread_source"].as_str(), Some("automation"));
     assert_eq!(metadata["turn_id"].as_str(), Some(turn.id.as_str()));
     assert!(metadata.get("installation_id").is_some());
     assert!(metadata.get("session_id").is_some());
@@ -153,7 +158,11 @@ async fn turn_start_sends_fork_lineage_in_turn_metadata_for_thread_fork_v2() -> 
         /*git_info*/ None,
     )?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let ThreadForkResponse { thread, .. } =
@@ -237,7 +246,11 @@ async fn review_start_sends_parent_lineage_in_turn_metadata_for_thread_fork_v2()
         /*git_info*/ None,
     )?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let ThreadForkResponse { thread, .. } =
@@ -300,7 +313,7 @@ async fn review_start_sends_parent_lineage_in_turn_metadata_for_thread_fork_v2()
 }
 
 #[tokio::test]
-async fn turn_start_sends_other_subagent_lineage_after_cold_thread_resume_v2() -> Result<()> {
+async fn turn_start_sends_nested_subagent_lineage_after_cold_thread_resume_v2() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -321,6 +334,8 @@ async fn turn_start_sends_other_subagent_lineage_after_cold_thread_resume_v2() -
         /*supports_websockets*/ false,
     )?;
 
+    let root_thread_id = CoreThreadId::new();
+    let root_thread_id_str = root_thread_id.to_string();
     let parent_thread_id = CoreThreadId::new();
     let parent_thread_id_str = parent_thread_id.to_string();
     let subagent_thread_id = create_fake_parented_rollout_with_source(
@@ -331,10 +346,15 @@ async fn turn_start_sends_other_subagent_lineage_after_cold_thread_resume_v2() -
         Some("mock_provider"),
         /*git_info*/ None,
         SessionSource::SubAgent(SubAgentSource::Other("guardian".to_string())),
+        root_thread_id.into(),
         parent_thread_id,
     )?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let resume_req = mcp
@@ -350,6 +370,7 @@ async fn turn_start_sends_other_subagent_lineage_after_cold_thread_resume_v2() -
     .await??;
     let ThreadResumeResponse { thread, .. } = to_response::<ThreadResumeResponse>(resume_resp)?;
     assert_eq!(thread.id, subagent_thread_id);
+    assert_eq!(thread.session_id, root_thread_id_str);
     assert_eq!(thread.parent_thread_id, Some(parent_thread_id_str.clone()));
     assert_eq!(
         thread.source,
@@ -390,6 +411,10 @@ async fn turn_start_sends_other_subagent_lineage_after_cold_thread_resume_v2() -
         Some(parent_thread_id_str.as_str())
     );
     assert_eq!(metadata["subagent_kind"].as_str(), Some("guardian"));
+    assert_eq!(
+        metadata["session_id"].as_str(),
+        Some(thread.session_id.as_str())
+    );
     assert_eq!(metadata["thread_id"].as_str(), Some(thread.id.as_str()));
     assert_eq!(metadata["turn_id"].as_str(), Some(turn.id.as_str()));
     assert!(metadata.get("forked_from_thread_id").is_none());
@@ -424,11 +449,14 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
         /*supports_websockets*/ false,
     )?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
-        .send_thread_start_request(ThreadStartParams::default())
+        .send_thread_start_request_with_auto_env(ThreadStartParams::default())
         .await?;
     let thread_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
@@ -549,11 +577,17 @@ async fn turn_start_forwards_client_metadata_to_responses_websocket_request_body
         /*supports_websockets*/ true,
     )?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_req = mcp
-        .send_thread_start_request(ThreadStartParams::default())
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            thread_source: Some(ThreadSource::Feature("automation".to_string())),
+            ..Default::default()
+        })
         .await?;
     let thread_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
@@ -611,6 +645,7 @@ async fn turn_start_forwards_client_metadata_to_responses_websocket_request_body
         .expect("websocket x-codex-turn-metadata client metadata should be present");
     assert_eq!(metadata["fiber_run_id"].as_str(), Some("fiber-start-123"));
     assert_eq!(metadata["origin"].as_str(), Some("gaas"));
+    assert_eq!(metadata["thread_source"].as_str(), Some("automation"));
     assert_eq!(metadata["turn_id"].as_str(), Some(turn.id.as_str()));
     assert!(metadata.get("session_id").is_some());
     assert_eq!(

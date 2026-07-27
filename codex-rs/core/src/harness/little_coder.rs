@@ -105,7 +105,7 @@ fn message_content(content: &[ContentItem]) -> String {
             ContentItem::InputText { text } | ContentItem::OutputText { text } => {
                 Some(text.as_str())
             }
-            ContentItem::InputImage { .. } => None,
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
         })
         .collect()
 }

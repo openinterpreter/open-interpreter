@@ -27,7 +27,10 @@ pub(super) async fn spawn_review_thread(
     let available_models = sess
         .services
         .models_manager
-        .list_models(RefreshStrategy::OnlineIfUncached)
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            config.http_client_factory(),
+        )
         .await;
     let unified_exec_shell_mode = UnifiedExecShellMode::for_session(
         codex_tools::unified_exec_feature_mode_for_features(review_features.get()),
@@ -75,9 +78,12 @@ pub(super) async fn spawn_review_thread(
         .model_reasoning_summary
         .unwrap_or(model_info.default_reasoning_summary);
     let session_source = parent_turn_context.session_source.clone();
-    let forked_from_thread_id = {
+    let (forked_from_thread_id, thread_source) = {
         let state = sess.state.lock().await;
-        state.session_configuration.forked_from_thread_id
+        (
+            state.session_configuration.forked_from_thread_id,
+            state.session_configuration.thread_source.clone(),
+        )
     };
 
     let per_turn_config = Arc::new(per_turn_config);
@@ -88,6 +94,7 @@ pub(super) async fn spawn_review_thread(
         forked_from_thread_id,
         parent_turn_context.parent_thread_id,
         &session_source,
+        thread_source,
         review_turn_id.clone(),
         #[allow(deprecated)]
         parent_turn_context.cwd.clone(),
@@ -113,7 +120,9 @@ pub(super) async fn spawn_review_thread(
         reasoning_effort,
         reasoning_summary,
         session_source,
+        history_mode: parent_turn_context.history_mode,
         parent_thread_id: parent_turn_context.parent_thread_id,
+        originator: parent_turn_context.originator.clone(),
         environments: parent_turn_context.environments.clone(),
         available_models,
         unified_exec_shell_mode,
@@ -121,8 +130,10 @@ pub(super) async fn spawn_review_thread(
         timezone: parent_turn_context.timezone.clone(),
         app_server_client_name: parent_turn_context.app_server_client_name.clone(),
         developer_instructions: None,
-        user_instructions: None,
-        collaboration_mode: parent_turn_context.collaboration_mode.clone(),
+        mode: parent_turn_context.mode,
+        collaboration_mode_developer_instructions: parent_turn_context
+            .collaboration_mode_developer_instructions
+            .clone(),
         multi_agent_version: MultiAgentVersion::Disabled,
         personality: parent_turn_context.personality,
         approval_policy: parent_turn_context.approval_policy.clone(),
@@ -161,10 +172,11 @@ pub(super) async fn spawn_review_thread(
     sess.spawn_task(tc.clone(), input, ReviewTask::new()).await;
 
     // Announce entering review mode so UIs can switch modes.
-    let review_request = ReviewRequest {
+    let item = TurnItem::EnteredReviewMode(EnteredReviewModeItem {
+        id: uuid::Uuid::now_v7().to_string(),
         target: resolved.target,
-        user_facing_hint: Some(resolved.user_facing_hint),
-    };
-    sess.send_event(&tc, EventMsg::EnteredReviewMode(review_request))
-        .await;
+        user_facing_hint: resolved.user_facing_hint,
+    });
+    sess.emit_turn_item_started(&tc, &item).await;
+    sess.emit_turn_item_completed(&tc, item).await;
 }

@@ -19,6 +19,7 @@ use codex_client::RequestBody;
 use codex_client::Response;
 use codex_client::StreamResponse;
 use codex_client::TransportError;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
@@ -301,7 +302,7 @@ async fn responses_client_uses_responses_path() -> Result<()> {
 }
 
 #[tokio::test]
-async fn responses_client_stream_request_preserves_exact_json_body() -> Result<()> {
+async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
     let state = RecordingState::default();
     let transport = RecordingTransport::new(state.clone());
     let client = ResponsesClient::new(transport, provider("openai"), Arc::new(NoAuth));
@@ -309,25 +310,26 @@ async fn responses_client_stream_request_preserves_exact_json_body() -> Result<(
         model: "gpt-test".into(),
         instructions: "Say hi".into(),
         input: vec![ResponseItem::Message {
-            id: Some("msg_1".into()),
+            id: Some(ResponseItemId::with_suffix("msg", "1")),
             role: "user".into(),
             content: vec![ContentItem::InputText { text: "hi".into() }],
             phase: None,
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         }],
-        tools: Vec::new(),
+        tools: Some(Vec::new()),
         tool_choice: "auto".into(),
         parallel_tool_calls: false,
         reasoning: None,
         store: false,
         stream: true,
+        stream_options: None,
         include: Vec::new(),
         service_tier: None,
         prompt_cache_key: None,
         text: None,
         client_metadata: None,
     };
-    let expected = serde_json::to_vec(&request)?;
+    let expected = serde_json::to_value(&request)?;
 
     let _stream = client
         .stream_request(request, ResponsesOptions::default())
@@ -338,7 +340,10 @@ async fn responses_client_stream_request_preserves_exact_json_body() -> Result<(
     let prepared = requests[0]
         .prepare_body_for_send()
         .expect("body should prepare");
-    assert_eq!(prepared.body.as_deref(), Some(expected.as_slice()));
+    let body: serde_json::Value =
+        serde_json::from_slice(prepared.body.as_deref().expect("body should be JSON"))?;
+    assert_eq!(body, expected);
+    assert_eq!(body["input"][0]["id"], "msg_1");
     assert_eq!(
         prepared.headers.get(http::header::CONTENT_TYPE),
         Some(&HeaderValue::from_static("application/json"))
@@ -398,12 +403,13 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
         model: "gpt-test".into(),
         instructions: "Say hi".into(),
         input: Vec::new(),
-        tools: Vec::new(),
+        tools: Some(Vec::new()),
         tool_choice: "auto".into(),
         parallel_tool_calls: false,
         reasoning: None,
         store: false,
         stream: true,
+        stream_options: None,
         include: Vec::new(),
         service_tier: None,
         prompt_cache_key: None,
@@ -502,7 +508,7 @@ async fn streaming_client_does_not_retry_auth_build_error() -> Result<()> {
 }
 
 #[tokio::test]
-async fn azure_default_store_attaches_ids_and_headers() -> Result<()> {
+async fn azure_store_sends_ids_and_headers() -> Result<()> {
     let state = RecordingState::default();
     let transport = RecordingTransport::new(state.clone());
     let client = ResponsesClient::new(transport, provider("azure"), Arc::new(NoAuth));
@@ -511,18 +517,19 @@ async fn azure_default_store_attaches_ids_and_headers() -> Result<()> {
         model: "gpt-test".into(),
         instructions: "Say hi".into(),
         input: vec![ResponseItem::Message {
-            id: Some("msg_1".into()),
+            id: Some(ResponseItemId::with_suffix("msg", "1")),
             role: "user".into(),
             content: vec![ContentItem::InputText { text: "hi".into() }],
             phase: None,
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         }],
-        tools: Vec::new(),
+        tools: Some(Vec::new()),
         tool_choice: "auto".into(),
         parallel_tool_calls: false,
         reasoning: None,
         store: true,
         stream: true,
+        stream_options: None,
         include: Vec::new(),
         service_tier: None,
         prompt_cache_key: None,

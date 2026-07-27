@@ -1,16 +1,12 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use codex_core_skills::SkillMetadata;
-use codex_core_skills::filter_skill_load_outcome_for_product;
-use codex_core_skills::loader::SkillRoot;
-use codex_core_skills::loader::load_skills_from_roots;
+use codex_core_skills::loader::load_environment_skills_from_discovery;
+use codex_core_skills::loader::load_environment_skills_from_root;
 use codex_exec_server::EnvironmentManager;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::protocol::Product;
-use codex_protocol::protocol::SkillScope;
-use codex_utils_absolute_path::AbsolutePathBuf;
-use codex_utils_path_uri::PathUri;
+use codex_skills::EnvironmentSkillMetadata;
+use codex_utils_path_uri::PathConvention;
 
 use crate::catalog::SkillAuthority;
 use crate::catalog::SkillCatalog;
@@ -49,6 +45,9 @@ impl ExecutorSkillProvider {
 impl SkillProvider for ExecutorSkillProvider {
     fn list(&self, query: SkillListQuery) -> SkillProviderFuture<'_, SkillCatalog> {
         Box::pin(async move {
+            if let Some(discovery) = query.executor_capability_discovery {
+                return Ok(self.list_from_discovery(&discovery));
+            }
             let mut catalog = SkillCatalog::default();
             for selected_root in query.executor_roots {
                 let selected_root_id = selected_root.id;
@@ -65,41 +64,21 @@ impl SkillProvider for ExecutorSkillProvider {
                     ));
                     continue;
                 };
-                let root_path = match executor_absolute_path(&path) {
-                    Ok(root_path) => root_path,
-                    Err(err) => {
-                        catalog.warnings.push(format!(
-                            "Selected capability root `{selected_root_id}` has invalid path `{path}`: {err}"
-                        ));
-                        continue;
-                    }
-                };
                 let file_system = environment.get_filesystem();
-                let outcome = filter_skill_load_outcome_for_product(
-                    load_skills_from_roots([SkillRoot {
-                        path: root_path.clone(),
-                        scope: SkillScope::User,
-                        file_system: Arc::clone(&file_system),
-                        plugin_id: None,
-                        plugin_root: None,
-                    }])
-                    .await,
+                let outcome = load_environment_skills_from_root(
+                    file_system.as_ref(),
+                    &path,
                     self.restriction_product,
-                );
-                catalog.warnings.extend(outcome.errors.iter().map(|err| {
-                    format!(
-                        "Failed to load executor skill at {}: {}",
-                        err.path.display(),
-                        err.message
-                    )
-                }));
-                for (skill, enabled) in outcome.skills_with_enabled() {
+                )
+                .await;
+                catalog.warnings.extend(outcome.warnings);
+                for skill in outcome.skills {
                     catalog.push_entry(catalog_entry_from_skill(
-                        skill,
-                        enabled,
+                        &skill,
                         authority.clone(),
                         &selected_root_id,
                         &environment_id,
+                        /*instructions*/ None,
                     ));
                 }
             }
@@ -121,6 +100,12 @@ impl SkillProvider for ExecutorSkillProvider {
                     "executor skill resource does not match its package",
                 ));
             }
+            if let Some(contents) = request.resource.environment_contents() {
+                return Ok(SkillReadResult {
+                    resource: request.resource.clone(),
+                    contents: contents.to_string(),
+                });
+            }
             let Some((environment_id, resource_path)) = request.resource.environment_path() else {
                 return Err(SkillProviderError::new(
                     "executor skill resource is not bound to an environment",
@@ -131,10 +116,9 @@ impl SkillProvider for ExecutorSkillProvider {
                     "executor skill resource references unavailable environment `{environment_id}`"
                 )));
             };
-            let resource_path = PathUri::from_abs_path(resource_path);
             let contents = environment
                 .get_filesystem()
-                .read_file_text(&resource_path, /*sandbox*/ None)
+                .read_file_text(resource_path, /*sandbox*/ None)
                 .await
                 .map_err(|err| {
                     SkillProviderError::new(format!(
@@ -155,51 +139,87 @@ impl SkillProvider for ExecutorSkillProvider {
     }
 }
 
+impl ExecutorSkillProvider {
+    fn list_from_discovery(
+        &self,
+        snapshot: &codex_exec_server::ExecutorCapabilityDiscoverySnapshot,
+    ) -> SkillCatalog {
+        let mut catalog = SkillCatalog::default();
+        for root in snapshot.roots() {
+            let selected_root_id = &root.selected_root.id;
+            let CapabilityRootLocation::Environment { environment_id, .. } =
+                &root.selected_root.location;
+            let discovery = match &root.result {
+                Ok(discovery) => discovery.as_ref(),
+                Err(error) => {
+                    catalog.warnings.push(format!(
+                        "Selected capability root `{selected_root_id}` discovery failed: {error}"
+                    ));
+                    continue;
+                }
+            };
+            let outcome =
+                load_environment_skills_from_discovery(discovery, self.restriction_product);
+            catalog.warnings.extend(outcome.warnings);
+            let authority =
+                SkillAuthority::new(SkillSourceKind::Executor, selected_root_id.clone());
+            for skill in outcome.skills {
+                catalog.push_entry(catalog_entry_from_skill(
+                    &skill.metadata,
+                    authority.clone(),
+                    selected_root_id,
+                    environment_id,
+                    Some(skill.instructions),
+                ));
+            }
+        }
+        catalog
+    }
+}
+
 fn catalog_entry_from_skill(
-    skill: &SkillMetadata,
-    enabled: bool,
+    skill: &EnvironmentSkillMetadata,
     authority: SkillAuthority,
     selected_root_id: &str,
     environment_id: &str,
+    instructions: Option<String>,
 ) -> SkillCatalogEntry {
-    let skill_path = skill.path_to_skills_md.to_string_lossy().into_owned();
-    let normalized_path = skill_path.replace('\\', "/");
+    let skill_path = skill.path_to_skills_md.inferred_native_path_string();
+    let normalized_path = match skill.path_to_skills_md.infer_path_convention() {
+        Some(PathConvention::Windows) => skill_path.replace('\\', "/"),
+        Some(PathConvention::Posix) | None => skill_path,
+    };
     let display_path = format!(
         "skill://{selected_root_id}/{}",
         normalized_path.trim_start_matches('/')
     );
-    let mut entry = SkillCatalogEntry::new(
-        SkillPackageId(display_path.clone()),
-        authority,
-        skill.name.clone(),
-        skill.description.clone(),
-        SkillResourceId::environment(
+    let main_prompt = match instructions {
+        Some(contents) => SkillResourceId::environment_with_contents(
+            display_path.clone(),
+            environment_id,
+            skill.path_to_skills_md.clone(),
+            contents,
+        ),
+        None => SkillResourceId::environment(
             display_path.clone(),
             environment_id,
             skill.path_to_skills_md.clone(),
         ),
+    };
+    let entry = SkillCatalogEntry::new(
+        SkillPackageId(display_path.clone()),
+        authority,
+        skill.name.clone(),
+        skill.description.clone(),
+        main_prompt,
     )
     .with_short_description(skill.short_description.clone())
     .with_display_path(display_path)
     .with_dependencies(skill.dependencies.clone());
 
-    if !enabled {
-        entry = entry.disabled();
+    if skill.allows_implicit_invocation() {
+        entry
+    } else {
+        entry.hidden_from_prompt()
     }
-    if !skill.allows_implicit_invocation() {
-        entry = entry.hidden_from_prompt();
-    }
-
-    entry
-}
-
-fn executor_absolute_path(path: &str) -> std::io::Result<AbsolutePathBuf> {
-    let path = PathBuf::from(path);
-    if !path.is_absolute() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "executor path must be absolute",
-        ));
-    }
-    AbsolutePathBuf::from_absolute_path_checked(path)
 }

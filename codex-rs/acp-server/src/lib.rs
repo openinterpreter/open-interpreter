@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
@@ -265,8 +267,11 @@ impl AppServerAcpAgent {
             session_source: SessionSource::Unknown,
             enable_codex_api_key_env: true,
             client_name: "codex-acp".to_string(),
-            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            client_version: codex_product_info::Product::current()
+                .codex_compatibility_version()
+                .to_string(),
             experimental_api: true,
+            mcp_server_openai_form_elicitation: false,
             opt_out_notification_methods: Vec::new(),
             channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
         })
@@ -602,6 +607,7 @@ impl AppServerAcpAgent {
                         use_state_db_only: false,
                         search_term: None,
                         parent_thread_id: None,
+                        ancestor_thread_id: None,
                     },
                 })
                 .await
@@ -658,7 +664,7 @@ impl AppServerAcpAgent {
         let stop_reason = self
             .drain_turn_events(session_id.clone(), thread_id, turn_id, cx)
             .await?;
-        self.set_active_turn(&session_id, None).await;
+        self.set_active_turn(&session_id, /*turn_id*/ None).await;
         Ok(PromptResponse::new(stop_reason))
     }
 
@@ -1193,8 +1199,8 @@ fn tool_call_from_item(
             format!("{server}/{tool}"),
             ToolKind::Other,
         )),
-        codex_app_server_protocol::ThreadItem::WebSearch { id, .. } => Some((
-            ToolCallId::new(id.clone()),
+        codex_app_server_protocol::ThreadItem::WebSearch(item) => Some((
+            ToolCallId::new(item.id.clone()),
             "Web search".to_string(),
             ToolKind::Fetch,
         )),

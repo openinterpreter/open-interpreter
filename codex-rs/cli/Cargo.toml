@@ -97,6 +97,7 @@ windows-sys = { version = "0.52", features = [
 ] }
 
 [dev-dependencies]
+app_test_support = { workspace = true }
 agent-client-protocol = { workspace = true }
 assert_cmd = { workspace = true }
 assert_matches = { workspace = true }
@@ -106,3 +107,9 @@ predicates = { workspace = true }
 pretty_assertions = { workspace = true }
 sqlx = { workspace = true }
 wiremock = { workspace = true }
+zstd = { workspace = true }
+
+[package.metadata.cargo-shear]
+# These Rust sources are intentionally Bazel-only macrobenchmarks rather than
+# Cargo targets.
+ignored-paths = ["e2e_benches/*.rs"]

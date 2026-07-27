@@ -71,7 +71,10 @@ async fn renews_cache_ttl_on_matching_models_etag() -> Result<()> {
     // Populate cache via initial refresh.
     let models_manager = test.thread_manager.get_models_manager();
     let _ = models_manager
-        .list_models(RefreshStrategy::OnlineIfUncached)
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
         .await;
 
     let cache_path = config.codex_home.join(CACHE_FILE);
@@ -135,7 +138,10 @@ async fn renews_cache_ttl_on_matching_models_etag() -> Result<()> {
     // Cached models remain usable offline.
     let offline_models = test
         .thread_manager
-        .list_models(RefreshStrategy::Offline)
+        .list_models(
+            RefreshStrategy::Offline,
+            codex_core::test_support::default_http_client_factory(),
+        )
         .await;
     assert!(
         offline_models
@@ -178,7 +184,10 @@ async fn uses_cache_when_version_matches() -> Result<()> {
     let test = builder.build(&server).await?;
     let models_manager = test.thread_manager.get_models_manager();
     let models = models_manager
-        .list_models(RefreshStrategy::OnlineIfUncached)
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
         .await;
 
     assert!(
@@ -225,7 +234,10 @@ async fn refreshes_when_cache_version_missing() -> Result<()> {
     let test = builder.build(&server).await?;
     let models_manager = test.thread_manager.get_models_manager();
     let models = models_manager
-        .list_models(RefreshStrategy::OnlineIfUncached)
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
         .await;
 
     assert!(
@@ -273,7 +285,10 @@ async fn refreshes_when_cache_version_differs() -> Result<()> {
     let test = builder.build(&server).await?;
     let models_manager = test.thread_manager.get_models_manager();
     let models = models_manager
-        .list_models(RefreshStrategy::OnlineIfUncached)
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
         .await;
 
     assert!(
@@ -342,7 +357,8 @@ fn test_remote_model(slug: &str, priority: i32) -> ModelInfo {
                 description: "medium".to_string(),
             },
         ],
-        reasoning_control: codex_protocol::openai_models::ReasoningControl::None,
+        reasoning_control: Default::default(),
+        supports_reasoning_summaries: false,
         shell_type: ConfigShellToolType::ShellCommand,
         visibility: ModelVisibility::List,
         supported_in_api: true,
@@ -353,7 +369,8 @@ fn test_remote_model(slug: &str, priority: i32) -> ModelInfo {
         upgrade: None,
         base_instructions: "base instructions".to_string(),
         model_messages: None,
-        supports_reasoning_summaries: false,
+        include_skills_usage_instructions: false,
+        supports_reasoning_summary_parameter: true,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,

@@ -1,3 +1,7 @@
+use crate::AgentPath;
+use crate::ResponseItemId;
+use crate::ThreadId;
+use crate::dynamic_tools::DynamicToolCallOutputContentItem;
 use crate::mcp::CallToolResult;
 use crate::memory_citation::MemoryCitation;
 use crate::models::ContentItem;
@@ -5,31 +9,29 @@ use crate::models::ImageDetail;
 use crate::models::MessagePhase;
 use crate::models::ResponseItem;
 use crate::models::WebSearchAction;
-use crate::protocol::AgentMessageEvent;
-use crate::protocol::AgentReasoningEvent;
-use crate::protocol::AgentReasoningRawContentEvent;
-use crate::protocol::ContextCompactedEvent;
-use crate::protocol::EventMsg;
+use crate::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use crate::parse_command::ParsedCommand;
+use crate::protocol::AgentStatus;
+use crate::protocol::CollabAgentRef;
+use crate::protocol::ExecCommandSource;
+use crate::protocol::ExecCommandStatus;
 use crate::protocol::FileChange;
-use crate::protocol::ImageGenerationEndEvent;
-use crate::protocol::McpInvocation;
-use crate::protocol::McpToolCallBeginEvent;
-use crate::protocol::McpToolCallEndEvent;
-use crate::protocol::PatchApplyBeginEvent;
-use crate::protocol::PatchApplyEndEvent;
 use crate::protocol::PatchApplyStatus;
-use crate::protocol::UserMessageEvent;
-use crate::protocol::ViewImageToolCallEvent;
-use crate::protocol::WebSearchEndEvent;
+use crate::protocol::ReviewOutputEvent;
+use crate::protocol::ReviewTarget;
+use crate::protocol::SubAgentActivityKind;
 use crate::user_input::ByteRange;
 use crate::user_input::TextElement;
 use crate::user_input::UserInput;
+use codex_extension_items::ExtensionItem;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use quick_xml::de::from_str as from_xml_str;
 use quick_xml::se::to_string as to_xml_string;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -45,10 +47,28 @@ pub enum TurnItem {
     AgentMessage(AgentMessageItem),
     Plan(PlanItem),
     Reasoning(ReasoningItem),
+    CommandExecution(CommandExecutionItem),
+    DynamicToolCall(DynamicToolCallItem),
+    CollabAgentToolCall(CollabAgentToolCallItem),
+    SubAgentActivity(SubAgentActivityItem),
+    /// Hosted Responses API web-search item handled directly by core.
+    ///
+    /// Standalone web search uses Self::Extension instead because its display
+    /// schema is owned by the web-search extension.
     WebSearch(WebSearchItem),
     ImageView(ImageViewItem),
-    Sleep(SleepItem),
+    /// Item whose schema and lifecycle details are owned by an extension.
+    ///
+    /// Standalone image generation, sleep, and web search use this path.
+    /// App-server wraps the same typed items in their public variants.
+    Extension(ExtensionItem),
+    /// Hosted Responses API image-generation item handled directly by core.
+    ///
+    /// This remains separate from [`Self::Extension`] because core still owns
+    /// hosted image persistence and legacy-event fanout.
     ImageGeneration(ImageGenerationItem),
+    EnteredReviewMode(EnteredReviewModeItem),
+    ExitedReviewMode(ExitedReviewModeItem),
     FileChange(FileChangeItem),
     McpToolCall(McpToolCallItem),
     ContextCompaction(ContextCompactionItem),
@@ -115,6 +135,19 @@ pub struct AgentMessageItem {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
+pub struct EnteredReviewModeItem {
+    pub id: String,
+    pub target: ReviewTarget,
+    pub user_facing_hint: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
+pub struct ExitedReviewModeItem {
+    pub id: String,
+    pub review_output: Option<ReviewOutputEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
 pub struct PlanItem {
     pub id: String,
     pub text: String,
@@ -128,23 +161,162 @@ pub struct ReasoningItem {
     pub raw_content: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandExecutionStatus {
+    InProgress,
+    Completed,
+    Failed,
+    Declined,
+}
+
+impl From<ExecCommandStatus> for CommandExecutionStatus {
+    fn from(value: ExecCommandStatus) -> Self {
+        match value {
+            ExecCommandStatus::Completed => Self::Completed,
+            ExecCommandStatus::Failed => Self::Failed,
+            ExecCommandStatus::Declined => Self::Declined,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
+pub struct CommandExecutionItem {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub process_id: Option<String>,
+    pub command: Vec<String>,
+    pub cwd: PathUri,
+    pub parsed_cmd: Vec<ParsedCommand>,
+    pub source: ExecCommandSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub interaction_input: Option<String>,
+    pub status: CommandExecutionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stdout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stderr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub aggregated_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "string", optional)]
+    pub duration: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub formatted_output: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DynamicToolCallStatus {
+    InProgress,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
+pub struct DynamicToolCallItem {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub namespace: Option<String>,
+    pub tool: String,
+    pub arguments: serde_json::Value,
+    pub status: DynamicToolCallStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub content_items: Option<Vec<DynamicToolCallOutputContentItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub success: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "string", optional)]
+    pub duration: Option<Duration>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CollabAgentTool {
+    SpawnAgent,
+    SendInput,
+    ResumeAgent,
+    Wait,
+    CloseAgent,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CollabAgentToolCallStatus {
+    InProgress,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
+pub struct CollabAgentToolCallItem {
+    pub id: String,
+    pub tool: CollabAgentTool,
+    pub status: CollabAgentToolCallStatus,
+    pub sender_thread_id: ThreadId,
+    #[serde(default)]
+    pub receiver_thread_ids: Vec<ThreadId>,
+    #[serde(default)]
+    pub receiver_agents: Vec<CollabAgentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reasoning_effort: Option<ReasoningEffortConfig>,
+    #[serde(default)]
+    pub agents_states: HashMap<ThreadId, AgentStatus>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+pub struct SubAgentActivityItem {
+    pub id: String,
+    pub kind: SubAgentActivityKind,
+    pub agent_thread_id: ThreadId,
+    pub agent_path: AgentPath,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
 pub struct WebSearchItem {
     pub id: String,
     pub query: String,
     pub action: WebSearchAction,
+    /// Structured search results returned out-of-band by standalone web search.
+    ///
+    /// These stay as opaque JSON at the Codex transport boundary so new result
+    /// fields and result types can pass through without changing model-visible
+    /// context or requiring a Codex release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub results: Option<Vec<JsonValue>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
 pub struct ImageViewItem {
     pub id: String,
-    pub path: AbsolutePathBuf,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
-pub struct SleepItem {
-    pub id: String,
-    pub duration_ms: u64,
+    /// Path resolved within the selected execution environment.
+    ///
+    /// This core protocol type is not exposed directly in the app-server API.
+    /// App-server converts the path to `LegacyAppPathString` at its boundary.
+    pub path: PathUri,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
@@ -188,7 +360,19 @@ pub struct McpToolCallItem {
     pub arguments: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub connector_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub mcp_app_resource_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub link_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub app_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub action_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub plugin_id: Option<String>,
@@ -225,15 +409,13 @@ pub struct ContextCompactionItem {
     pub id: String,
 }
 
+fn new_item_id() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
+
 impl ContextCompactionItem {
     pub fn new() -> Self {
-        Self {
-            id: uuid::Uuid::new_v4().to_string(),
-        }
-    }
-
-    pub fn as_legacy_event(&self) -> EventMsg {
-        EventMsg::ContextCompacted(ContextCompactedEvent {})
+        Self { id: new_item_id() }
     }
 }
 
@@ -246,24 +428,10 @@ impl Default for ContextCompactionItem {
 impl UserMessageItem {
     pub fn new(content: &[UserInput]) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: new_item_id(),
             client_id: None,
             content: content.to_vec(),
         }
-    }
-
-    pub fn as_legacy_event(&self) -> EventMsg {
-        // Legacy user-message events flatten only text inputs into `message` and
-        // rebase text element ranges onto that concatenated text.
-        EventMsg::UserMessage(UserMessageEvent {
-            client_id: self.client_id.clone(),
-            message: self.message(),
-            images: Some(self.image_urls()),
-            image_details: self.image_details(),
-            local_images: self.local_image_paths(),
-            local_image_details: self.local_image_details(),
-            text_elements: self.text_elements(),
-        })
     }
 
     pub fn message(&self) -> String {
@@ -348,6 +516,26 @@ impl UserMessageItem {
                 .collect(),
         )
     }
+
+    pub fn audio_urls(&self) -> Vec<String> {
+        self.content
+            .iter()
+            .filter_map(|c| match c {
+                UserInput::Audio { audio_url } => Some(audio_url.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn local_audio_paths(&self) -> Vec<std::path::PathBuf> {
+        self.content
+            .iter()
+            .filter_map(|c| match c {
+                UserInput::LocalAudio { path } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 fn trim_trailing_default_image_details(
@@ -360,11 +548,9 @@ fn trim_trailing_default_image_details(
 }
 
 impl HookPromptItem {
-    pub fn from_fragments(id: Option<&String>, fragments: Vec<HookPromptFragment>) -> Self {
+    pub fn from_fragments(id: Option<&str>, fragments: Vec<HookPromptFragment>) -> Self {
         Self {
-            id: id
-                .cloned()
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            id: id.map(str::to_string).unwrap_or_else(new_item_id),
             fragments,
         }
     }
@@ -394,16 +580,16 @@ pub fn build_hook_prompt_message(fragments: &[HookPromptFragment]) -> Option<Res
     }
 
     Some(ResponseItem::Message {
-        id: Some(uuid::Uuid::new_v4().to_string()),
+        id: Some(ResponseItemId::new("msg")),
         role: "user".to_string(),
         content,
         phase: None,
-        metadata: None,
+        internal_chat_message_metadata_passthrough: None,
     })
 }
 
 pub fn parse_hook_prompt_message(
-    id: Option<&String>,
+    id: Option<&str>,
     content: &[ContentItem],
 ) -> Option<HookPromptItem> {
     let fragments = content
@@ -444,135 +630,6 @@ fn serialize_hook_prompt_fragment(text: &str, hook_run_id: &str) -> Option<Strin
     .ok()
 }
 
-impl AgentMessageItem {
-    pub fn new(content: &[AgentMessageContent]) -> Self {
-        Self {
-            id: uuid::Uuid::new_v4().to_string(),
-            content: content.to_vec(),
-            phase: None,
-            memory_citation: None,
-        }
-    }
-
-    pub fn as_legacy_events(&self) -> Vec<EventMsg> {
-        self.content
-            .iter()
-            .map(|c| match c {
-                AgentMessageContent::Text { text } => EventMsg::AgentMessage(AgentMessageEvent {
-                    message: text.clone(),
-                    phase: self.phase.clone(),
-                    memory_citation: self.memory_citation.clone(),
-                }),
-            })
-            .collect()
-    }
-}
-
-impl ReasoningItem {
-    pub fn as_legacy_events(&self, show_raw_agent_reasoning: bool) -> Vec<EventMsg> {
-        let mut events = Vec::new();
-        for summary in &self.summary_text {
-            events.push(EventMsg::AgentReasoning(AgentReasoningEvent {
-                text: summary.clone(),
-            }));
-        }
-
-        if show_raw_agent_reasoning {
-            for entry in &self.raw_content {
-                events.push(EventMsg::AgentReasoningRawContent(
-                    AgentReasoningRawContentEvent {
-                        text: entry.clone(),
-                    },
-                ));
-            }
-        }
-
-        events
-    }
-}
-
-impl WebSearchItem {
-    pub fn as_legacy_event(&self) -> EventMsg {
-        EventMsg::WebSearchEnd(WebSearchEndEvent {
-            call_id: self.id.clone(),
-            query: self.query.clone(),
-            action: self.action.clone(),
-        })
-    }
-}
-
-impl ImageGenerationItem {
-    pub fn as_legacy_event(&self) -> EventMsg {
-        EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
-            call_id: self.id.clone(),
-            status: self.status.clone(),
-            revised_prompt: self.revised_prompt.clone(),
-            result: self.result.clone(),
-            saved_path: self.saved_path.clone(),
-        })
-    }
-}
-
-impl FileChangeItem {
-    pub fn as_legacy_begin_event(&self, turn_id: String) -> EventMsg {
-        EventMsg::PatchApplyBegin(PatchApplyBeginEvent {
-            call_id: self.id.clone(),
-            turn_id,
-            auto_approved: self.auto_approved.unwrap_or(false),
-            changes: self.changes.clone(),
-        })
-    }
-
-    pub fn as_legacy_end_event(&self, turn_id: String) -> Option<EventMsg> {
-        let status = self.status.clone()?;
-        Some(EventMsg::PatchApplyEnd(PatchApplyEndEvent {
-            call_id: self.id.clone(),
-            turn_id,
-            stdout: self.stdout.clone().unwrap_or_default(),
-            stderr: self.stderr.clone().unwrap_or_default(),
-            success: status == PatchApplyStatus::Completed,
-            changes: self.changes.clone(),
-            status,
-        }))
-    }
-}
-
-impl McpToolCallItem {
-    pub fn as_legacy_begin_event(&self) -> EventMsg {
-        EventMsg::McpToolCallBegin(McpToolCallBeginEvent {
-            call_id: self.id.clone(),
-            invocation: McpInvocation {
-                server: self.server.clone(),
-                tool: self.tool.clone(),
-                arguments: (!self.arguments.is_null()).then(|| self.arguments.clone()),
-            },
-            mcp_app_resource_uri: self.mcp_app_resource_uri.clone(),
-            plugin_id: self.plugin_id.clone(),
-        })
-    }
-
-    pub fn as_legacy_end_event(&self) -> Option<EventMsg> {
-        let result = match (&self.result, &self.error) {
-            (Some(result), _) => Ok(result.clone()),
-            (None, Some(error)) => Err(error.message.clone()),
-            (None, None) => return None,
-        };
-
-        Some(EventMsg::McpToolCallEnd(McpToolCallEndEvent {
-            call_id: self.id.clone(),
-            invocation: McpInvocation {
-                server: self.server.clone(),
-                tool: self.tool.clone(),
-                arguments: (!self.arguments.is_null()).then(|| self.arguments.clone()),
-            },
-            mcp_app_resource_uri: self.mcp_app_resource_uri.clone(),
-            plugin_id: self.plugin_id.clone(),
-            duration: self.duration?,
-            result,
-        }))
-    }
-}
-
 impl TurnItem {
     pub fn id(&self) -> String {
         match self {
@@ -581,38 +638,19 @@ impl TurnItem {
             TurnItem::AgentMessage(item) => item.id.clone(),
             TurnItem::Plan(item) => item.id.clone(),
             TurnItem::Reasoning(item) => item.id.clone(),
+            TurnItem::CommandExecution(item) => item.id.clone(),
+            TurnItem::DynamicToolCall(item) => item.id.clone(),
+            TurnItem::CollabAgentToolCall(item) => item.id.clone(),
+            TurnItem::SubAgentActivity(item) => item.id.clone(),
             TurnItem::WebSearch(item) => item.id.clone(),
             TurnItem::ImageView(item) => item.id.clone(),
-            TurnItem::Sleep(item) => item.id.clone(),
+            TurnItem::Extension(item) => item.id().to_string(),
             TurnItem::ImageGeneration(item) => item.id.clone(),
+            TurnItem::EnteredReviewMode(item) => item.id.clone(),
+            TurnItem::ExitedReviewMode(item) => item.id.clone(),
             TurnItem::FileChange(item) => item.id.clone(),
             TurnItem::McpToolCall(item) => item.id.clone(),
             TurnItem::ContextCompaction(item) => item.id.clone(),
-        }
-    }
-
-    pub fn as_legacy_events(&self, show_raw_agent_reasoning: bool) -> Vec<EventMsg> {
-        match self {
-            TurnItem::UserMessage(item) => vec![item.as_legacy_event()],
-            TurnItem::HookPrompt(_) => Vec::new(),
-            TurnItem::AgentMessage(item) => item.as_legacy_events(),
-            TurnItem::Plan(_) => Vec::new(),
-            TurnItem::WebSearch(item) => vec![item.as_legacy_event()],
-            TurnItem::ImageView(item) => {
-                vec![EventMsg::ViewImageToolCall(ViewImageToolCallEvent {
-                    call_id: item.id.clone(),
-                    path: item.path.clone(),
-                })]
-            }
-            TurnItem::Sleep(_) => Vec::new(),
-            TurnItem::ImageGeneration(item) => vec![item.as_legacy_event()],
-            TurnItem::FileChange(item) => item
-                .as_legacy_end_event(String::new())
-                .into_iter()
-                .collect(),
-            TurnItem::McpToolCall(item) => item.as_legacy_end_event().into_iter().collect(),
-            TurnItem::Reasoning(item) => item.as_legacy_events(show_raw_agent_reasoning),
-            TurnItem::ContextCompaction(item) => vec![item.as_legacy_event()],
         }
     }
 }
@@ -620,7 +658,51 @@ impl TurnItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_extension_items::sleep::SleepItem;
     use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    #[test]
+    fn sleep_extension_item_preserves_type_and_kind() {
+        let item = TurnItem::Extension(ExtensionItem::Sleep(SleepItem {
+            id: "sleep-1".to_string(),
+            duration_ms: 1_000,
+        }));
+
+        assert_eq!(
+            serde_json::to_value(item).expect("serialize sleep extension item"),
+            json!({
+                "type": "Extension",
+                "kind": "clock.sleep",
+                "id": "sleep-1",
+                "durationMs": 1_000,
+            })
+        );
+    }
+
+    #[test]
+    fn user_message_item_extracts_audio_attachments() {
+        let item = UserMessageItem::new(&[
+            UserInput::Text {
+                text: "transcribe these".to_string(),
+                text_elements: Vec::new(),
+            },
+            UserInput::Audio {
+                audio_url: "https://example.com/remote.mp3".to_string(),
+            },
+            UserInput::LocalAudio {
+                path: std::path::PathBuf::from("local.wav"),
+            },
+        ]);
+
+        assert_eq!(
+            (item.audio_urls(), item.local_audio_paths()),
+            (
+                vec!["https://example.com/remote.mp3".to_string()],
+                vec![std::path::PathBuf::from("local.wav")],
+            )
+        );
+    }
 
     #[test]
     fn hook_prompt_roundtrips_multiple_fragments() {
@@ -630,9 +712,10 @@ mod tests {
         ];
         let message = build_hook_prompt_message(&original).expect("hook prompt");
 
-        let ResponseItem::Message { content, .. } = message else {
+        let ResponseItem::Message { id, content, .. } = message else {
             panic!("expected hook prompt message");
         };
+        assert!(id.is_some_and(|id| id.starts_with("msg_")));
 
         let parsed = parse_hook_prompt_message(/*id*/ None, &content).expect("parsed hook prompt");
         assert_eq!(parsed.fragments, original);

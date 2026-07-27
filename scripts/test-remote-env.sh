@@ -19,13 +19,15 @@ setup_remote_env() {
   local container_name
   local codex_binary_path
   local container_ip
+  local container_network_mode
+  local -a docker_network_args
   local remote_codex_path
   local remote_exec_server_pid
   local remote_exec_server_port
   local remote_exec_server_stdout_path
 
   container_name="${CODEX_TEST_REMOTE_ENV_CONTAINER_NAME:-codex-remote-test-env-local-$(date +%s)-${RANDOM}}"
-  codex_binary_path="${REPO_ROOT}/codex-rs/target/debug/codex"
+  codex_binary_path="${CARGO_TARGET_DIR:-${REPO_ROOT}/codex-rs/target}/debug/codex"
 
   if ! command -v docker >/dev/null 2>&1; then
     echo "docker is required (Colima or Docker Desktop)" >&2
@@ -53,11 +55,21 @@ setup_remote_env() {
   fi
 
   docker rm -f "${container_name}" >/dev/null 2>&1 || true
+  docker_network_args=()
+  # The managed-network proxy used by remote integration tests listens on the
+  # Linux runner's loopback interface. Share that network namespace so the
+  # remote executor exercises the real approval/denial path instead of timing
+  # out before it can reach the proxy. Docker Desktop does not provide the same
+  # host-network semantics, so local macOS runs keep the bridge network.
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    docker_network_args=(--network host)
+  fi
   # bubblewrap needs mount propagation inside the remote test container.
   docker run -d \
     --name "${container_name}" \
     --privileged \
     --security-opt seccomp=unconfined \
+    "${docker_network_args[@]}" \
     ubuntu:24.04 sleep infinity >/dev/null
   if ! docker exec "${container_name}" sh -lc "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 zsh bubblewrap"; then
     docker rm -f "${container_name}" >/dev/null 2>&1 || true
@@ -76,9 +88,14 @@ setup_remote_env() {
         "rm -f ${remote_exec_server_stdout_path}; nohup ${remote_codex_path} exec-server --listen ws://0.0.0.0:${remote_exec_server_port} > ${remote_exec_server_stdout_path} 2>&1 & echo \$!"
     )"
     wait_for_remote_exec_server_port "${container_name}" "${remote_exec_server_port}" "${remote_exec_server_stdout_path}"
-    container_ip="$(
-      docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${container_name}"
-    )"
+    container_network_mode="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "${container_name}")"
+    if [[ "${container_network_mode}" == "host" ]]; then
+      container_ip="127.0.0.1"
+    else
+      container_ip="$(
+        docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${container_name}"
+      )"
+    fi
     if [[ -z "${container_ip}" ]]; then
       echo "container ${container_name} has no IP address" >&2
       docker rm -f "${container_name}" >/dev/null 2>&1 || true

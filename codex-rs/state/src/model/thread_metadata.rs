@@ -6,9 +6,11 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// The sort key to use when listing threads.
@@ -29,6 +31,15 @@ pub enum SortDirection {
     Desc,
 }
 
+/// Spawn-graph relationship used to filter thread listings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadRelationFilter {
+    /// Return only threads whose immediate parent is the given thread.
+    DirectChildrenOf(ThreadId),
+    /// Return every thread transitively descended from the given thread.
+    DescendantsOf(ThreadId),
+}
+
 /// A pagination anchor used for keyset pagination.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Anchor {
@@ -43,6 +54,8 @@ pub struct Anchor {
 pub struct ThreadsPage {
     /// The thread metadata items in this page.
     pub items: Vec<ThreadMetadata>,
+    /// Immediate parents for page items found through the persisted spawn graph.
+    pub parent_thread_ids: HashMap<ThreadId, ThreadId>,
     /// The next anchor to use for pagination, if any.
     pub next_anchor: Option<Anchor>,
     /// The number of rows scanned to produce this page.
@@ -60,7 +73,7 @@ pub struct ExtractionOutcome {
     pub parse_errors: usize,
 }
 
-/// Canonical thread metadata derived from rollout files.
+/// Canonical persisted thread metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadMetadata {
     /// The thread identifier.
@@ -75,6 +88,8 @@ pub struct ThreadMetadata {
     pub recency_at: DateTime<Utc>,
     /// The session source (stringified enum).
     pub source: String,
+    /// Persisted thread history contract selected when this thread was created.
+    pub history_mode: ThreadHistoryMode,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
     /// Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
@@ -95,6 +110,8 @@ pub struct ThreadMetadata {
     pub cli_version: String,
     /// A best-effort thread title.
     pub title: String,
+    /// Explicit user-facing thread name, if one was set.
+    pub name: Option<String>,
     /// Best available user-facing preview for discovery and list display.
     pub preview: Option<String>,
     /// The sandbox policy (stringified enum).
@@ -130,6 +147,8 @@ pub struct ThreadMetadataBuilder {
     pub recency_at: Option<DateTime<Utc>>,
     /// The session source.
     pub source: SessionSource,
+    /// Persisted thread history contract selected when this thread was created.
+    pub history_mode: ThreadHistoryMode,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
     /// Optional random unique nickname assigned to the session.
@@ -173,6 +192,7 @@ impl ThreadMetadataBuilder {
             updated_at: None,
             recency_at: None,
             source,
+            history_mode: ThreadHistoryMode::Legacy,
             thread_source: None,
             agent_nickname: None,
             agent_role: None,
@@ -210,6 +230,7 @@ impl ThreadMetadataBuilder {
             updated_at,
             recency_at,
             source,
+            history_mode: self.history_mode,
             thread_source: self.thread_source.clone(),
             agent_nickname: self.agent_nickname.clone(),
             agent_role: self.agent_role.clone(),
@@ -226,6 +247,7 @@ impl ThreadMetadataBuilder {
             cwd: self.cwd.clone(),
             cli_version: self.cli_version.clone().unwrap_or_default(),
             title: String::new(),
+            name: None,
             preview: None,
             sandbox_policy,
             approval_mode,
@@ -240,8 +262,20 @@ impl ThreadMetadataBuilder {
 }
 
 impl ThreadMetadata {
-    /// Preserve existing non-null Git fields when rollout-derived metadata is reconciled.
+    /// Preserve SQLite-owned Git fields when rollout-derived metadata is reconciled.
     pub fn prefer_existing_git_info(&mut self, existing: &Self) {
+        if matches!(self.history_mode, ThreadHistoryMode::Paginated)
+            && matches!(existing.history_mode, ThreadHistoryMode::Paginated)
+        {
+            // `self` was rebuilt from the rollout's initial SessionMeta. `existing` is the
+            // current SQLite row. Once that row says paginated, metadata updates are SQLite-only,
+            // so a NULL is an explicit clear, not missing data. Copy the whole tuple or the stale
+            // rollout value would be written back during reconciliation.
+            self.git_sha = existing.git_sha.clone();
+            self.git_branch = existing.git_branch.clone();
+            self.git_origin_url = existing.git_origin_url.clone();
+            return;
+        }
         if existing.git_sha.is_some() {
             self.git_sha = existing.git_sha.clone();
         }
@@ -313,6 +347,9 @@ impl ThreadMetadata {
         if self.title != other.title {
             diffs.push("title");
         }
+        if self.name != other.name {
+            diffs.push("name");
+        }
         if self.preview != other.preview {
             diffs.push("preview");
         }
@@ -356,6 +393,7 @@ pub(crate) struct ThreadRow {
     updated_at: i64,
     recency_at: i64,
     source: String,
+    history_mode: String,
     thread_source: Option<String>,
     agent_nickname: Option<String>,
     agent_role: Option<String>,
@@ -366,6 +404,7 @@ pub(crate) struct ThreadRow {
     cwd: String,
     cli_version: String,
     title: String,
+    name: Option<String>,
     preview: String,
     sandbox_policy: String,
     approval_mode: String,
@@ -386,6 +425,7 @@ impl ThreadRow {
             updated_at: row.try_get("updated_at")?,
             recency_at: row.try_get("recency_at")?,
             source: row.try_get("source")?,
+            history_mode: row.try_get("history_mode")?,
             thread_source: row.try_get("thread_source")?,
             agent_nickname: row.try_get("agent_nickname")?,
             agent_role: row.try_get("agent_role")?,
@@ -396,6 +436,7 @@ impl ThreadRow {
             cwd: row.try_get("cwd")?,
             cli_version: row.try_get("cli_version")?,
             title: row.try_get("title")?,
+            name: row.try_get("name")?,
             preview: row.try_get("preview")?,
             sandbox_policy: row.try_get("sandbox_policy")?,
             approval_mode: row.try_get("approval_mode")?,
@@ -420,6 +461,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             updated_at,
             recency_at,
             source,
+            history_mode,
             thread_source,
             agent_nickname,
             agent_role,
@@ -430,6 +472,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             cwd,
             cli_version,
             title,
+            name,
             preview,
             sandbox_policy,
             approval_mode,
@@ -444,6 +487,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             .map(|thread_source| thread_source.parse())
             .transpose()
             .map_err(anyhow::Error::msg)?;
+        let history_mode = history_mode.parse().map_err(anyhow::Error::msg)?;
         Ok(Self {
             id: ThreadId::try_from(id)?,
             rollout_path: PathBuf::from(rollout_path),
@@ -451,6 +495,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             updated_at: epoch_millis_to_datetime(updated_at)?,
             recency_at: epoch_millis_to_datetime(recency_at)?,
             source,
+            history_mode,
             thread_source,
             agent_nickname,
             agent_role,
@@ -462,6 +507,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             cwd: PathBuf::from(cwd),
             cli_version,
             title,
+            name,
             preview: (!preview.is_empty()).then_some(preview),
             sandbox_policy,
             approval_mode,
@@ -475,7 +521,11 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
     }
 }
 
-pub(crate) fn anchor_from_item(item: &ThreadMetadata, sort_key: SortKey) -> Option<Anchor> {
+pub(crate) fn anchor_from_item(
+    item: &ThreadMetadata,
+    sort_key: SortKey,
+    include_thread_id_tiebreaker: bool,
+) -> Option<Anchor> {
     let ts = match sort_key {
         SortKey::CreatedAt => item.created_at,
         SortKey::UpdatedAt => item.updated_at,
@@ -483,7 +533,7 @@ pub(crate) fn anchor_from_item(item: &ThreadMetadata, sort_key: SortKey) -> Opti
     };
     Some(Anchor {
         ts,
-        id: (sort_key == SortKey::RecencyAt).then_some(item.id),
+        id: (include_thread_id_tiebreaker || sort_key == SortKey::RecencyAt).then_some(item.id),
     })
 }
 
@@ -532,6 +582,7 @@ mod tests {
     use chrono::Utc;
     use codex_protocol::ThreadId;
     use codex_protocol::openai_models::ReasoningEffort;
+    use codex_protocol::protocol::ThreadHistoryMode;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
@@ -543,6 +594,7 @@ mod tests {
             updated_at: 1_700_000_100,
             recency_at: 1_700_000_100,
             source: "cli".to_string(),
+            history_mode: "legacy".to_string(),
             thread_source: None,
             agent_nickname: None,
             agent_role: None,
@@ -553,6 +605,7 @@ mod tests {
             cwd: "/tmp/workspace".to_string(),
             cli_version: "0.0.0".to_string(),
             title: String::new(),
+            name: None,
             preview: String::new(),
             sandbox_policy: "read-only".to_string(),
             approval_mode: "on-request".to_string(),
@@ -574,6 +627,7 @@ mod tests {
             updated_at: DateTime::<Utc>::from_timestamp(1_700_000_100, 0).expect("timestamp"),
             recency_at: DateTime::<Utc>::from_timestamp(1_700_000_100, 0).expect("timestamp"),
             source: "cli".to_string(),
+            history_mode: ThreadHistoryMode::Legacy,
             thread_source: None,
             agent_nickname: None,
             agent_role: None,
@@ -584,6 +638,7 @@ mod tests {
             cwd: PathBuf::from("/tmp/workspace"),
             cli_version: "0.0.0".to_string(),
             title: String::new(),
+            name: None,
             preview: None,
             sandbox_policy: "read-only".to_string(),
             approval_mode: "on-request".to_string(),
@@ -616,5 +671,28 @@ mod tests {
             metadata,
             expected_thread_metadata(Some(ReasoningEffort::Custom("future".to_string())))
         );
+    }
+
+    #[test]
+    fn thread_row_rejects_unknown_history_mode() {
+        let mut row = thread_row(/*reasoning_effort*/ None);
+        row.history_mode = "future".to_string();
+
+        assert!(ThreadMetadata::try_from(row).is_err());
+    }
+
+    #[test]
+    fn paginated_rollout_git_info_keeps_rollout_values_until_sqlite_mode_is_paginated() {
+        let mut reconciled = expected_thread_metadata(/*reasoning_effort*/ None);
+        reconciled.history_mode = ThreadHistoryMode::Paginated;
+        reconciled.git_sha = Some("rollout-sha".to_string());
+        reconciled.git_branch = Some("rollout-branch".to_string());
+        reconciled.git_origin_url = Some("rollout-origin".to_string());
+        let existing = expected_thread_metadata(/*reasoning_effort*/ None);
+        let expected = reconciled.clone();
+
+        reconciled.prefer_existing_git_info(&existing);
+
+        assert_eq!(reconciled, expected);
     }
 }

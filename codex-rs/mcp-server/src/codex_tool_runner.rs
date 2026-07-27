@@ -266,6 +266,7 @@ async fn run_codex_tool_session_inner(
                     EventMsg::Warning(_)
                     | EventMsg::GuardianWarning(_)
                     | EventMsg::ModelVerification(_)
+                    | EventMsg::SafetyBuffering(_)
                     | EventMsg::TurnModerationMetadata(_) => {
                         continue;
                     }
@@ -332,6 +333,8 @@ async fn run_codex_tool_session_inner(
                     EventMsg::AgentReasoningRawContent(_)
                     | EventMsg::TurnStarted(_)
                     | EventMsg::ThreadSettingsApplied(_)
+                    | EventMsg::EnvironmentConnected(_)
+                    | EventMsg::EnvironmentDisconnected(_)
                     | EventMsg::TokenCount(_)
                     | EventMsg::AgentReasoning(_)
                     | EventMsg::AgentReasoningSectionBreak(_)
@@ -357,6 +360,7 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::ImageGenerationEnd(_)
                     | EventMsg::ViewImageToolCall(_)
                     | EventMsg::RawResponseItem(_)
+                    | EventMsg::RawResponseCompleted(_)
                     | EventMsg::EnteredReviewMode(_)
                     | EventMsg::ItemStarted(_)
                     | EventMsg::ItemCompleted(_)

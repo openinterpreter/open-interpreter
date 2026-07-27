@@ -3,13 +3,14 @@ use crate::compact::InitialContextInjection;
 use crate::exec_policy::ExecPolicyManager;
 use crate::guardian::GUARDIAN_REVIEWER_NAME;
 use crate::sandboxing::SandboxPermissions;
+use crate::session::step_context::StepContext;
 use crate::test_support::models_manager_with_provider;
 use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::turn_diff_tracker::TurnDiffTracker;
-use codex_app_server_protocol::ConfigLayerSource;
 use codex_config::ConfigLayerEntry;
+use codex_config::ConfigLayerSource;
 use codex_config::ConfigRequirements;
 use codex_config::ConfigRequirementsToml;
 use codex_exec_server::EnvironmentManager;
@@ -302,6 +303,10 @@ async fn guardian_allows_shell_command_additional_permissions_requests_past_poli
         .expect("test setup should allow enabling request permissions");
     turn_context_raw.permission_profile = codex_protocol::models::PermissionProfile::Disabled;
     let mut config = (*turn_context_raw.config).clone();
+    config
+        .permissions
+        .set_permission_profile(codex_protocol::models::PermissionProfile::Disabled)
+        .expect("test setup should allow disabling the permission profile");
     config.codex_linux_sandbox_exe = codex_linux_sandbox_exe_or_skip!();
     config
         .features
@@ -329,10 +334,12 @@ async fn guardian_allows_shell_command_additional_permissions_requests_past_poli
     );
     #[allow(deprecated)]
     let workdir = Some(turn_context.cwd.to_string_lossy().to_string());
+    let step_context = StepContext::for_test(Arc::clone(&turn_context));
     let resp = handler
         .handle(ToolInvocation {
             session: Arc::clone(&session),
             turn: Arc::clone(&turn_context),
+            step_context,
             cancellation_token: CancellationToken::new(),
             tracker: Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
             call_id: "test-call".to_string(),
@@ -407,10 +414,14 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_shell_command_policy_
 
     turn_context_raw
         .approval_policy
-        .set(AskForApproval::OnFailure)
+        .set(AskForApproval::Never)
         .expect("test setup should allow updating approval policy");
     turn_context_raw.permission_profile = codex_protocol::models::PermissionProfile::Disabled;
     let mut config = (*turn_context_raw.config).clone();
+    config
+        .permissions
+        .set_permission_profile(codex_protocol::models::PermissionProfile::Disabled)
+        .expect("test setup should allow disabling the permission profile");
     config.approvals_reviewer = ApprovalsReviewer::User;
     config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
     let config = Arc::new(config);
@@ -433,10 +444,12 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_shell_command_policy_
     );
     #[allow(deprecated)]
     let workdir = Some(turn_context.cwd.to_string_lossy().to_string());
+    let step_context = StepContext::for_test(Arc::clone(&turn_context));
     let resp = handler
         .handle(ToolInvocation {
             session: Arc::clone(&session),
             turn: Arc::clone(&turn_context),
+            step_context,
             cancellation_token: CancellationToken::new(),
             tracker: Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
             call_id: "strict-shell-command-call".to_string(),
@@ -478,12 +491,14 @@ async fn guardian_allows_unified_exec_additional_permissions_requests_past_polic
     let session = Arc::new(session);
     let turn_context = Arc::new(turn_context_raw);
     let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+    let step_context = StepContext::for_test(Arc::clone(&turn_context));
 
     let handler = ExecCommandHandler::default();
     let resp = handler
         .handle(ToolInvocation {
             session: Arc::clone(&session),
             turn: Arc::clone(&turn_context),
+            step_context,
             cancellation_token: CancellationToken::new(),
             tracker: Arc::clone(&tracker),
             call_id: "exec-call".to_string(),
@@ -513,7 +528,7 @@ async fn guardian_allows_unified_exec_additional_permissions_requests_past_polic
 #[tokio::test]
 async fn process_compacted_history_preserves_separate_guardian_developer_message() {
     let (session, mut turn_context) = make_session_and_context().await;
-    let guardian_policy = crate::guardian::guardian_policy_prompt();
+    let guardian_policy = "guardian policy".to_string();
     let guardian_source =
         SessionSource::SubAgent(SubAgentSource::Other(GUARDIAN_REVIEWER_NAME.to_string()));
 
@@ -523,8 +538,11 @@ async fn process_compacted_history_preserves_separate_guardian_developer_message
     }
     turn_context.session_source = guardian_source;
     turn_context.developer_instructions = Some(guardian_policy.clone());
+    let turn_context = Arc::new(turn_context);
+    let world_state = Arc::new(build_world_state_from_turn_context(&session, &turn_context).await);
+    let initial_context_injection = InitialContextInjection::BeforeLastUserMessage(world_state);
 
-    let refreshed = crate::compact_remote::process_compacted_history(
+    let (refreshed, _) = crate::compact_remote::process_compacted_history(
         &session,
         &turn_context,
         vec![
@@ -535,7 +553,7 @@ async fn process_compacted_history_preserves_separate_guardian_developer_message
                     text: "stale developer message".to_string(),
                 }],
                 phase: None,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::Message {
                 id: None,
@@ -544,10 +562,10 @@ async fn process_compacted_history_preserves_separate_guardian_developer_message
                     text: "summary".to_string(),
                 }],
                 phase: None,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         ],
-        InitialContextInjection::BeforeLastUserMessage,
+        &initial_context_injection,
     )
     .await;
 
@@ -606,10 +624,12 @@ async fn shell_command_allows_sticky_turn_permissions_without_inline_request_per
     );
     #[allow(deprecated)]
     let workdir = Some(turn_context.cwd.to_string_lossy().to_string());
+    let step_context = StepContext::for_test(Arc::clone(&turn_context));
     let resp = handler
         .handle(ToolInvocation {
             session: Arc::clone(&session),
             turn: Arc::clone(&turn_context),
+            step_context,
             cancellation_token: CancellationToken::new(),
             tracker: Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
             call_id: "sticky-turn-grant".to_string(),
@@ -704,8 +724,9 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         /*state_db*/ None,
     ));
 
-    let CodexSpawnOk { codex, .. } = Codex::spawn(CodexSpawnArgs {
+    let (session, io) = Session::spawn(SessionSpawnArgs {
         config,
+        allow_provider_model_fallback: false,
         user_instructions: Default::default(),
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
@@ -714,14 +735,17 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         skills_service,
         plugins_manager,
         mcp_manager,
+        code_mode_session_provider: Arc::new(codex_code_mode::InProcessCodeModeSessionProvider),
         extensions: codex_extension_api::empty_extension_registry(),
         conversation_history: InitialHistory::New,
+        requested_history_mode: None,
         session_source: SessionSource::SubAgent(SubAgentSource::Other(
             GUARDIAN_REVIEWER_NAME.to_string(),
         )),
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        originator: "test_originator".to_string(),
         agent_control: AgentControl::default(),
         dynamic_tools: Vec::new(),
         metrics_service_name: None,
@@ -732,17 +756,18 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         parent_trace: None,
         environment_selections: Vec::new(),
         thread_extension_init: codex_extension_api::ExtensionDataInit::default(),
+        supports_openai_form_elicitation: false,
         analytics_events_client: None,
         thread_store,
         attestation_provider: None,
+        external_time_provider: None,
         inherited_multi_agent_version: None,
     })
     .await
     .expect("spawn guardian subagent");
 
     assert_eq!(
-        codex
-            .session
+        session
             .services
             .exec_policy
             .current()
@@ -755,5 +780,5 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
             }],
         }
     );
-    drop(codex);
+    drop(io);
 }

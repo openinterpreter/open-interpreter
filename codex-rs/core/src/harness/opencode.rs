@@ -256,12 +256,15 @@ fn build_messages(
                 action,
                 ..
             } => {
-                let call_id = call_id.clone().or_else(|| id.clone()).ok_or_else(|| {
-                    serde_json::Error::io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "local_shell history item missing call id",
-                    ))
-                })?;
+                let call_id = call_id
+                    .clone()
+                    .or_else(|| id.as_ref().map(ToString::to_string))
+                    .ok_or_else(|| {
+                        serde_json::Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "local_shell history item missing call id",
+                        ))
+                    })?;
                 let arguments = match action {
                     LocalShellAction::Exec(exec) => json!({
                         "command": exec.command,
@@ -325,6 +328,7 @@ fn build_messages(
             | ResponseItem::Compaction { .. }
             | ResponseItem::CompactionTrigger { .. }
             | ResponseItem::ContextCompaction { .. }
+            | ResponseItem::AdditionalTools { .. }
             | ResponseItem::Other => {}
         }
     }
@@ -358,7 +362,7 @@ fn message_content(content: &[ContentItem]) -> Option<String> {
             ContentItem::InputText { text: value } | ContentItem::OutputText { text: value } => {
                 text.push_str(value);
             }
-            ContentItem::InputImage { .. } => {}
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {}
         }
     }
     Some(text)
@@ -792,24 +796,28 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
-                    id: Some("developer".to_string()),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "developer".to_string(),
+                    )),
                     role: "developer".to_string(),
                     content: vec![ContentItem::InputText {
                         text: QA_TESTING_SKILLS_INSTRUCTIONS.to_string(),
                     }],
                     phase: None,
 
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
-                    id: Some("user".to_string()),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "user".to_string(),
+                    )),
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
                         text: "Run the QA pass".to_string(),
                     }],
                     phase: None,
 
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             ],
             cwd: Some(std::env::temp_dir()),

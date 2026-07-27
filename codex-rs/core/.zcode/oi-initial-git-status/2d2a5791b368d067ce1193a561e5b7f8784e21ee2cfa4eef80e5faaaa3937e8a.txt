@@ -1,0 +1,1653 @@
+gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.
+
+Current branch: codex/upstream-rust-v0.145.0
+
+Main branch (you will usually use this for PRs): main
+
+Git user: InterpreterWork
+
+Status:
+M  ../../MODULE.bazel
+M  ../../MODULE.bazel.lock
+A  ../../bazel/rules/BUILD.bazel
+A  ../../bazel/rules/e2e_benchmark.bzl
+ M ../BUILD.bazel
+MM ../Cargo.lock
+M  ../Cargo.toml
+ M ../analytics/Cargo.toml
+MM ../analytics/src/analytics_client_tests.rs
+MM ../analytics/src/client.rs
+MM ../analytics/src/client_tests.rs
+MM ../analytics/src/events.rs
+MM ../analytics/src/facts.rs
+ M ../analytics/src/lib.rs
+MM ../analytics/src/reducer.rs
+ M ../app-server-client/src/lib.rs
+M  ../app-server-daemon/src/lib.rs
+M  ../app-server-protocol/schema/json/ApplyPatchApprovalResponse.json
+MM ../app-server-protocol/schema/json/ClientRequest.json
+ M ../app-server-protocol/schema/json/CommandExecutionRequestApprovalParams.json
+M  ../app-server-protocol/schema/json/DynamicToolCallResponse.json
+M  ../app-server-protocol/schema/json/ExecCommandApprovalResponse.json
+ M ../app-server-protocol/schema/json/PermissionsRequestApprovalParams.json
+ M ../app-server-protocol/schema/json/PermissionsRequestApprovalResponse.json
+MM ../app-server-protocol/schema/json/ServerNotification.json
+ M ../app-server-protocol/schema/json/ServerRequest.json
+MM ../app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
+MM ../app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
+M  ../app-server-protocol/schema/json/v2/AccountRateLimitsUpdatedNotification.json
+A  ../app-server-protocol/schema/json/v2/AppsInstalledParams.json
+A  ../app-server-protocol/schema/json/v2/AppsInstalledResponse.json
+A  ../app-server-protocol/schema/json/v2/AppsReadParams.json
+A  ../app-server-protocol/schema/json/v2/AppsReadResponse.json
+M  ../app-server-protocol/schema/json/v2/ConfigRequirementsReadResponse.json
+A  ../app-server-protocol/schema/json/v2/EnvironmentConnectionNotification.json
+M  ../app-server-protocol/schema/json/v2/ExternalAgentConfigDetectParams.json
+M  ../app-server-protocol/schema/json/v2/ExternalAgentConfigDetectResponse.json
+M  ../app-server-protocol/schema/json/v2/ExternalAgentConfigImportCompletedNotification.json
+M  ../app-server-protocol/schema/json/v2/ExternalAgentConfigImportHistoriesReadResponse.json
+M  ../app-server-protocol/schema/json/v2/ExternalAgentConfigImportParams.json
+M  ../app-server-protocol/schema/json/v2/ExternalAgentConfigImportProgressNotification.json
+M  ../app-server-protocol/schema/json/v2/GetAccountRateLimitsResponse.json
+M  ../app-server-protocol/schema/json/v2/GetAccountResponse.json
+M  ../app-server-protocol/schema/json/v2/HookCompletedNotification.json
+M  ../app-server-protocol/schema/json/v2/HookStartedNotification.json
+M  ../app-server-protocol/schema/json/v2/HooksListResponse.json
+ M ../app-server-protocol/schema/json/v2/InterpreterModelListResponse.json
+MM ../app-server-protocol/schema/json/v2/ItemCompletedNotification.json
+ M ../app-server-protocol/schema/json/v2/ItemGuardianApprovalReviewCompletedNotification.json
+ M ../app-server-protocol/schema/json/v2/ItemGuardianApprovalReviewStartedNotification.json
+MM ../app-server-protocol/schema/json/v2/ItemStartedNotification.json
+ M ../app-server-protocol/schema/json/v2/LoginAccountParams.json
+ M ../app-server-protocol/schema/json/v2/LoginAccountResponse.json
+M  ../app-server-protocol/schema/json/v2/ModelListResponse.json
+M  ../app-server-protocol/schema/json/v2/PluginInstalledResponse.json
+M  ../app-server-protocol/schema/json/v2/PluginListResponse.json
+MM ../app-server-protocol/schema/json/v2/PluginReadResponse.json
+M  ../app-server-protocol/schema/json/v2/PluginShareListResponse.json
+M  ../app-server-protocol/schema/json/v2/PluginShareUpdateTargetsParams.json
+A  ../app-server-protocol/schema/json/v2/RawResponseCompletedNotification.json
+MM ../app-server-protocol/schema/json/v2/RawResponseItemCompletedNotification.json
+MM ../app-server-protocol/schema/json/v2/ReviewStartResponse.json
+MM ../app-server-protocol/schema/json/v2/ThreadForkResponse.json
+MM ../app-server-protocol/schema/json/v2/ThreadListResponse.json
+MM ../app-server-protocol/schema/json/v2/ThreadMetadataUpdateResponse.json
+MM ../app-server-protocol/schema/json/v2/ThreadReadResponse.json
+M  ../app-server-protocol/schema/json/v2/ThreadRealtimeStartedNotification.json
+MM ../app-server-protocol/schema/json/v2/ThreadResumeParams.json
+MM ../app-server-protocol/schema/json/v2/ThreadResumeResponse.json
+MM ../app-server-protocol/schema/json/v2/ThreadRollbackResponse.json
+ M ../app-server-protocol/schema/json/v2/ThreadStartParams.json
+MM ../app-server-protocol/schema/json/v2/ThreadStartResponse.json
+MM ../app-server-protocol/schema/json/v2/ThreadStartedNotification.json
+M  ../app-server-protocol/schema/json/v2/ThreadTokenUsageUpdatedNotification.json
+MM ../app-server-protocol/schema/json/v2/ThreadUnarchiveResponse.json
+MM ../app-server-protocol/schema/json/v2/TurnCompletedNotification.json
+MM ../app-server-protocol/schema/json/v2/TurnStartParams.json
+MM ../app-server-protocol/schema/json/v2/TurnStartResponse.json
+MM ../app-server-protocol/schema/json/v2/TurnStartedNotification.json
+M  ../app-server-protocol/schema/json/v2/TurnSteerParams.json
+MM ../app-server-protocol/schema/typescript/ClientRequest.ts
+A  ../app-server-protocol/schema/typescript/CodexResponseHandoffMode.ts
+M  ../app-server-protocol/schema/typescript/ContentItem.ts
+MM ../app-server-protocol/schema/typescript/FunctionCallOutputContentItem.ts
+M  ../app-server-protocol/schema/typescript/InputModality.ts
+ M ../app-server-protocol/schema/typescript/LegacyAppPathString.ts
+M  ../app-server-protocol/schema/typescript/RealtimeConversationVersion.ts
+ M ../app-server-protocol/schema/typescript/ResponseItem.ts
+A  ../app-server-protocol/schema/typescript/ResponseItemId.ts
+M  ../app-server-protocol/schema/typescript/ReviewDecision.ts
+MM ../app-server-protocol/schema/typescript/ServerNotification.ts
+A  ../app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
+A  ../app-server-protocol/schema/typescript/SleepItem.ts
+ M ../app-server-protocol/schema/typescript/WebSearchItem.ts
+MM ../app-server-protocol/schema/typescript/index.ts
+M  ../app-server-protocol/schema/typescript/v2/Account.ts
+A  ../app-server-protocol/schema/typescript/v2/AppToolSummary.ts
+A  ../app-server-protocol/schema/typescript/v2/AppsInstalledParams.ts
+A  ../app-server-protocol/schema/typescript/v2/AppsInstalledResponse.ts
+A  ../app-server-protocol/schema/typescript/v2/AppsReadParams.ts
+A  ../app-server-protocol/schema/typescript/v2/AppsReadResponse.ts
+M  ../app-server-protocol/schema/typescript/v2/ConfiguredHookHandler.ts
+A  ../app-server-protocol/schema/typescript/v2/ConnectorMetadata.ts
+M  ../app-server-protocol/schema/typescript/v2/DynamicToolCallOutputContentItem.ts
+A  ../app-server-protocol/schema/typescript/v2/EnvironmentConnectionNotification.ts
+M  ../app-server-protocol/schema/typescript/v2/ExternalAgentConfigDetectParams.ts
+M  ../app-server-protocol/schema/typescript/v2/ExternalAgentConfigImportHistoriesReadResponse.ts
+M  ../app-server-protocol/schema/typescript/v2/ExternalAgentConfigImportItemTypeFailure.ts
+M  ../app-server-protocol/schema/typescript/v2/ExternalAgentConfigImportParams.ts
+M  ../app-server-protocol/schema/typescript/v2/ExternalAgentConfigMigrationItemType.ts
+A  ../app-server-protocol/schema/typescript/v2/ExternalAgentImportedConnectorCandidate.ts
+R  ../app-server-protocol/schema/typescript/AmazonBedrockCredentialSource.ts -> ../app-server-protocol/schema/typescript/v2/ExternalAgentImportedConnectorSource.ts
+ M ../app-server-protocol/schema/typescript/v2/FileSystemSpecialPath.ts
+M  ../app-server-protocol/schema/typescript/v2/HookEventName.ts
+M  ../app-server-protocol/schema/typescript/v2/HookMetadata.ts
+A  ../app-server-protocol/schema/typescript/v2/InstalledApp.ts
+ M ../app-server-protocol/schema/typescript/v2/LoginAccountParams.ts
+ M ../app-server-protocol/schema/typescript/v2/LoginAccountResponse.ts
+M  ../app-server-protocol/schema/typescript/v2/ManagedHooksRequirements.ts
+M  ../app-server-protocol/schema/typescript/v2/McpToolCallAppContext.ts
+M  ../app-server-protocol/schema/typescript/v2/MigrationDetails.ts
+ M ../app-server-protocol/schema/typescript/v2/PluginDetail.ts
+M  ../app-server-protocol/schema/typescript/v2/PluginShareUpdateDiscoverability.ts
+M  ../app-server-protocol/schema/typescript/v2/PluginSummary.ts
+M  ../app-server-protocol/schema/typescript/v2/RateLimitSnapshot.ts
+A  ../app-server-protocol/schema/typescript/v2/RawResponseCompletedNotification.ts
+A  ../app-server-protocol/schema/typescript/v2/ScheduledTaskSchedule.ts
+A  ../app-server-protocol/schema/typescript/v2/ScheduledTaskSummary.ts
+A  ../app-server-protocol/schema/typescript/v2/ScheduledTaskWeekday.ts
+M  ../app-server-protocol/schema/typescript/v2/ThreadItem.ts
+A  ../app-server-protocol/schema/typescript/v2/ThreadItemEntry.ts
+A  ../app-server-protocol/schema/typescript/v2/ThreadRealtimeInitialItem.ts
+M  ../app-server-protocol/schema/typescript/v2/TokenUsageBreakdown.ts
+ M ../app-server-protocol/schema/typescript/v2/TurnEnvironmentParams.ts
+M  ../app-server-protocol/schema/typescript/v2/UserInput.ts
+MM ../app-server-protocol/schema/typescript/v2/index.ts
+MM ../app-server-protocol/src/export.rs
+ M ../app-server-protocol/src/lib.rs
+MM ../app-server-protocol/src/protocol/common.rs
+M  ../app-server-protocol/src/protocol/event_mapping.rs
+M  ../app-server-protocol/src/protocol/item_builders.rs
+ M ../app-server-protocol/src/protocol/mod.rs
+MM ../app-server-protocol/src/protocol/thread_history.rs
+A  ../app-server-protocol/src/protocol/thread_history_projection.rs
+A  ../app-server-protocol/src/protocol/thread_history_projection_tests.rs
+MM ../app-server-protocol/src/protocol/v2/account.rs
+M  ../app-server-protocol/src/protocol/v2/apps.rs
+M  ../app-server-protocol/src/protocol/v2/config.rs
+MM ../app-server-protocol/src/protocol/v2/environment.rs
+M  ../app-server-protocol/src/protocol/v2/hook.rs
+MM ../app-server-protocol/src/protocol/v2/item.rs
+MM ../app-server-protocol/src/protocol/v2/permissions.rs
+MM ../app-server-protocol/src/protocol/v2/plugin.rs
+M  ../app-server-protocol/src/protocol/v2/realtime.rs
+MM ../app-server-protocol/src/protocol/v2/tests.rs
+MM ../app-server-protocol/src/protocol/v2/thread.rs
+M  ../app-server-protocol/src/protocol/v2/thread_data.rs
+MM ../app-server-protocol/src/protocol/v2/turn.rs
+ M ../app-server-protocol/src/schema_fixtures.rs
+M  ../app-server-test-client/README.md
+M  ../app-server-test-client/src/lib.rs
+ M ../app-server-transport/src/outgoing_message.rs
+ M ../app-server-transport/src/transport/mod.rs
+ M ../app-server-transport/src/transport/remote_control/client_tracker.rs
+ M ../app-server-transport/src/transport/remote_control/segment_tests.rs
+ M ../app-server-transport/src/transport/remote_control/tests.rs
+ M ../app-server-transport/src/transport/remote_control/websocket.rs
+ M ../app-server-transport/src/transport/unix_socket_tests.rs
+M  ../app-server/BUILD.bazel
+MM ../app-server/Cargo.toml
+MM ../app-server/README.md
+M  ../app-server/src/app_info.rs
+MM ../app-server/src/bespoke_event_handling.rs
+M  ../app-server/src/command_exec.rs
+D  ../app-server/src/config/external_agent_config.rs
+D  ../app-server/src/config/external_agent_config_tests.rs
+D  ../app-server/src/config/mod.rs
+M  ../app-server/src/config_manager_service.rs
+M  ../app-server/src/config_manager_service_tests.rs
+M  ../app-server/src/dynamic_tools.rs
+A  ../app-server/src/effective_plugin_change.rs
+A  ../app-server/src/effective_plugin_change_tests.rs
+MM ../app-server/src/extensions.rs
+A  ../app-server/src/external_agent_migration/mod.rs
+A  ../app-server/src/external_agent_migration/processor.rs
+R  ../app-server/src/request_processors/external_agent_config_processor_tests.rs -> ../app-server/src/external_agent_migration/processor_tests.rs
+A  ../app-server/src/external_agent_migration/protocol.rs
+R  ../app-server/src/request_processors/external_agent_session_import.rs -> ../app-server/src/external_agent_migration/session_importer.rs
+ M ../app-server/src/in_process.rs
+MM ../app-server/src/lib.rs
+M  ../app-server/src/mcp_refresh.rs
+MM ../app-server/src/message_processor.rs
+ M ../app-server/src/message_processor_tracing_tests.rs
+MM ../app-server/src/outgoing_message.rs
+MM ../app-server/src/request_processors.rs
+MM ../app-server/src/request_processors/account_processor.rs
+M  ../app-server/src/request_processors/apps_processor.rs
+A  ../app-server/src/request_processors/apps_processor/installed.rs
+A  ../app-server/src/request_processors/bedrock_auth.rs
+M  ../app-server/src/request_processors/catalog_processor.rs
+M  ../app-server/src/request_processors/config_processor.rs
+ M ../app-server/src/request_processors/environment_processor.rs
+D  ../app-server/src/request_processors/external_agent_config_processor.rs
+ M ../app-server/src/request_processors/feedback_processor.rs
+M  ../app-server/src/request_processors/mcp_processor.rs
+MM ../app-server/src/request_processors/plugins.rs
+M  ../app-server/src/request_processors/process_exec_processor.rs
+A  ../app-server/src/request_processors/thread_fork_goal.rs
+M  ../app-server/src/request_processors/thread_goal_processor.rs
+MM ../app-server/src/request_processors/thread_lifecycle.rs
+MM ../app-server/src/request_processors/thread_processor.rs
+ M ../app-server/src/request_processors/thread_processor_tests.rs
+M  ../app-server/src/request_processors/thread_resume_redaction.rs
+MM ../app-server/src/request_processors/thread_summary.rs
+M  ../app-server/src/request_processors/token_usage_replay.rs
+MM ../app-server/src/request_processors/turn_processor.rs
+ M ../app-server/src/request_serialization.rs
+M  ../app-server/src/thread_state.rs
+MM ../app-server/src/thread_status.rs
+ M ../app-server/src/transport.rs
+ M ../app-server/src/transport_tests.rs
+M  ../app-server/tests/common/lib.rs
+ M ../app-server/tests/common/models_cache.rs
+M  ../app-server/tests/common/rollout.rs
+MM ../app-server/tests/common/test_app_server.rs
+M  ../app-server/tests/suite/conversation_summary.rs
+M  ../app-server/tests/suite/v2/account.rs
+A  ../app-server/tests/suite/v2/app_installed.rs
+M  ../app-server/tests/suite/v2/app_list.rs
+A  ../app-server/tests/suite/v2/app_read.rs
+MM ../app-server/tests/suite/v2/compaction.rs
+M  ../app-server/tests/suite/v2/config_rpc.rs
+M  ../app-server/tests/suite/v2/dynamic_tools.rs
+M  ../app-server/tests/suite/v2/environment_add.rs
+A  ../app-server/tests/suite/v2/environment_status.rs
+M  ../app-server/tests/suite/v2/experimental_api.rs
+MM ../app-server/tests/suite/v2/external_agent_config.rs
+M  ../app-server/tests/suite/v2/hooks_list.rs
+A  ../app-server/tests/suite/v2/host_skills.rs
+M  ../app-server/tests/suite/v2/imagegen_extension.rs
+M  ../app-server/tests/suite/v2/mcp_resource.rs
+M  ../app-server/tests/suite/v2/mcp_server_status.rs
+ M ../app-server/tests/suite/v2/mcp_tool.rs
+MM ../app-server/tests/suite/v2/mod.rs
+ M ../app-server/tests/suite/v2/model_list.rs
+ M ../app-server/tests/suite/v2/plugin_install.rs
+MM ../app-server/tests/suite/v2/plugin_list.rs
+MM ../app-server/tests/suite/v2/plugin_read.rs
+M  ../app-server/tests/suite/v2/plugin_share.rs
+M  ../app-server/tests/suite/v2/rate_limits.rs
+M  ../app-server/tests/suite/v2/realtime_conversation.rs
+M  ../app-server/tests/suite/v2/remote_thread_store.rs
+M  ../app-server/tests/suite/v2/review.rs
+MM ../app-server/tests/suite/v2/selected_capability_stack.rs
+ M ../app-server/tests/suite/v2/selected_environment.rs
+A  ../app-server/tests/suite/v2/session_end.rs
+M  ../app-server/tests/suite/v2/sleep.rs
+MM ../app-server/tests/suite/v2/thread_fork.rs
+M  ../app-server/tests/suite/v2/thread_list.rs
+ M ../app-server/tests/suite/v2/thread_name_websocket.rs
+M  ../app-server/tests/suite/v2/thread_read.rs
+MM ../app-server/tests/suite/v2/thread_resume.rs
+M  ../app-server/tests/suite/v2/thread_rollback.rs
+ M ../app-server/tests/suite/v2/thread_settings_update.rs
+MM ../app-server/tests/suite/v2/thread_start.rs
+ M ../app-server/tests/suite/v2/thread_status.rs
+M  ../app-server/tests/suite/v2/thread_unarchive.rs
+MM ../app-server/tests/suite/v2/turn_start.rs
+M  ../app-server/tests/suite/v2/turn_start_zsh_fork.rs
+MM ../app-server/tests/suite/v2/web_search.rs
+M  ../backend-client/src/client.rs
+ M ../chat-wire-compat/src/request.rs
+ M ../chat-wire-compat/src/stream.rs
+M  ../chatgpt/src/chatgpt_client.rs
+M  ../chatgpt/src/connectors.rs
+ M ../cli/BUILD.bazel
+M  ../cli/Cargo.toml
+A  ../cli/e2e_benches/codex_help.rs
+M  ../cli/src/app_cmd.rs
+M  ../cli/src/desktop_app/mac.rs
+M  ../cli/src/desktop_app/windows.rs
+MM ../cli/src/doctor/thread_inventory.rs
+M  ../cli/src/main.rs
+MM ../cli/tests/debug_clear_memories.rs
+M  ../code-mode-protocol/src/description.rs
+M  ../code-mode-protocol/src/host/host_tests.rs
+M  ../code-mode-protocol/src/host/payload.rs
+M  ../code-mode-protocol/src/response.rs
+M  ../code-mode/Cargo.toml
+M  ../code-mode/src/cell_actor/conversions.rs
+M  ../code-mode/src/runtime/callbacks.rs
+M  ../code-mode/src/runtime/globals.rs
+M  ../code-mode/src/runtime/value.rs
+M  ../code-mode/src/service.rs
+M  ../code-mode/src/service_tests.rs
+M  ../code-mode/src/session_runtime/types.rs
+ M ../codex-api/Cargo.toml
+M  ../codex-api/src/api_bridge.rs
+M  ../codex-api/src/api_bridge_tests.rs
+M  ../codex-api/src/common.rs
+M  ../codex-api/src/endpoint/mod.rs
+ M ../codex-api/src/endpoint/models.rs
+M  ../codex-api/src/endpoint/realtime_call.rs
+M  ../codex-api/src/endpoint/realtime_websocket/methods.rs
+M  ../codex-api/src/endpoint/realtime_websocket/methods_common.rs
+A  ../codex-api/src/endpoint/realtime_websocket/methods_common_tests.rs
+A  ../codex-api/src/endpoint/realtime_websocket/methods_frameless_bidi.rs
+A  ../codex-api/src/endpoint/realtime_websocket/methods_frameless_bidi_tests.rs
+M  ../codex-api/src/endpoint/realtime_websocket/mod.rs
+M  ../codex-api/src/endpoint/realtime_websocket/protocol.rs
+A  ../codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi.rs
+A  ../codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi_tests.rs
+M  ../codex-api/src/endpoint/responses_websocket.rs
+ M ../codex-api/src/endpoint/search.rs
+ M ../codex-api/src/files.rs
+M  ../codex-api/src/lib.rs
+M  ../codex-api/src/rate_limits.rs
+ M ../codex-api/src/search.rs
+ M ../codex-api/src/sse/anthropic.rs
+M  ../codex-api/src/sse/responses.rs
+ M ../codex-api/tests/clients.rs
+ M ../codex-api/tests/models_integration.rs
+M  ../codex-api/tests/realtime_websocket_e2e.rs
+MM ../codex-mcp/Cargo.toml
+ M ../codex-mcp/src/codex_apps.rs
+A  ../codex-mcp/src/codex_apps/file_params.rs
+A  ../codex-mcp/src/codex_apps/file_params_tests.rs
+ D ../codex-mcp/src/codex_apps_cache.rs
+MD ../codex-mcp/src/codex_apps_cache_tests.rs
+MM ../codex-mcp/src/connection_manager.rs
+MM ../codex-mcp/src/connection_manager_tests.rs
+M  ../codex-mcp/src/elicitation.rs
+MM ../codex-mcp/src/lib.rs
+MM ../codex-mcp/src/mcp/mod.rs
+MM ../codex-mcp/src/mcp/mod_tests.rs
+A  ../codex-mcp/src/openai_docs_source_attribution.rs
+A  ../codex-mcp/src/openai_docs_source_attribution_tests.rs
+M  ../codex-mcp/src/resource_client.rs
+MM ../codex-mcp/src/rmcp_client.rs
+M  ../codex-mcp/src/runtime.rs
+A  ../codex-mcp/src/tool_catalog_cache.rs
+ M ../codex-mcp/src/tools.rs
+M  ../config/Cargo.toml
+M  ../config/src/config_requirements.rs
+MM ../config/src/config_toml.rs
+M  ../config/src/hook_config.rs
+M  ../config/src/hooks_tests.rs
+M  ../config/src/key_aliases.rs
+M  ../config/src/loader/mod.rs
+M  ../config/src/merge_tests.rs
+M  ../config/src/permissions_toml.rs
+M  ../config/src/profile_toml.rs
+M  ../config/src/requirements_layers/hooks.rs
+M  ../config/src/thread_config.rs
+M  ../config/src/thread_config/remote.rs
+M  ../config/src/types.rs
+MM ../connectors/Cargo.toml
+M  ../connectors/src/app_tool_policy.rs
+A  ../connectors/src/connector_runtime/mod.rs
+A  ../connectors/src/connector_runtime/persistence.rs
+A  ../connectors/src/connector_runtime/tests.rs
+ M ../connectors/src/directory_cache.rs
+MM ../connectors/src/lib.rs
+A  ../connectors/src/metadata_store.rs
+A  ../connectors/src/metadata_store_tests.rs
+A  ../connectors/src/runtime_projection.rs
+A  ../connectors/src/runtime_projection_tests.rs
+MM ../core-api/src/lib.rs
+M  ../core-plugins/Cargo.toml
+A  ../core-plugins/src/command_migration.rs
+A  ../core-plugins/src/command_migration/plugin.rs
+A  ../core-plugins/src/command_migration/render.rs
+A  ../core-plugins/src/command_migration_tests.rs
+MM ../core-plugins/src/lib.rs
+M  ../core-plugins/src/loader.rs
+M  ../core-plugins/src/loader_tests.rs
+MM ../core-plugins/src/manager.rs
+M  ../core-plugins/src/manager_tests.rs
+M  ../core-plugins/src/manifest.rs
+M  ../core-plugins/src/marketplace.rs
+M  ../core-plugins/src/marketplace_tests.rs
+M  ../core-plugins/src/provider.rs
+MM ../core-plugins/src/remote.rs
+ M ../core-plugins/src/remote/remote_installed_plugin_sync.rs
+M  ../core-plugins/src/remote/share.rs
+M  ../core-plugins/src/remote/share/tests.rs
+MM ../core-plugins/src/remote_tests.rs
+M  ../core-plugins/src/store.rs
+M  ../core-plugins/src/tool_suggest_metadata.rs
+M  ../core-skills/src/config_rules.rs
+M  ../core-skills/src/injection.rs
+MM ../core-skills/src/loader.rs
+A  ../core-skills/src/loader/discovery.rs
+MM ../core-skills/src/loader/environment.rs
+ M ../core-skills/src/loader/namespace.rs
+MM ../core-skills/src/loader_tests.rs
+M  ../core-skills/src/model.rs
+M  ../core-skills/src/root_loader.rs
+M  ../core-skills/src/service.rs
+M  ../core-skills/tests/environment_loader.rs
+MM Cargo.toml
+MM config.schema.json
+MM src/agent/control.rs
+M  src/agent/control/execution.rs
+M  src/agent/control/legacy.rs
+M  src/agent/control/residency.rs
+MM src/agent/control/residency_tests.rs
+MM src/agent/control/spawn.rs
+MM src/agent/control_tests.rs
+ M src/agent/registry.rs
+MM src/agent/role.rs
+M  src/agent/role_tests.rs
+MM src/agents_md.rs
+M  src/agents_md_manager.rs
+MM src/agents_md_tests.rs
+A  src/audio_preparation.rs
+A  src/audio_preparation_tests.rs
+MM src/client.rs
+ M src/client_tests.rs
+M  src/codex_delegate.rs
+MM src/codex_delegate_tests.rs
+MM src/codex_thread.rs
+MM src/compact.rs
+ M src/compact_model_fallback.rs
+MM src/compact_remote.rs
+M  src/compact_remote_request.rs
+MM src/compact_remote_v2.rs
+MM src/compact_remote_v2_attempt.rs
+ M src/compact_tests.rs
+ M src/compact_token_budget.rs
+M  src/config/config_loader_tests.rs
+MM src/config/config_tests.rs
+M  src/config/edit.rs
+MM src/config/mod.rs
+MM src/config/network_proxy_spec.rs
+ M src/config/network_proxy_spec_tests.rs
+ M src/config/permissions.rs
+ M src/config/permissions_tests.rs
+MM src/connectors.rs
+ M src/connectors_tests.rs
+D  src/context/collaboration_mode_instructions.rs
+ M src/context/contextual_user_message.rs
+ M src/context/environment_context.rs
+A  src/context/environments_instructions.rs
+D  src/context/image_generation_instructions.rs
+M  src/context/mod.rs
+MM src/context/multi_agent_mode_instructions.rs
+A  src/context/realtime_delegation.rs
+M  src/context/realtime_end_instructions.rs
+ M src/context/recommended_plugins_instructions.rs
+M  src/context/token_budget_context.rs
+M  src/context/world_state/agents_md_tests.rs
+M  src/context/world_state/apps_instructions_tests.rs
+A  src/context/world_state/collaboration_mode.rs
+A  src/context/world_state/collaboration_mode_tests.rs
+MM src/context/world_state/environment.rs
+ M src/context/world_state/environment_render_tests.rs
+M  src/context/world_state/environment_tests.rs
+A  src/context/world_state/environments_instructions.rs
+A  src/context/world_state/environments_instructions_tests.rs
+M  src/context/world_state/mod.rs
+A  src/context/world_state/permissions.rs
+A  src/context/world_state/permissions_tests.rs
+M  src/context/world_state/plugins_instructions_tests.rs
+A  src/context/world_state/realtime.rs
+A  src/context/world_state/realtime_tests.rs
+A  src/context/world_state/snapshots/codex_core__context__world_state__agents_md__tests__snapshots.snap
+A  src/context/world_state/snapshots/codex_core__context__world_state__apps_instructions__tests__snapshots.snap
+A  src/context/world_state/snapshots/codex_core__context__world_state__collaboration_mode__tests__snapshots.snap
+A  src/context/world_state/snapshots/codex_core__context__world_state__environment__tests__snapshots.snap
+A  src/context/world_state/snapshots/codex_core__context__world_state__environments_instructions__tests__snapshots.snap
+A  src/context/world_state/snapshots/codex_core__context__world_state__permissions__tests__snapshots.snap
+A  src/context/world_state/snapshots/codex_core__context__world_state__plugins_instructions__tests__snapshots.snap
+A  src/context/world_state/snapshots/codex_core__context__world_state__realtime__tests__snapshots.snap
+A  src/context/world_state/test_support.rs
+M  src/context/world_state/world_state_tests.rs
+MM src/context_manager/history.rs
+MM src/context_manager/history_tests.rs
+M  src/context_manager/mod.rs
+MM src/context_manager/normalize.rs
+M  src/context_manager/updates.rs
+MM src/environment_selection.rs
+MM src/event_mapping.rs
+MM src/event_mapping_tests.rs
+M  src/exec.rs
+M  src/exec_policy.rs
+M  src/exec_policy_tests.rs
+M  src/guardian/metrics.rs
+M  src/guardian/mod.rs
+M  src/guardian/policy_template.md
+M  src/guardian/prompt.rs
+MM src/guardian/review.rs
+MM src/guardian/review_session.rs
+MM src/guardian/tests.rs
+ M src/harness/claude_code.rs
+ M src/harness/deepseek_tui.rs
+ M src/harness/kimi_cli.rs
+ M src/harness/kimi_code.rs
+ M src/harness/little_coder.rs
+ M src/harness/mini_swe_agent.rs
+ M src/harness/minimal.rs
+ M src/harness/opencode.rs
+ M src/harness/pi.rs
+ M src/harness/qwen_code.rs
+ M src/harness/swe_agent.rs
+ M src/harness/terminus_2.rs
+ M src/harness/zcode.rs
+M  src/hook_runtime.rs
+D  src/landlock.rs
+MM src/lib.rs
+MM src/mcp.rs
+MM src/mcp_openai_file.rs
+MM src/mcp_tool_call.rs
+MM src/mcp_tool_call_tests.rs
+M  src/mcp_tool_exposure.rs
+MM src/mcp_tool_exposure_test.rs
+ M src/memory_usage.rs
+D  src/network_proxy_loader.rs
+D  src/network_proxy_loader_tests.rs
+M  src/otel_init.rs
+ D src/personality_migration.rs
+ D src/personality_migration_tests.rs
+M  src/prompt_debug.rs
+M  src/realtime_context.rs
+M  src/realtime_conversation.rs
+A  src/realtime_conversation/bem.rs
+A  src/realtime_conversation/bem_tests.rs
+M  src/realtime_conversation_tests.rs
+M  src/responses_retry.rs
+A  src/responses_retry_tests.rs
+MM src/sandboxing/mod.rs
+M  src/session/config_lock.rs
+M  src/session/context_window.rs
+MM src/session/handlers.rs
+MM src/session/inject.rs
+M  src/session/input_queue.rs
+MM src/session/mcp.rs
+M  src/session/mcp_runtime.rs
+M  src/session/mcp_tests.rs
+MM src/session/mod.rs
+ M src/session/review.rs
+MM src/session/rollout_reconstruction_tests.rs
+MM src/session/session.rs
+M  src/session/step_context.rs
+MM src/session/tests.rs
+MM src/session/tests/guardian_tests.rs
+M  src/session/token_budget.rs
+MM src/session/turn.rs
+MM src/session/turn_context.rs
+ M src/session/turn_tests.rs
+M  src/session/world_state.rs
+M  src/session_startup_prewarm.rs
+M  src/shell_snapshot.rs
+M  src/shell_snapshot_tests.rs
+MM src/skills.rs
+M  src/state/auto_compact_window.rs
+M  src/state/service.rs
+M  src/state/session.rs
+M  src/state/session_tests.rs
+MM src/stream_events_utils.rs
+MM src/stream_events_utils_tests.rs
+ M src/tasks/lifecycle.rs
+MM src/tasks/mod.rs
+ M src/tasks/regular.rs
+MM src/tasks/review.rs
+MM src/tasks/user_shell.rs
+M  src/test_support.rs
+MM src/thread_manager.rs
+MM src/thread_manager_tests.rs
+M  src/thread_rollout_truncation.rs
+MM src/thread_rollout_truncation_tests.rs
+A  src/tools/approvals.rs
+A  src/tools/approvals_tests.rs
+MM src/tools/code_mode/execute_spec.rs
+M  src/tools/code_mode/mod.rs
+M  src/tools/code_mode/response_adapter.rs
+ M src/tools/context.rs
+ M src/tools/context_tests.rs
+M  src/tools/events.rs
+D  src/tools/handlers/agent_jobs.rs
+D  src/tools/handlers/agent_jobs/report_agent_job_result.rs
+D  src/tools/handlers/agent_jobs/spawn_agents_on_csv.rs
+D  src/tools/handlers/agent_jobs_spec.rs
+D  src/tools/handlers/agent_jobs_spec_tests.rs
+D  src/tools/handlers/agent_jobs_tests.rs
+ M src/tools/handlers/apply_patch.rs
+M  src/tools/handlers/apply_patch_spec.rs
+M  src/tools/handlers/apply_patch_spec_tests.rs
+M  src/tools/handlers/apply_patch_tests.rs
+MM src/tools/handlers/extension_tools.rs
+M  src/tools/handlers/get_context_remaining.rs
+ M src/tools/handlers/harness_aliases.rs
+ M src/tools/handlers/mcp.rs
+M  src/tools/handlers/mcp_resource.rs
+ M src/tools/handlers/mcp_search_tests.rs
+M  src/tools/handlers/mod.rs
+M  src/tools/handlers/multi_agents/spawn.rs
+MM src/tools/handlers/multi_agents_common.rs
+MM src/tools/handlers/multi_agents_spec.rs
+MM src/tools/handlers/multi_agents_spec_tests.rs
+MM src/tools/handlers/multi_agents_tests.rs
+M  src/tools/handlers/multi_agents_v2/spawn.rs
+ M src/tools/handlers/plan.rs
+ M src/tools/handlers/request_plugin_install.rs
+ M src/tools/handlers/request_plugin_install_spec.rs
+ M src/tools/handlers/request_plugin_install_tests.rs
+M  src/tools/handlers/shell_spec.rs
+M  src/tools/handlers/shell_spec_tests.rs
+ M src/tools/handlers/shell_tests.rs
+M  src/tools/handlers/sleep.rs
+ M src/tools/handlers/tool_search.rs
+ M src/tools/handlers/unified_exec/exec_command.rs
+M  src/tools/handlers/unified_exec/write_stdin.rs
+ M src/tools/handlers/unified_exec_tests.rs
+MM src/tools/handlers/view_image.rs
+M  src/tools/handlers/wait_for_environment.rs
+ M src/tools/mod.rs
+MM src/tools/network_approval.rs
+MM src/tools/network_approval_tests.rs
+MM src/tools/orchestrator.rs
+MM src/tools/registry.rs
+M  src/tools/registry_tests.rs
+M  src/tools/router.rs
+MM src/tools/router_tests.rs
+ M src/tools/runtimes/apply_patch.rs
+ M src/tools/runtimes/apply_patch_tests.rs
+ M src/tools/runtimes/mod_tests.rs
+ M src/tools/runtimes/shell.rs
+M  src/tools/runtimes/shell/unix_escalation.rs
+ M src/tools/runtimes/shell_tests.rs
+MM src/tools/runtimes/unified_exec.rs
+MM src/tools/sandboxing.rs
+MM src/tools/sandboxing_tests.rs
+MM src/tools/spec_plan.rs
+MM src/tools/spec_plan_tests.rs
+M  src/tools/tool_dispatch_trace_tests.rs
+M  src/turn_metadata_tests.rs
+ M src/unified_exec/async_watcher.rs
+ M src/unified_exec/errors.rs
+ M src/unified_exec/head_tail_buffer.rs
+ M src/unified_exec/head_tail_buffer_tests.rs
+ M src/unified_exec/mod.rs
+MM src/unified_exec/mod_tests.rs
+M  src/unified_exec/process.rs
+MM src/unified_exec/process_manager.rs
+MM src/unified_exec/process_manager_tests.rs
+M  src/util.rs
+M  src/web_search.rs
+M  src/windows_sandbox.rs
+ M tests/common/Cargo.toml
+MM tests/common/apps_test_server.rs
+M  tests/common/responses.rs
+MM tests/common/test_codex.rs
+ M tests/remote_env_windows/remote_env_windows_test.rs
+ M tests/responses_headers.rs
+D  tests/suite/agent_jobs.rs
+ M tests/suite/agent_websocket.rs
+ M tests/suite/agents_md.rs
+ M tests/suite/apply_patch_cli.rs
+MM tests/suite/approvals.rs
+A  tests/suite/audio_truncation.rs
+ M tests/suite/auto_review.rs
+A  tests/suite/catalog_permission_messages.rs
+MM tests/suite/client.rs
+MM tests/suite/client_websockets.rs
+MM tests/suite/code_mode.rs
+M  tests/suite/codex_delegate.rs
+M  tests/suite/collaboration_instructions.rs
+MM tests/suite/compact.rs
+M  tests/suite/compact_remote.rs
+M  tests/suite/exec_policy.rs
+M  tests/suite/guardian_review.rs
+MM tests/suite/hooks.rs
+M  tests/suite/mcp_auth_elicitation.rs
+MM tests/suite/mcp_auth_refresh.rs
+A  tests/suite/mcp_tool_cache.rs
+M  tests/suite/mcp_tool_exposure.rs
+MM tests/suite/mod.rs
+M  tests/suite/model_runtime_selectors.rs
+MM tests/suite/model_switching.rs
+MM tests/suite/model_visible_layout.rs
+ M tests/suite/models_cache_ttl.rs
+MM tests/suite/multi_agent_mode.rs
+A  tests/suite/multi_agent_resume.rs
+A  tests/suite/multi_exec_server_sandbox.rs
+MM tests/suite/network_approval.rs
+ M tests/suite/openai_file_mcp.rs
+M  tests/suite/otel.rs
+M  tests/suite/pending_input.rs
+M  tests/suite/permissions_messages.rs
+MM tests/suite/personality.rs
+ D tests/suite/personality_migration.rs
+A  tests/suite/prompt_cache_key.rs
+M  tests/suite/prompt_caching.rs
+M  tests/suite/realtime_conversation.rs
+A  tests/suite/realtime_initial_items.rs
+MM tests/suite/remote_env.rs
+ M tests/suite/remote_models.rs
+M  tests/suite/request_permissions.rs
+ M tests/suite/resume_warning.rs
+MM tests/suite/rmcp_client.rs
+ M tests/suite/rollout_budget.rs
+M  tests/suite/shell_snapshot.rs
+ M tests/suite/skills.rs
+D  tests/suite/snapshots/all__suite__compact_remote__remote_compact_resume_restates_realtime_end_shapes.snap
+M  tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_restates_realtime_start_shapes.snap
+M  tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_does_not_restate_realtime_end_shapes.snap
+D  tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_restates_realtime_end_shapes.snap
+M  tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_restates_realtime_start_shapes.snap
+D  tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_cwd_change_does_not_refresh_agents.snap
+A  tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_cwd_change_refreshes_agents.snap
+M  tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_resume_override_matches_rollout_model.snap
+M  tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_resume_with_personality_change.snap
+M  tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_turn_overrides.snap
+M  tests/suite/snapshots/all__suite__token_budget__token_budget_new_context_window_tool_full_context.snap
+MM tests/suite/spawn_agent_description.rs
+MM tests/suite/sqlite_state.rs
+ M tests/suite/stream_error_allows_next_turn.rs
+MM tests/suite/subagent_notifications.rs
+MM tests/suite/token_budget.rs
+MM tests/suite/unified_exec.rs
+ M tests/suite/unified_exec_process_events.rs
+MM tests/suite/view_image.rs
+A  tests/suite/workspace_roots.rs
+ M ../deny.toml
+M  ../exec-server-protocol/Cargo.toml
+M  ../exec-server-protocol/src/protocol.rs
+M  ../exec-server-protocol/src/rpc.rs
+A  ../exec-server-protocol/src/rpc_tests.rs
+M  ../exec-server/BUILD.bazel
+A  ../exec-server/src/capability_discovery.rs
+A  ../exec-server/src/capability_discovery_cache.rs
+M  ../exec-server/src/client.rs
+M  ../exec-server/src/client/http_response_body_stream.rs
+M  ../exec-server/src/client/reqwest_http_client.rs
+M  ../exec-server/src/client/rpc_http_client.rs
+M  ../exec-server/src/client_api.rs
+M  ../exec-server/src/client_recovery.rs
+M  ../exec-server/src/client_recovery_tests.rs
+M  ../exec-server/src/client_transport.rs
+M  ../exec-server/src/connection.rs
+M  ../exec-server/src/environment.rs
+M  ../exec-server/src/environment_provider.rs
+M  ../exec-server/src/environment_toml.rs
+M  ../exec-server/src/fs_sandbox.rs
+M  ../exec-server/src/lib.rs
+M  ../exec-server/src/local_process.rs
+M  ../exec-server/src/process_sandbox.rs
+M  ../exec-server/src/process_sandbox_tests.rs
+M  ../exec-server/src/resolved_capability.rs
+M  ../exec-server/src/rpc.rs
+M  ../exec-server/src/server/file_system_handler.rs
+M  ../exec-server/src/server/handler.rs
+M  ../exec-server/src/server/handler/tests.rs
+M  ../exec-server/src/server/processor.rs
+M  ../exec-server/src/server/registry.rs
+A  ../exec-server/tests/capability_discovery.rs
+A  ../exec-server/tests/deferred_environment.rs
+A  ../exec-server/tests/environment.rs
+M  ../exec-server/tests/exec_process.rs
+M  ../exec-server/tests/file_system_unix.rs
+M  ../exec-server/tests/health.rs
+M  ../exec-server/tests/http_client.rs
+M  ../exec-server/tests/relay.rs
+M  ../exec/src/event_processor_with_jsonl_output.rs
+M  ../exec/src/exec_events.rs
+M  ../exec/src/lib.rs
+M  ../exec/src/lib_tests.rs
+MM ../exec/tests/event_processor_with_json_output.rs
+A  ../exec/tests/suite/completion_backfill_tests.rs
+M  ../exec/tests/suite/mod.rs
+M  ../exec/tests/suite/sandbox.rs
+M  ../execpolicy/Cargo.toml
+M  ../execpolicy/src/lib.rs
+A  ../execpolicy/src/sandbox_migration.rs
+A  ../execpolicy/src/sandbox_migration_tests.rs
+A  ../ext/agent/BUILD.bazel
+A  ../ext/agent/Cargo.toml
+A  ../ext/agent/src/lib.rs
+A  ../ext/agent/tests/agent_service.rs
+M  ../ext/connectors/Cargo.toml
+M  ../ext/connectors/src/executor_plugin.rs
+M  ../ext/extension-api/Cargo.toml
+MM ../ext/extension-api/src/contributors.rs
+M  ../ext/extension-api/src/contributors/mcp.rs
+A  ../ext/extension-api/src/contributors/skill_invocation.rs
+M  ../ext/extension-api/src/contributors/thread_lifecycle.rs
+M  ../ext/extension-api/src/contributors/world_state.rs
+MM ../ext/extension-api/src/lib.rs
+ M ../ext/extension-api/src/registry.rs
+MM ../ext/extension-api/tests/registry.rs
+M  ../ext/goal/src/accounting.rs
+M  ../ext/goal/src/api.rs
+M  ../ext/goal/src/extension.rs
+M  ../ext/goal/src/runtime.rs
+M  ../ext/goal/tests/accounting.rs
+MM ../ext/goal/tests/goal_extension_backend.rs
+M  ../ext/image-generation/imagegen_description.md
+A  ../ext/image-generation/src/artifact.rs
+M  ../ext/image-generation/src/backend.rs
+M  ../ext/image-generation/src/extension.rs
+M  ../ext/image-generation/src/lib.rs
+MM ../ext/image-generation/src/tests.rs
+MM ../ext/image-generation/src/tool.rs
+ M ../ext/items/Cargo.toml
+M  ../ext/items/src/lib.rs
+A  ../ext/items/src/sleep.rs
+MM ../ext/items/src/tests.rs
+ M ../ext/items/src/web_search.rs
+M  ../ext/mcp/Cargo.toml
+M  ../ext/mcp/src/executor_plugin.rs
+A  ../ext/mcp/src/executor_plugin/discovery.rs
+M  ../ext/mcp/src/executor_plugin/provider.rs
+ M ../ext/mcp/src/lib.rs
+A  ../ext/mcp/src/lib_tests.rs
+M  ../ext/mcp/tests/executor_plugin_mcp.rs
+M  ../ext/mcp/tests/hosted_apps_mcp.rs
+ M ../ext/memories/src/tests.rs
+MM ../ext/skills/Cargo.toml
+M  ../ext/skills/src/catalog.rs
+ M ../ext/skills/src/config.rs
+A  ../ext/skills/src/dynamic_skill_selector.rs
+A  ../ext/skills/src/dynamic_skill_selector/character_ngram.rs
+A  ../ext/skills/src/dynamic_skill_selector/character_ngram_tests.rs
+A  ../ext/skills/src/dynamic_skill_selector/fielded_bm25.rs
+A  ../ext/skills/src/dynamic_skill_selector/fielded_bm25_tests.rs
+A  ../ext/skills/src/dynamic_skill_selector/multi_query_lexical.rs
+A  ../ext/skills/src/dynamic_skill_selector/multi_query_lexical_tests.rs
+A  ../ext/skills/src/dynamic_skill_selector/weighted_lexical.rs
+A  ../ext/skills/src/dynamic_skill_selector/weighted_lexical_tests.rs
+MM ../ext/skills/src/extension.rs
+M  ../ext/skills/src/fragments.rs
+ M ../ext/skills/src/lib.rs
+M  ../ext/skills/src/provider.rs
+M  ../ext/skills/src/provider/executor.rs
+M  ../ext/skills/src/provider/host.rs
+M  ../ext/skills/src/selection.rs
+A  ../ext/skills/src/shadow_selection_experiment.rs
+M  ../ext/skills/src/sources.rs
+MM ../ext/skills/src/state.rs
+MM ../ext/skills/src/tools/mod.rs
+ M ../ext/skills/src/tools/read.rs
+M  ../ext/skills/src/world_state.rs
+M  ../ext/skills/tests/executor_file_system_authority.rs
+MM ../ext/skills/tests/skills_extension.rs
+M  ../ext/web-search/Cargo.toml
+M  ../ext/web-search/src/extension.rs
+ M ../ext/web-search/src/history.rs
+MM ../ext/web-search/src/tool.rs
+MM ../external-agent-migration/Cargo.toml
+A  ../external-agent-migration/src/config_values.rs
+A  ../external-agent-migration/src/detect/memory.rs
+A  ../external-agent-migration/src/detect/mod.rs
+A  ../external-agent-migration/src/detect/plugins.rs
+AM ../external-agent-migration/src/detect/sessions/cla.rs
+A  ../external-agent-migration/src/detect/sessions/common.rs
+A  ../external-agent-migration/src/detect/sessions/connectors_cla.rs
+A  ../external-agent-migration/src/detect/sessions/cur.rs
+A  ../external-agent-migration/src/detect/sessions/cur_tests.rs
+A  ../external-agent-migration/src/detect/sessions/mod.rs
+A  ../external-agent-migration/src/hooks_cla.rs
+A  ../external-agent-migration/src/hooks_common.rs
+A  ../external-agent-migration/src/hooks_cur.rs
+A  ../external-agent-migration/src/hooks_cur_tests.rs
+MM ../external-agent-migration/src/lib.rs
+A  ../external-agent-migration/src/lib_tests.rs
+A  ../external-agent-migration/src/mcp.rs
+A  ../external-agent-migration/src/memory.rs
+A  ../external-agent-migration/src/memory_import.rs
+A  ../external-agent-migration/src/memory_import_tests.rs
+A  ../external-agent-migration/src/memory_tests.rs
+A  ../external-agent-migration/src/migration_source.rs
+A  ../external-agent-migration/src/model.rs
+A  ../external-agent-migration/src/plugins.rs
+A  ../external-agent-migration/src/reporting.rs
+A  ../external-agent-migration/src/rewrite.rs
+A  ../external-agent-migration/src/rewrite_tests.rs
+A  ../external-agent-migration/src/scope.rs
+A  ../external-agent-migration/src/scope_tests.rs
+A  ../external-agent-migration/src/service.rs
+A  ../external-agent-migration/src/service_tests.rs
+A  ../external-agent-migration/src/service_tests/general.rs
+A  ../external-agent-migration/src/service_tests/general/config_import.rs
+A  ../external-agent-migration/src/service_tests/general/detection.rs
+A  ../external-agent-migration/src/service_tests/general/repo_import.rs
+A  ../external-agent-migration/src/service_tests/memory.rs
+A  ../external-agent-migration/src/service_tests/plugins.rs
+A  ../external-agent-migration/src/service_tests/plugins/basics.rs
+A  ../external-agent-migration/src/service_tests/plugins/marketplaces.rs
+A  ../external-agent-migration/src/sessions/export.rs
+A  ../external-agent-migration/src/sessions/ledger.rs
+A  ../external-agent-migration/src/sessions/ledger_tests.rs
+A  ../external-agent-migration/src/sessions/mod.rs
+A  ../external-agent-migration/src/sessions/records.rs
+A  ../external-agent-migration/src/sessions/title.rs
+A  ../external-agent-migration/src/sessions/title_tests.rs
+A  ../external-agent-migration/src/source/cla.rs
+A  ../external-agent-migration/src/source/cur.rs
+A  ../external-agent-migration/src/source/mod.rs
+A  ../external-agent-migration/src/source_cla.rs
+A  ../external-agent-migration/src/source_cur.rs
+A  ../external-agent-migration/src/source_cur_tests.rs
+A  ../external-agent-migration/src/subagents.rs
+A  ../external-agent-migration/src/utils.rs
+ M ../external-agent-sessions/src/export.rs
+MM ../features/src/feature_configs.rs
+MM ../features/src/lib.rs
+MM ../features/src/tests.rs
+ M ../feedback/Cargo.toml
+MM ../feedback/src/lib.rs
+M  ../file-system/src/find_up.rs
+M  ../file-system/src/lib.rs
+A  ../hooks/schema/generated/session-end.command.input.schema.json
+M  ../hooks/src/declarations.rs
+M  ../hooks/src/engine/command_runner.rs
+A  ../hooks/src/engine/command_runner_tests.rs
+M  ../hooks/src/engine/discovery.rs
+M  ../hooks/src/engine/dispatcher.rs
+M  ../hooks/src/engine/mod.rs
+M  ../hooks/src/engine/mod_tests.rs
+M  ../hooks/src/engine/schema_loader.rs
+M  ../hooks/src/events/common.rs
+M  ../hooks/src/events/compact.rs
+M  ../hooks/src/events/mod.rs
+M  ../hooks/src/events/post_tool_use.rs
+M  ../hooks/src/events/pre_tool_use.rs
+A  ../hooks/src/events/session_end.rs
+A  ../hooks/src/events/session_end_tests.rs
+M  ../hooks/src/events/session_start.rs
+M  ../hooks/src/events/stop.rs
+M  ../hooks/src/events/user_prompt_submit.rs
+M  ../hooks/src/lib.rs
+M  ../hooks/src/output_spill.rs
+M  ../hooks/src/output_spill_tests.rs
+M  ../hooks/src/registry.rs
+M  ../hooks/src/schema.rs
+M  ../http-client/Cargo.toml
+M  ../http-client/src/default_client.rs
+M  ../http-client/src/outbound_proxy.rs
+M  ../http-client/src/outbound_proxy_tests.rs
+ M ../linux-sandbox/src/bwrap.rs
+M  ../linux-sandbox/src/linux_run_main.rs
+M  ../linux-sandbox/src/linux_run_main_tests.rs
+M  ../login/src/auth/default_client.rs
+M  ../login/src/auth/default_client_tests.rs
+MM ../mcp-server/src/codex_tool_runner.rs
+M  ../mcp-server/src/exec_approval.rs
+M  ../mcp-server/src/message_processor.rs
+M  ../mcp-server/src/patch_approval.rs
+M  ../mcp-server/tests/common/Cargo.toml
+M  ../mcp-server/tests/common/lib.rs
+ M ../mcp-server/tests/common/mcp_process.rs
+ M ../memories/write/Cargo.toml
+M  ../memories/write/src/guard_tests.rs
+M  ../memories/write/src/phase1.rs
+MM ../memories/write/src/phase2.rs
+A  ../memories/write/src/phase2_sandbox_tests.rs
+A  ../memories/write/src/phase2_workspace_roots_tests.rs
+ M ../memories/write/src/runtime.rs
+ M ../memories/write/src/start.rs
+ M ../memories/write/src/startup_tests.rs
+ M ../memories/write/src/workspace.rs
+ M ../memories/write/src/workspace_tests.rs
+A  ../message-history/src/batch.rs
+A  ../message-history/src/batch_tests.rs
+M  ../message-history/src/lib.rs
+M  ../model-provider-info/src/lib.rs
+M  ../model-provider-info/src/model_provider_info_tests.rs
+M  ../model-provider/src/amazon_bedrock/auth.rs
+MM ../model-provider/src/amazon_bedrock/catalog.rs
+M  ../model-provider/src/amazon_bedrock/mantle.rs
+MM ../model-provider/src/amazon_bedrock/mod.rs
+M  ../model-provider/src/lib.rs
+MM ../model-provider/src/provider.rs
+M  ../models-manager/models.json
+ M ../models-manager/src/cache.rs
+ M ../models-manager/src/config.rs
+ M ../models-manager/src/lib.rs
+ M ../models-manager/src/manager_tests.rs
+MM ../models-manager/src/model_info.rs
+MM ../models-manager/src/model_info_tests.rs
+M  ../network-proxy/src/attribution_tests.rs
+M  ../network-proxy/src/config.rs
+M  ../network-proxy/src/connect_policy.rs
+M  ../network-proxy/src/http_proxy.rs
+M  ../network-proxy/src/lib.rs
+M  ../network-proxy/src/mitm_hook.rs
+M  ../network-proxy/src/mitm_tests.rs
+M  ../network-proxy/src/network_policy.rs
+M  ../network-proxy/src/proxy.rs
+M  ../network-proxy/src/proxy/execution_scope.rs
+A  ../network-proxy/src/remote_config.rs
+A  ../network-proxy/src/remote_config_tests.rs
+M  ../network-proxy/src/runtime.rs
+M  ../network-proxy/src/socks5.rs
+M  ../network-proxy/src/state.rs
+MM ../otel/src/events/session_telemetry.rs
+MM ../otel/src/metrics/client.rs
+ M ../otel/src/metrics/runtime_metrics.rs
+ M ../otel/tests/suite/runtime_summary.rs
+M  ../otel/tests/suite/timing.rs
+ M ../product-info/src/lib.rs
+M  ../prompts/src/permissions_instructions.rs
+M  ../prompts/src/permissions_instructions_tests.rs
+M  ../protocol/src/account.rs
+M  ../protocol/src/approvals.rs
+M  ../protocol/src/dynamic_tools.rs
+M  ../protocol/src/error_tests.rs
+M  ../protocol/src/items.rs
+M  ../protocol/src/legacy_events.rs
+M  ../protocol/src/lib.rs
+MM ../protocol/src/models.rs
+M  ../protocol/src/num_format.rs
+MM ../protocol/src/openai_models.rs
+M  ../protocol/src/permissions.rs
+M  ../protocol/src/protocol.rs
+M  ../protocol/src/request_permissions.rs
+A  ../protocol/src/response_item_id.rs
+A  ../protocol/src/response_item_id_tests.rs
+M  ../protocol/src/user_input.rs
+D  ../realtime-webrtc/BUILD.bazel
+D  ../realtime-webrtc/Cargo.toml
+D  ../realtime-webrtc/src/lib.rs
+D  ../realtime-webrtc/src/native.rs
+ M ../rmcp-client/Cargo.toml
+ M ../rmcp-client/src/auth_status.rs
+M  ../rmcp-client/src/bin/test_stdio_server.rs
+ M ../rmcp-client/src/bin/test_streamable_http_server.rs
+MM ../rmcp-client/src/executor_process_transport.rs
+MM ../rmcp-client/src/executor_process_transport_tests.rs
+ M ../rmcp-client/src/lib.rs
+ M ../rmcp-client/src/oauth.rs
+A  ../rmcp-client/src/oauth/refresh_lock.rs
+A  ../rmcp-client/src/oauth/refresh_lock_tests.rs
+A  ../rmcp-client/src/oauth/refresh_transaction.rs
+A  ../rmcp-client/src/oauth/resolved_store.rs
+ M ../rmcp-client/src/oauth/store_lock.rs
+A  ../rmcp-client/src/oauth/tests/persistor_tests.rs
+ M ../rmcp-client/src/oauth/tests/store_lock_tests.rs
+ M ../rmcp-client/src/rmcp_client.rs
+MM ../rmcp-client/src/stdio_server_launcher.rs
+ M ../rmcp-client/src/streamable_http_retry.rs
+A  ../rmcp-client/tests/streamable_http_oauth_store_pinning.rs
+M  ../rollout-trace/src/compaction.rs
+ M ../rollout-trace/src/inference.rs
+M  ../rollout-trace/src/model/conversation.rs
+MM ../rollout-trace/src/protocol_event.rs
+M  ../rollout-trace/src/reducer/conversation/normalize.rs
+M  ../rollout-trace/src/reducer/conversation_tests.rs
+M  ../rollout-trace/src/thread_tests.rs
+M  ../rollout/Cargo.toml
+M  ../rollout/src/compression_tests.rs
+M  ../rollout/src/lib.rs
+M  ../rollout/src/list.rs
+M  ../rollout/src/metadata.rs
+M  ../rollout/src/metadata_tests.rs
+A  ../rollout/src/model_context.rs
+A  ../rollout/src/ordinal.rs
+M  ../rollout/src/persistence_metrics.rs
+M  ../rollout/src/persistence_metrics_tests.rs
+M  ../rollout/src/policy.rs
+M  ../rollout/src/recorder.rs
+M  ../rollout/src/recorder_tests.rs
+A  ../rollout/src/reverse_jsonl_scanner.rs
+A  ../rollout/src/reverse_jsonl_scanner_tests.rs
+M  ../rollout/src/search.rs
+M  ../rollout/src/session_index.rs
+M  ../rollout/src/session_index_tests.rs
+M  ../rollout/src/state_db.rs
+M  ../rollout/src/state_db_tests.rs
+M  ../rollout/src/tests.rs
+M  ../sandboxing/Cargo.toml
+M  ../sandboxing/src/lib.rs
+ M ../sandboxing/src/manager.rs
+ M ../sandboxing/src/seatbelt_tests.rs
+A  ../sandboxing/src/spawn.rs
+M  ../skills/Cargo.toml
+ M ../skills/src/assets/samples/openai-docs/references/latest-model.md
+M  ../skills/src/assets/samples/openai-docs/references/prompting-guide.md
+A  ../skills/src/assets/samples/openai-docs/references/upgrading-to-gpt-5p6-sol.md
+A  ../skills/src/assets/samples/openai-docs/scripts/resolve-latest-model-info
+A  ../skills/src/assets/samples/openai-docs/scripts/resolve-latest-model-info.cjs
+A  ../skills/src/assets/samples/review-agent/SKILL.md
+A  ../skills/src/assets/samples/review-agent/agents/openai.yaml
+M  ../skills/src/lib.rs
+A  ../skills/src/model.rs
+A  ../skills/src/model_tests.rs
+M  ../state/BUILD.bazel
+M  ../state/Cargo.toml
+A  ../state/goals_migrations/0002_thread_goal_continuation_deferrals.sql
+A  ../state/migrations/0041_threads_name.sql
+A  ../state/migrations/0042_drop_agent_jobs.sql
+M  ../state/src/audit.rs
+M  ../state/src/extract.rs
+M  ../state/src/lib.rs
+M  ../state/src/log_db.rs
+M  ../state/src/log_db_filter_tests.rs
+M  ../state/src/migrations.rs
+M  ../state/src/migrations_tests.rs
+D  ../state/src/model/agent_job.rs
+M  ../state/src/model/mod.rs
+M  ../state/src/model/thread_metadata.rs
+M  ../state/src/runtime.rs
+D  ../state/src/runtime/agent_jobs.rs
+M  ../state/src/runtime/backfill.rs
+M  ../state/src/runtime/external_agent_config_imports.rs
+M  ../state/src/runtime/external_agent_config_imports_tests.rs
+M  ../state/src/runtime/goals.rs
+M  ../state/src/runtime/logs.rs
+M  ../state/src/runtime/memories.rs
+M  ../state/src/runtime/remote_control.rs
+M  ../state/src/runtime/test_support.rs
+M  ../state/src/runtime/threads.rs
+A  ../state/src/sqlite.rs
+M  ../state/src/telemetry.rs
+A  ../state/thread_history_migrations/0001_thread_history.sql
+A  ../state/thread_history_migrations/0002_thread_items_item_type.sql
+MM ../thread-manager-sample/src/main.rs
+M  ../thread-store/Cargo.toml
+M  ../thread-store/src/in_memory.rs
+M  ../thread-store/src/lib.rs
+M  ../thread-store/src/live_thread.rs
+M  ../thread-store/src/local/create_thread.rs
+M  ../thread-store/src/local/delete_thread.rs
+M  ../thread-store/src/local/helpers.rs
+M  ../thread-store/src/local/list_threads.rs
+M  ../thread-store/src/local/live_writer.rs
+M  ../thread-store/src/local/mod.rs
+A  ../thread-store/src/local/model_context.rs
+A  ../thread-store/src/local/model_context_tests.rs
+M  ../thread-store/src/local/read_thread.rs
+A  ../thread-store/src/local/rollout_lineage.rs
+A  ../thread-store/src/local/rollout_lineage_tests.rs
+M  ../thread-store/src/local/search_threads.rs
+M  ../thread-store/src/local/test_support.rs
+A  ../thread-store/src/local/thread_history.rs
+A  ../thread-store/src/local/thread_history/read.rs
+A  ../thread-store/src/local/thread_history/read_tests.rs
+A  ../thread-store/src/local/thread_history/search.rs
+A  ../thread-store/src/local/thread_history_materialization.rs
+A  ../thread-store/src/local/thread_history_materialization_tests.rs
+M  ../thread-store/src/local/update_thread_metadata.rs
+M  ../thread-store/src/store.rs
+M  ../thread-store/src/thread_metadata_sync.rs
+M  ../thread-store/src/types.rs
+ M ../tools/BUILD.bazel
+ M ../tools/src/image_detail_tests.rs
+ M ../tools/src/tool_call.rs
+ M ../tools/src/tool_config_tests.rs
+MM ../tools/src/tool_output.rs
+MM ../tui/Cargo.toml
+MM ../tui/src/app.rs
+M  ../tui/src/app/agent_message_consolidation.rs
+M  ../tui/src/app/agent_navigation.rs
+M  ../tui/src/app/agent_status_feed.rs
+MM ../tui/src/app/app_server_event_targets.rs
+M  ../tui/src/app/app_server_events.rs
+M  ../tui/src/app/background_requests.rs
+MM ../tui/src/app/event_dispatch.rs
+MM ../tui/src/app/history_ui.rs
+M  ../tui/src/app/input.rs
+M  ../tui/src/app/loaded_threads.rs
+M  ../tui/src/app/plugin_mentions.rs
+ M ../tui/src/app/resize_reflow.rs
+A  ../tui/src/app/safety_buffering.rs
+A  ../tui/src/app/safety_buffering_tests.rs
+M  ../tui/src/app/session_lifecycle.rs
+M  ../tui/src/app/side.rs
+M  ../tui/src/app/snapshots/codex_tui__app__history_ui__tests__desktop_thread_open_error_history.snap
+M  ../tui/src/app/snapshots/codex_tui__app__history_ui__tests__desktop_thread_opened_history.snap
+D  ../tui/src/app/snapshots/codex_tui__app__tests__cancelled_turn_edit_restores_composer.snap
+A  ../tui/src/app/snapshots/codex_tui__app__tests__required_stream_reflow_during_capped_initial_replay.snap
+A  ../tui/src/app/snapshots/codex_tui__app__tests__required_stream_reflow_during_capped_initial_replay_survives_transcript_overlay.snap
+ M ../tui/src/app/startup_prompts.rs
+M  ../tui/src/app/test_support.rs
+MM ../tui/src/app/tests.rs
+ M ../tui/src/app/tests/model_catalog.rs
+A  ../tui/src/app/tests/rate_limits.rs
+A  ../tui/src/app/tests/safety_buffering.rs
+A  ../tui/src/app/tests/session_lifecycle_requests.rs
+A  ../tui/src/app/tests/snapshots/codex_tui__app__tests__safety_buffering__safety_retry_committed_steer_history.snap
+M  ../tui/src/app/tests/startup.rs
+M  ../tui/src/app/thread_events.rs
+M  ../tui/src/app/thread_routing.rs
+M  ../tui/src/app/thread_session_state.rs
+ M ../tui/src/app/thread_settings.rs
+M  ../tui/src/app_backtrack.rs
+M  ../tui/src/app_command.rs
+MM ../tui/src/app_event.rs
+M  ../tui/src/app_event_sender.rs
+MM ../tui/src/app_server_session.rs
+MM ../tui/src/bottom_pane/approval_overlay.rs
+MM ../tui/src/bottom_pane/chat_composer.rs
+A  ../tui/src/bottom_pane/chat_composer/completion_target.rs
+A  ../tui/src/bottom_pane/chat_composer/completion_target_tests.rs
+M  ../tui/src/bottom_pane/chat_composer/history_search.rs
+ M ../tui/src/bottom_pane/chat_composer/popup_state.rs
+A  ../tui/src/bottom_pane/chat_composer/popup_state_tests.rs
+MM ../tui/src/bottom_pane/chat_composer/slash_input.rs
+A  ../tui/src/bottom_pane/chat_composer_effort_tests.rs
+M  ../tui/src/bottom_pane/chat_composer_history.rs
+A  ../tui/src/bottom_pane/chat_composer_history/search_batch.rs
+A  ../tui/src/bottom_pane/chat_composer_history/search_batch_tests.rs
+A  ../tui/src/bottom_pane/effort_ignition.rs
+A  ../tui/src/bottom_pane/effort_ignition_styles.rs
+A  ../tui/src/bottom_pane/effort_ignition_tests.rs
+A  ../tui/src/bottom_pane/effort_status_line.rs
+A  ../tui/src/bottom_pane/effort_status_line_tests.rs
+ M ../tui/src/bottom_pane/feedback_view.rs
+MM ../tui/src/bottom_pane/footer.rs
+MM ../tui/src/bottom_pane/hooks_browser_view.rs
+ M ../tui/src/bottom_pane/list_selection_view.rs
+M  ../tui/src/bottom_pane/mcp_server_elicitation.rs
+M  ../tui/src/bottom_pane/mentions_v2/search_catalog.rs
+MM ../tui/src/bottom_pane/mod.rs
+ M ../tui/src/bottom_pane/request_user_input/mod.rs
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_auto_resolution_countdown.snap
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_footer_wrap.snap
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_freeform.snap
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_freeform_remapped_interrupt.snap
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_freeform_remapped_submit.snap
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_hidden_options_footer.snap
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_long_option_text.snap
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_multi_question_first.snap
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_multi_question_last.snap
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_options.snap
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_options_notes_visible.snap
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_scrolling_options.snap
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_tight_height.snap
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_unanswered_confirmation.snap
+ M ../tui/src/bottom_pane/request_user_input/snapshots/codex_tui__bottom_pane__request_user_input__tests__request_user_input_wrapped_options.snap
+ M ../tui/src/bottom_pane/selection_popup_common.rs
+M  ../tui/src/bottom_pane/skill_popup.rs
+ M ../tui/src/bottom_pane/skills_toggle_view.rs
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__approval_overlay__tests__network_exec_prompt.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__effort_tests__effort_transition_keeps_the_full_footer_row.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__adjacent_plugin_completion_inserts_separator.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__backspace_after_pastes.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__default_unified_mention_popup.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__empty.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__file_popup_ignores_bare_shell_parameter_with_matching_skill.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__file_popup_ignores_shell_positional_parameter.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__file_popup_ignores_unbindable_qualified_skill.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_empty_full.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_empty_mode_cycle_with_context.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_empty_mode_cycle_without_context.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_empty_mode_only.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_plan_empty_full.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_plan_empty_mode_cycle_with_context.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_plan_empty_mode_cycle_without_context.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_plan_empty_mode_only.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_plan_queue_full.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_plan_queue_message_without_context.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_plan_queue_mode_only.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_plan_queue_short_with_context.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_plan_queue_short_without_context.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_queue_full.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_queue_message_without_context.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_queue_mode_only.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_queue_short_with_context.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_collapse_queue_short_without_context.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_ctrl_c_interrupt.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_ctrl_c_quit.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_ctrl_c_then_esc_hint.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_esc_hint_backtrack.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_esc_hint_from_overlay.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_hidden_while_typing.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_history_search.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_history_search_unavailable.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_overlay_then_external_esc_hint.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_shell_command_absorbs_bang.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_shell_command_escape_exits_empty_mode.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_shortcut_overlay.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_shortcut_overlay_queue_submissions.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__image_placeholder_multiple.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__image_placeholder_single.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__large.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__mention_popup_type_prefixes.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__multiple_pastes.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__parent_owned_thread_placeholder.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__plugin_mention_popup.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__remote_image_rows.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__remote_image_rows_after_delete_first.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__remote_image_rows_selected.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__shutdown_in_progress.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__skill_popup_accepts_digit_leading_skill.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__skill_popup_closes_after_trailing_space.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__skill_popup_closes_between_spaces_before_plain_text.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__skill_popup_does_not_fuzzy_match_shell_variable.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__skill_popup_falls_back_from_bound_skill_with_path_suffix.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__skill_popup_preserves_normal_target_after_ambiguous_probe.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__skill_popup_targets_unbound_mention_left_of_bound_mention.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__skill_popup_targets_unbound_mention_right_of_adjacent_bound_mention.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__slash_popup_ar.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__slash_popup_bt.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__slash_popup_mo.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__slash_popup_pet.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__slash_popup_res.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__slash_popup_si.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__small.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__ultra_accent_upgrades_prompt_glyph.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__unified_mention_popup_falls_back_from_bound_plugin_on_right.snap
+MM ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__command_popup__tests__command_popup_app.snap
+MM ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__command_popup__tests__command_popup_default_items.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__command_popup__tests__command_popup_filter_reset_after_scroll.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__effort_ignition__tests__effort_ignition_animation_gallery.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__effort_status_line__tests__effort_status_line_transition_frames.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__feedback_view__tests__feedback_upload_consent_lists_doctor_report.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__feedback_view__tests__feedback_upload_consent_lists_windows_sandbox_log_when_included.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__hooks_browser_view__tests__hooks_browser_additional_context_limit.snap
+M  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__hooks_browser_view__tests__hooks_browser_events.snap
+M  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__hooks_browser_view__tests__hooks_browser_events_with_issues.snap
+M  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__hooks_browser_view__tests__hooks_browser_events_with_review_column.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__skill_popup__tests__skill_popup_scrolled.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__skills_toggle_view__tests__skills_toggle_long_names_at_narrow_width.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__skills_toggle_view__tests__skills_toggle_long_names_use_available_width.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__status_line_setup__tests__setup_view_snapshot_uses_runtime_preview_values.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__tests__queued_messages_visible_when_status_hidden_snapshot.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__tests__slash_command_popup_dismissed.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__tests__status_and_composer_fill_height_without_bottom_padding.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__tests__status_and_queued_messages_snapshot.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__tests__status_only_snapshot.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__tests__status_with_details_and_queued_messages_snapshot.snap
+A  ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__textarea__tests__textarea_tabs_render_as_spaces_and_align_with_cursor.snap
+ M ../tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__title_setup__tests__terminal_title_setup_basic.snap
+ M ../tui/src/bottom_pane/status_line_setup.rs
+ M ../tui/src/bottom_pane/status_line_style.rs
+ M ../tui/src/bottom_pane/status_surface_preview.rs
+MM ../tui/src/bottom_pane/textarea.rs
+MM ../tui/src/chatwidget.rs
+M  ../tui/src/chatwidget/command_lifecycle.rs
+M  ../tui/src/chatwidget/constructor.rs
+M  ../tui/src/chatwidget/hook_lifecycle.rs
+ M ../tui/src/chatwidget/ide_context.rs
+M  ../tui/src/chatwidget/input_flow.rs
+M  ../tui/src/chatwidget/input_restore.rs
+M  ../tui/src/chatwidget/input_submission.rs
+M  ../tui/src/chatwidget/interaction.rs
+M  ../tui/src/chatwidget/mcp_startup.rs
+ M ../tui/src/chatwidget/model_popups.rs
+ M ../tui/src/chatwidget/permission_popups.rs
+MM ../tui/src/chatwidget/protocol.rs
+M  ../tui/src/chatwidget/rate_limits.rs
+M  ../tui/src/chatwidget/reasoning_shortcuts.rs
+M  ../tui/src/chatwidget/rendering.rs
+MM ../tui/src/chatwidget/replay.rs
+M  ../tui/src/chatwidget/reset_credits.rs
+MM ../tui/src/chatwidget/safety_buffering.rs
+M  ../tui/src/chatwidget/session_flow.rs
+MM ../tui/src/chatwidget/settings.rs
+M  ../tui/src/chatwidget/side.rs
+M  ../tui/src/chatwidget/skills.rs
+MM ../tui/src/chatwidget/slash_dispatch.rs
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_guardian_review_denied_renders_denied_request.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_guardian_review_timed_out_renders_timed_out_request.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_mcp_startup_failure_renders_warning_history.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__chat_small_idle_h2.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__chat_small_idle_h3.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__chat_small_running_h2.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__chat_small_running_h3.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__chatwidget_exec_and_status_layout_vt100_snapshot.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__chatwidget_tall.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__compact_queues_user_messages_snapshot.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__esc_interrupt_goal_paused_footer.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__esc_interrupt_goal_paused_footer@windows.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__exec_approval_modal_exec.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__feedback_good_result_consent_popup.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__feedback_upload_consent_popup.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__full_access_confirmation_popup.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_approved_exec_renders_approved_request.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_approved_request_permissions_renders_request_summary.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_denied_exec_renders_warning_and_denied_request.snap
+A  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_goal_continuation_drops_stale_reviews.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_parallel_reviews_render_aggregate_status.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_timed_out_exec_renders_warning_and_timed_out_request.snap
+M  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__hooks_popup_shows_list_diagnostics.snap
+A  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__image_generation_begin_restores_working_status.snap
+A  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__live_app_server_command_output_delta_active.snap
+A  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__live_app_server_command_output_delta_interrupted.snap
+A  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__live_app_server_command_output_delta_transcript.snap
+A  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__live_app_server_user_message_omits_unsupported_media.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__mcp_startup_header_booting.snap
+MM ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__model_selection_popup.snap
+A  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__parent_owned_thread_rejects_input.snap
+A  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__parent_owned_thread_rejects_settings_shortcuts.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__pending_token_activity_refresh_renders_above_composer_snapshot.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__plan_mode_nudge.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__plan_mode_nudge_narrow.snap
+M  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__post_tool_use_hook_events_render_snapshot.snap
+M  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__pre_tool_use_hook_events_render_snapshot.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__preamble_keeps_working_status.snap
+A  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__prompt_edit_thread_history_line.snap
+A  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__rate_limit_reset_confirmation.snap
+M  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__rate_limit_reset_picker_narrow.snap
+M  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__rate_limit_reset_popup_states.snap
+M  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__rate_limit_switch_prompt_popup.snap
+A  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__reasoning_delta_restores_recreated_status_indicator.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__renamed_thread_footer_title.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__review_queues_user_messages_snapshot.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__safety_buffering_retry_prompt.snap
+A  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__safety_buffering_side_conversation_without_retry.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__safety_buffering_status_without_retry.snap
+M  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__session_start_hook_events_render_snapshot.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__side_context_label_preserves_status_line.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__side_context_label_shows_parent_status.snap
+A  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__single_line_final_answer_hides_working_status.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__slash_side_requests_forked_side_question_while_task_running.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_fast_mode_footer.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_goal_active_token_budget_footer.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_goal_complete_elapsed_footer.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_context_remaining_footer.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_fast_footer.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_plan_mode_footer.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_setup_popup_hardcoded_only.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_setup_popup_live_only.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_setup_popup_mixed.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_setup_popup_rate_limits.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_setup_popup_workspace_headline.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_surface_previews_hardcoded_only.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_widget_active.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__unified_exec_begin_restores_working_status.snap
+ M ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__unified_exec_wait_status_renders_command_in_single_details_row.snap
+D  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__usage_limit_reset_confirmation_monthly.snap
+M  ../tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__user_prompt_submit_app_server_hook_notifications_render_snapshot.snap
+M  ../tui/src/chatwidget/status_controls.rs
+MM ../tui/src/chatwidget/status_state.rs
+ M ../tui/src/chatwidget/status_surfaces.rs
+MM ../tui/src/chatwidget/streaming.rs
+M  ../tui/src/chatwidget/tests.rs
+MM ../tui/src/chatwidget/tests/app_server.rs
+M  ../tui/src/chatwidget/tests/composer_submission.rs
+ M ../tui/src/chatwidget/tests/exec_flow.rs
+M  ../tui/src/chatwidget/tests/guardian.rs
+MM ../tui/src/chatwidget/tests/helpers.rs
+MM ../tui/src/chatwidget/tests/history_replay.rs
+ M ../tui/src/chatwidget/tests/mcp_startup.rs
+ M ../tui/src/chatwidget/tests/permissions.rs
+MM ../tui/src/chatwidget/tests/plan_mode.rs
+MM ../tui/src/chatwidget/tests/popups_and_settings.rs
+M  ../tui/src/chatwidget/tests/review_mode.rs
+MM ../tui/src/chatwidget/tests/slash_commands.rs
+ M ../tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__approval_requests__exec_approval_modal_exec.snap
+A  ../tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__composer_submission__output_free_ctrl_c_interrupt_keeps_prompt_and_blank_composer.snap
+A  ../tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__history_replay__replayed_nested_review_prompts.snap
+MM ../tui/src/chatwidget/tests/status_and_layout.rs
+M  ../tui/src/chatwidget/tests/status_surface_previews.rs
+M  ../tui/src/chatwidget/tests/usage.rs
+MM ../tui/src/chatwidget/tool_lifecycle.rs
+MM ../tui/src/chatwidget/tool_requests.rs
+M  ../tui/src/chatwidget/transcript.rs
+MM ../tui/src/chatwidget/turn_runtime.rs
+M  ../tui/src/chatwidget/usage.rs
+M  ../tui/src/chatwidget/user_messages.rs
+M  ../tui/src/custom_terminal.rs
+MM ../tui/src/cwd_prompt.rs
+M  ../tui/src/debug_config.rs
+MM ../tui/src/diff_render.rs
+A  ../tui/src/exec_cell/live_output.rs
+A  ../tui/src/exec_cell/live_output_tests.rs
+M  ../tui/src/exec_cell/mod.rs
+M  ../tui/src/exec_cell/model.rs
+M  ../tui/src/exec_cell/render.rs
+A  ../tui/src/exec_cell/snapshots/codex_tui__exec_cell__render__tests__truncated_live_output_preview_and_transcript.snap
+M  ../tui/src/external_agent_config_migration.rs
+M  ../tui/src/external_agent_config_migration/render.rs
+M  ../tui/src/external_agent_config_migration_flow.rs
+M  ../tui/src/external_agent_config_migration_flow_tests.rs
+M  ../tui/src/external_agent_config_migration_model.rs
+A  ../tui/src/external_agent_config_migration_source.rs
+A  ../tui/src/external_agent_config_migration_source_tests.rs
+M  ../tui/src/history_cell/base.rs
+M  ../tui/src/history_cell/hook_cell.rs
+A  ../tui/src/history_cell/markdown_render_cache.rs
+M  ../tui/src/history_cell/mcp.rs
+MM ../tui/src/history_cell/messages.rs
+A  ../tui/src/history_cell/messages_tests.rs
+M  ../tui/src/history_cell/mod.rs
+MM ../tui/src/history_cell/notices.rs
+M  ../tui/src/history_cell/patches.rs
+M  ../tui/src/history_cell/plans.rs
+A  ../tui/src/history_cell/plans_tests.rs
+ M ../tui/src/history_cell/separators.rs
+MM ../tui/src/history_cell/session.rs
+ M ../tui/src/history_cell/snapshots/codex_tui__history_cell__tests__pnpm_update_available_history_cell_snapshot.snap
+ M ../tui/src/history_cell/snapshots/codex_tui__history_cell__tests__raw_mode_toggle_transcript.snap
+ M ../tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_info_availability_nux_tooltip_snapshot.snap
+ M ../tui/src/history_cell/snapshots/codex_tui__history_cell__tests__standalone_unix_update_available_history_cell_snapshot.snap
+ M ../tui/src/history_cell/snapshots/codex_tui__history_cell__tests__standalone_windows_update_available_history_cell_snapshot.snap
+ M ../tui/src/history_cell/snapshots/codex_tui__history_cell__tests__user_history_cell_numbers_multiple_remote_images.snap
+ M ../tui/src/history_cell/snapshots/codex_tui__history_cell__tests__user_history_cell_renders_remote_image_urls.snap
+ M ../tui/src/history_cell/snapshots/codex_tui__history_cell__tests__user_history_cell_wraps_and_prefixes_each_line_snapshot.snap
+MM ../tui/src/history_cell/tests.rs
+ M ../tui/src/ide_context/ipc.rs
+A  ../tui/src/inline_visualization.rs
+A  ../tui/src/inline_visualization/assets/visualize.css
+A  ../tui/src/inline_visualization/assets/visualize.html
+A  ../tui/src/inline_visualization/viewer.rs
+A  ../tui/src/inline_visualization_tests.rs
+M  ../tui/src/insert_history.rs
+ M ../tui/src/keymap.rs
+MM ../tui/src/lib.rs
+M  ../tui/src/live_wrap.rs
+M  ../tui/src/markdown.rs
+MM ../tui/src/markdown_render.rs
+A  ../tui/src/markdown_render/streaming.rs
+ M ../tui/src/markdown_render_tests.rs
+MM ../tui/src/markdown_stream.rs
+ M ../tui/src/mention_codec.rs
+M  ../tui/src/multi_agents.rs
+ M ../tui/src/onboarding/auth.rs
+ M ../tui/src/onboarding/snapshots/codex_tui__onboarding__trust_directory__tests__renders_snapshot_for_git_repo.snap
+ M ../tui/src/onboarding/snapshots/codex_tui__onboarding__trust_directory__tests__renders_snapshot_for_trust_error.snap
+M  ../tui/src/pager_overlay.rs
+M  ../tui/src/render/highlight.rs
+M  ../tui/src/render/line_utils.rs
+M  ../tui/src/render/renderable.rs
+M  ../tui/src/render/renderable_tests.rs
+M  ../tui/src/resume_picker.rs
+ M ../tui/src/selection_list.rs
+M  ../tui/src/session_resume.rs
+MM ../tui/src/skills_helpers.rs
+MM ../tui/src/slash_command.rs
+A  ../tui/src/snapshots/codex_tui__app__tests__backtrack_branch_failure_restores_selected_prompt.snap
+A  ../tui/src/snapshots/codex_tui__app__tests__in_app_resume_session_cwd_without_metadata.snap
+A  ../tui/src/snapshots/codex_tui__app__tests__path_backed_agent_picker.snap
+A  ../tui/src/snapshots/codex_tui__app__tests__remote_resume_current_cwd_rejected.snap
+MM ../tui/src/snapshots/codex_tui__cwd_prompt__tests__cwd_prompt_fork_modal.snap
+MM ../tui/src/snapshots/codex_tui__cwd_prompt__tests__cwd_prompt_modal.snap
+A  ../tui/src/snapshots/codex_tui__cwd_prompt__tests__cwd_prompt_persistence_failure.snap
+A  ../tui/src/snapshots/codex_tui__cwd_prompt__tests__cwd_prompt_remembered_current_modal.snap
+A  ../tui/src/snapshots/codex_tui__cwd_prompt__tests__cwd_prompt_remote_exec_modal.snap
+A  ../tui/src/snapshots/codex_tui__debug_config__tests__debug_config_output_lists_agents_fields.snap
+ M ../tui/src/snapshots/codex_tui__diff_render__tests__diff_gallery_120x40.snap
+ M ../tui/src/snapshots/codex_tui__diff_render__tests__diff_gallery_80x24.snap
+ M ../tui/src/snapshots/codex_tui__diff_render__tests__diff_gallery_94x35.snap
+M  ../tui/src/snapshots/codex_tui__external_agent_config_migration__tests__external_agent_config_migration_customize.snap
+M  ../tui/src/snapshots/codex_tui__external_agent_config_migration__tests__external_agent_config_migration_customize_action.snap
+M  ../tui/src/snapshots/codex_tui__external_agent_config_migration__tests__external_agent_config_migration_customize_action_windows.snap
+M  ../tui/src/snapshots/codex_tui__external_agent_config_migration__tests__external_agent_config_migration_customize_windows.snap
+M  ../tui/src/snapshots/codex_tui__external_agent_config_migration__tests__external_agent_config_migration_prompt.snap
+M  ../tui/src/snapshots/codex_tui__external_agent_config_migration__tests__external_agent_config_migration_prompt_windows.snap
+A  ../tui/src/snapshots/codex_tui__external_agent_config_migration__tests__external_agent_config_migration_secondary_source_customize.snap
+M  ../tui/src/snapshots/codex_tui__external_agent_config_migration_flow__tests__external_agent_config_migration_messages.snap
+A  ../tui/src/snapshots/codex_tui__external_agent_config_migration_source__tests__external_agent_config_source_prompt.snap
+A  ../tui/src/snapshots/codex_tui__inline_visualization__tests__agent_code_blocks_preserve_visualization_directive_literals.snap
+A  ../tui/src/snapshots/codex_tui__inline_visualization__tests__finalized_agent_cell_visualization_link.snap
+A  ../tui/src/snapshots/codex_tui__inline_visualization__tests__transcript_overlay_visualization_becomes_available.snap
+A  ../tui/src/snapshots/codex_tui__inline_visualization__tests__viewer_document_contract.snap
+ M ../tui/src/snapshots/codex_tui__status_indicator_widget__tests__renders_remapped_interrupt_hint.snap
+ M ../tui/src/snapshots/codex_tui__status_indicator_widget__tests__renders_truncated.snap
+ M ../tui/src/snapshots/codex_tui__status_indicator_widget__tests__renders_with_working_header.snap
+ M ../tui/src/snapshots/codex_tui__status_indicator_widget__tests__renders_wrapped_details_panama_two_lines.snap
+M  ../tui/src/startup_hooks_review.rs
+MM ../tui/src/status/card.rs
+M  ../tui/src/status/rate_limits.rs
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_cached_limits_hide_credits_without_flag.snap
+MM ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_enterprise_monthly_credit_limit.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_forked_from.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_monthly_limit.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_reasoning_details.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_active_user_defined_profile.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_auto_review_permissions.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_chatgpt_plan_without_email.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_missing_limits_message.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_refreshing_limits_notice.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_stale_limits_message.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_unavailable_limits_message.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_treats_refreshing_empty_limits_as_unavailable.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_in_narrow_terminal.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_uses_default_reasoning_when_config_empty.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_uses_generic_limit_labels_for_unsupported_windows.snap
+ M ../tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_wraps_enterprise_monthly_credit_details_in_narrow_terminal.snap
+AM ../tui/src/status/snapshots/codex_tui__status__tests__transcript_overlay_status_rate_limit_refresh.snap
+M  ../tui/src/status/tests.rs
+MM ../tui/src/status_indicator_widget.rs
+M  ../tui/src/streaming/controller.rs
+M  ../tui/src/streaming/mod.rs
+A  ../tui/src/streaming/render.rs
+A  ../tui/src/streaming/render_tests.rs
+A  ../tui/src/streaming/snapshots/codex_tui__streaming__render__tests__incremental_render_representative_stream.snap
+A  ../tui/src/streaming/snapshots/codex_tui__streaming__render__tests__inline_visualizations_without_context_use_canonical_full_render.snap
+MM ../tui/src/style.rs
+M  ../tui/src/terminal_hyperlinks.rs
+M  ../tui/src/terminal_palette.rs
+M  ../tui/src/thread_transcript.rs
+MM ../tui/src/tooltips.rs
+M  ../tui/src/tui.rs
+M  ../tui/src/tui/frame_requester.rs
+ M ../tui/src/update_action.rs
+MM ../tui/src/update_prompt.rs
+M  ../tui/src/wrapping.rs
+M  ../tui/tooltips.txt
+M  ../utils/cli/src/config_override.rs
+MM ../utils/output-truncation/src/lib.rs
+M  ../utils/output-truncation/src/truncate_tests.rs
+ M ../utils/path-uri/src/api_path_string.rs
+M  ../utils/plugins/Cargo.toml
+M  ../utils/plugins/src/lib.rs
+M  ../utils/plugins/src/plugin_namespace.rs
+M  ../utils/pty/src/pipe.rs
+M  ../utils/pty/src/pty.rs
+M  ../utils/pty/src/tests.rs
+M  ../utils/pty/src/windows_tests.rs
+M  ../utils/sandbox-summary/Cargo.toml
+D  ../utils/sandbox-summary/src/config_summary.rs
+M  ../utils/sandbox-summary/src/lib.rs
+M  ../utils/sleep-inhibitor/src/linux_inhibitor.rs
+M  ../websocket-client/src/dialer.rs
+M  ../websocket-client/src/dialer_tests.rs
+M  ../windows-sandbox-rs/src/acl.rs
+ M ../windows-sandbox-rs/src/bin/command_runner/win.rs
+M  ../windows-sandbox-rs/src/bin/setup_main/win.rs
+MM ../windows-sandbox-rs/src/lib.rs
+ M ../windows-sandbox-rs/src/process.rs
+ M ../windows-sandbox-rs/src/unified_exec/backends/legacy.rs
+M  ../../defs.bzl
+ M ../../justfile
+M  ../../scripts/codex_package/rg
+M  ../../sdk/python/README.md
+M  ../../sdk/python/docs/api-reference.md
+M  ../../sdk/python/docs/faq.md
+M  ../../sdk/python/docs/getting-started.md
+M  ../../sdk/python/examples/README.md
+M  ../../sdk/python/pyproject.toml
+M  ../../sdk/python/scripts/update_sdk_artifacts.py
+M  ../../sdk/python/src/openai_codex/generated/notification_registry.py
+M  ../../sdk/python/src/openai_codex/generated/v2_all.py
+M  ../../sdk/python/tests/test_artifact_workflow_and_binaries.py
+M  ../../sdk/python/tests/test_client_rpc_methods.py
+M  ../../sdk/python/tests/test_contract_generation.py
+M  ../../sdk/python/uv.lock
+M  ../../sdk/typescript/samples/basic_streaming.ts
+M  ../../sdk/typescript/src/events.ts
+M  ../../sdk/typescript/src/thread.ts
+M  ../../sdk/typescript/tests/run.test.ts
+M  ../../sdk/typescript/tests/runStreamed.test.ts
+
+Recent commits:
+b6e12e7b90 Merge pull request #1841 from openinterpreter/kimi-k3-skill-dispatch-20260716
+addeb6c363 Merge openinterpreter/main into Kimi media support
+7ae0782d32 Implement Kimi Code image viewing
+380cc1e00a docs: improve setup guidance and metadata
+a4da0fc3ce Merge pull request #1820 from openinterpreter/remove-fixture-specific-harness-behavior

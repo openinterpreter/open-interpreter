@@ -6,9 +6,9 @@ use codex_api::SharedAuthProvider;
 use codex_aws_auth::AwsAuthContext;
 use codex_aws_auth::AwsAuthError;
 use codex_aws_auth::AwsRequestToSign;
-use codex_client::Request;
-use codex_client::RequestBody;
-use codex_client::RequestCompression;
+use codex_http_client::Request;
+use codex_http_client::RequestBody;
+use codex_http_client::RequestCompression;
 use codex_login::auth::BedrockApiKeyAuth;
 use codex_model_provider_info::ModelProviderAwsAuthInfo;
 use codex_protocol::error::CodexErr;
@@ -82,7 +82,7 @@ fn non_empty_env_var_from(
         .filter(|value| !value.is_empty())
 }
 
-fn bearer_token_region(
+pub(super) fn bearer_token_region(
     aws: &ModelProviderAwsAuthInfo,
     env_var: impl Fn(&'static str) -> std::result::Result<String, std::env::VarError> + Copy,
 ) -> Result<String> {

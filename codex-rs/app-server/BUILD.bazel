@@ -5,12 +5,14 @@ codex_rust_crate(
     crate_name = "codex_app_server",
     extra_binaries = [
         "//codex-rs/bwrap:bwrap",
+        "//codex-rs/code-mode-host:codex-code-mode-host",
+        "//codex-rs/rmcp-client:test_stdio_server",
     ],
     extra_binaries_non_windows = [
         "//codex-rs/cli:codex",
-        "//codex-rs/rmcp-client:test_stdio_server",
     ],
     integration_test_timeout = "long",
+    run_tests_with_wine_exec = True,
     test_shard_counts = {
         # Note app-server-all-test has a large number of integration tests, so
         # even a single shard can be quite slow. When there is a legitimate

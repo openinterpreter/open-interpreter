@@ -27,6 +27,10 @@ use super::HookListEntry;
 use crate::config_rules::hook_states_from_stack;
 use crate::events::common::matcher_pattern_for_event;
 use crate::events::common::validate_matcher_pattern;
+use crate::events::session_end::SESSION_END_DEFAULT_TIMEOUT_SEC;
+use crate::events::session_end::SESSION_END_MAX_TIMEOUT_SEC;
+use crate::output_spill::AdditionalContextLimit;
+use crate::output_spill::DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT;
 use codex_protocol::protocol::HookHandlerType;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookTrustStatus;
@@ -466,13 +470,15 @@ fn append_matcher_groups(
                     timeout_sec,
                     r#async,
                     status_message,
+                    additional_context_limit,
                 } => {
                     let command = if cfg!(windows) {
                         command_windows.unwrap_or(command)
                     } else {
                         command
                     };
-                    if r#async {
+                    if r#async && event_name != codex_protocol::protocol::HookEventName::SessionEnd
+                    {
                         warnings.push(format!(
                             "skipping async hook in {}: async hooks are not supported yet",
                             source.path.display()
@@ -486,13 +492,45 @@ fn append_matcher_groups(
                         ));
                         continue;
                     }
-                    let timeout_sec = timeout_sec.unwrap_or(600).max(1);
+                    let timeout_sec = normalize_command_hook(
+                        event_name,
+                        timeout_sec,
+                        source.path.as_path(),
+                        warnings,
+                    );
+                    if r#async {
+                        warnings.push(format!(
+                            "running async SessionEnd hook synchronously in {}",
+                            source.path.display()
+                        ));
+                    }
+                    let additional_context_limit = if matches!(
+                        event_name,
+                        codex_protocol::protocol::HookEventName::PreToolUse
+                            | codex_protocol::protocol::HookEventName::PostToolUse
+                            | codex_protocol::protocol::HookEventName::SessionStart
+                            | codex_protocol::protocol::HookEventName::UserPromptSubmit
+                            | codex_protocol::protocol::HookEventName::SubagentStart
+                    ) {
+                        additional_context_limit
+                    } else {
+                        if additional_context_limit.is_some() {
+                            warnings.push(format!(
+                                "ignoring additionalContextLimit for {event_name:?} hook in {}: this event cannot emit additionalContext",
+                                source.path.display()
+                            ));
+                        }
+                        None
+                    };
+                    let normalized_additional_context_limit = additional_context_limit
+                        .filter(|limit| *limit != DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT);
                     let normalized_handler = HookHandlerConfig::Command {
                         command: command.clone(),
                         command_windows: None,
                         timeout_sec: Some(timeout_sec),
                         r#async,
                         status_message: status_message.clone(),
+                        additional_context_limit: normalized_additional_context_limit,
                     };
                     let current_hash =
                         command_hook_hash(event_name, matcher, &group, normalized_handler);
@@ -515,6 +553,7 @@ fn append_matcher_groups(
                         command: Some(command.clone()),
                         timeout_sec,
                         status_message: status_message.clone(),
+                        additional_context_limit,
                         source_path: source.path.clone(),
                         source: source.source,
                         plugin_id: source.plugin_id.clone(),
@@ -537,6 +576,9 @@ fn append_matcher_groups(
                             command,
                             timeout_sec,
                             status_message,
+                            additional_context_limit: AdditionalContextLimit::from_config(
+                                additional_context_limit,
+                            ),
                             source_path: source.path.clone(),
                             source: source.source,
                             display_order: *display_order,
@@ -556,6 +598,30 @@ fn append_matcher_groups(
             }
         }
     }
+}
+
+/// Normalizes command-hook timeouts. SessionEnd defaults to one second and is capped at three
+/// seconds; all other command hooks keep the standard ten-minute default.
+fn normalize_command_hook(
+    event_name: codex_protocol::protocol::HookEventName,
+    timeout_sec: Option<u64>,
+    source_path: &Path,
+    warnings: &mut Vec<String>,
+) -> u64 {
+    if event_name != codex_protocol::protocol::HookEventName::SessionEnd {
+        return timeout_sec.unwrap_or(600).max(1);
+    }
+
+    let max_timeout_sec = SESSION_END_MAX_TIMEOUT_SEC;
+    if timeout_sec.is_some_and(|timeout_sec| timeout_sec > max_timeout_sec) {
+        warnings.push(format!(
+            "clamping SessionEnd hook timeout to {max_timeout_sec}s in {}",
+            source_path.display()
+        ));
+    }
+    timeout_sec
+        .unwrap_or(SESSION_END_DEFAULT_TIMEOUT_SEC)
+        .clamp(1, max_timeout_sec)
 }
 
 /// Hash a normalized, config-derived identity instead of source text so equivalent
@@ -665,7 +731,10 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::ConfiguredHandler;
+    use super::HookListEntry;
     use super::append_matcher_groups;
+    use crate::output_spill::AdditionalContextLimit;
+    use crate::output_spill::DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT;
     use codex_config::HookHandlerConfig;
     use codex_config::HookStateToml;
     use codex_config::MatcherGroup;
@@ -757,8 +826,111 @@ mod tests {
                 timeout_sec: None,
                 r#async: false,
                 status_message: None,
+                additional_context_limit: None,
             }],
         }
+    }
+
+    fn command_group_with_additional_context_limit(
+        additional_context_limit: usize,
+    ) -> MatcherGroup {
+        MatcherGroup {
+            matcher: None,
+            hooks: vec![HookHandlerConfig::Command {
+                command: "echo hello".to_string(),
+                command_windows: None,
+                timeout_sec: None,
+                r#async: false,
+                status_message: None,
+                additional_context_limit: Some(additional_context_limit),
+            }],
+        }
+    }
+
+    fn discover_command(
+        event_name: HookEventName,
+        additional_context_limit: Option<usize>,
+    ) -> (ConfiguredHandler, HookListEntry, Vec<String>) {
+        let source_path = source_path();
+        let hook_states = std::collections::HashMap::new();
+        let mut handlers = Vec::new();
+        let mut entries = Vec::new();
+        let mut warnings = Vec::new();
+        let mut display_order = 0;
+        append_matcher_groups(
+            &mut handlers,
+            &mut entries,
+            &mut warnings,
+            &mut display_order,
+            &hook_handler_source(&source_path, &hook_states),
+            event_name,
+            vec![match additional_context_limit {
+                Some(limit) => command_group_with_additional_context_limit(limit),
+                None => command_group(/*matcher*/ None),
+            }],
+        );
+        (handlers.remove(0), entries.remove(0), warnings)
+    }
+
+    #[test]
+    fn supported_events_retain_per_handler_additional_context_limit_and_hash_it() {
+        for event_name in [
+            HookEventName::PreToolUse,
+            HookEventName::PostToolUse,
+            HookEventName::SessionStart,
+            HookEventName::UserPromptSubmit,
+            HookEventName::SubagentStart,
+        ] {
+            let (_, default_entry, _) =
+                discover_command(event_name, /*additional_context_limit*/ None);
+            let (explicit_default_handler, explicit_default_entry, _) = discover_command(
+                event_name,
+                /*additional_context_limit*/ Some(DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT),
+            );
+            let (custom_handler, custom_entry, _) =
+                discover_command(event_name, /*additional_context_limit*/ Some(20_000));
+            let (unlimited_handler, unlimited_entry, _) =
+                discover_command(event_name, /*additional_context_limit*/ Some(0));
+
+            assert_eq!(
+                custom_handler.additional_context_limit,
+                AdditionalContextLimit::from_config(Some(20_000))
+            );
+            assert_eq!(custom_entry.additional_context_limit, Some(20_000));
+            assert_ne!(default_entry.current_hash, custom_entry.current_hash);
+            assert_eq!(
+                explicit_default_handler.additional_context_limit,
+                AdditionalContextLimit::from_config(Some(DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT))
+            );
+            assert_eq!(
+                explicit_default_entry.additional_context_limit,
+                Some(DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT)
+            );
+            assert_eq!(
+                default_entry.current_hash,
+                explicit_default_entry.current_hash
+            );
+            assert_eq!(
+                unlimited_handler.additional_context_limit,
+                AdditionalContextLimit::from_config(Some(0))
+            );
+            assert_eq!(unlimited_entry.additional_context_limit, Some(0));
+            assert_ne!(default_entry.current_hash, unlimited_entry.current_hash);
+        }
+    }
+
+    #[test]
+    fn unsupported_event_warns_and_ignores_additional_context_limit() {
+        let source_path = source_path();
+        let (handler, _, warnings) = discover_command(
+            HookEventName::Stop,
+            /*additional_context_limit*/ Some(4_096),
+        );
+
+        assert_eq!(handler.additional_context_limit, Default::default());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("ignoring additionalContextLimit for Stop hook"));
+        assert!(warnings[0].contains(&source_path.display().to_string()));
     }
 
     #[test]
@@ -788,6 +960,7 @@ mod tests {
                 command: "echo hello".to_string(),
                 timeout_sec: 600,
                 status_message: None,
+                additional_context_limit: Default::default(),
                 source_path: source_path.clone(),
                 source: hook_source(),
                 display_order: 0,
@@ -823,11 +996,94 @@ mod tests {
                 command: "echo hello".to_string(),
                 timeout_sec: 600,
                 status_message: None,
+                additional_context_limit: Default::default(),
                 source_path: source_path.clone(),
                 source: hook_source(),
                 display_order: 0,
                 env: std::collections::HashMap::new(),
             }]
+        );
+    }
+
+    #[test]
+    fn session_end_normalizes_timeout() {
+        let mut handlers = Vec::new();
+        let mut hook_entries = Vec::new();
+        let mut warnings = Vec::new();
+        let mut display_order = 0;
+        let source_path = source_path();
+        let hook_states = std::collections::HashMap::new();
+
+        append_matcher_groups(
+            &mut handlers,
+            &mut hook_entries,
+            &mut warnings,
+            &mut display_order,
+            &hook_handler_source(&source_path, &hook_states),
+            HookEventName::SessionEnd,
+            vec![MatcherGroup {
+                matcher: Some("other".to_string()),
+                hooks: vec![
+                    HookHandlerConfig::Command {
+                        command: "echo default".to_string(),
+                        command_windows: None,
+                        timeout_sec: None,
+                        r#async: false,
+                        status_message: None,
+                        additional_context_limit: None,
+                    },
+                    HookHandlerConfig::Command {
+                        command: "echo clamped".to_string(),
+                        command_windows: None,
+                        timeout_sec: Some(600),
+                        r#async: true,
+                        status_message: None,
+                        additional_context_limit: None,
+                    },
+                ],
+            }],
+        );
+
+        assert_eq!(
+            handlers
+                .iter()
+                .map(|handler| handler.timeout_sec)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(
+            handlers
+                .iter()
+                .map(|handler| handler.matcher.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("other"), Some("other")]
+        );
+        assert_eq!(
+            hook_entries
+                .iter()
+                .map(|entry| entry.timeout_sec)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(
+            hook_entries
+                .iter()
+                .map(|entry| entry.matcher.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("other"), Some("other")]
+        );
+        assert_eq!(
+            warnings,
+            vec![
+                format!(
+                    "clamping SessionEnd hook timeout to 3s in {}",
+                    source_path.display()
+                ),
+                format!(
+                    "running async SessionEnd hook synchronously in {}",
+                    source_path.display()
+                ),
+            ]
         );
     }
 
@@ -970,6 +1226,7 @@ mod tests {
                         timeout_sec: None,
                         r#async: false,
                         status_message: None,
+                        additional_context_limit: None,
                     }],
                 }],
                 ..Default::default()
@@ -1000,6 +1257,7 @@ mod tests {
                     timeout_sec: None,
                     r#async: false,
                     status_message: None,
+                    additional_context_limit: None,
                 }],
             }],
         );

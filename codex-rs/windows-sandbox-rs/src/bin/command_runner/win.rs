@@ -13,7 +13,9 @@ mod cwd_junction;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_windows_sandbox::ConsoleMode;
 use codex_windows_sandbox::ErrorPayload;
+use codex_windows_sandbox::ErrorStage;
 use codex_windows_sandbox::ExitPayload;
 use codex_windows_sandbox::FramedMessage;
 use codex_windows_sandbox::IPC_PROTOCOL_VERSION;
@@ -76,6 +78,9 @@ use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
 use windows_sys::Win32::System::Threading::TerminateProcess;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
+// Kept in sync with codex_exec_server::CODEX_FS_HELPER_ARG1 without introducing
+// a dependency cycle.
+const FS_HELPER_ARG: &str = "--codex-run-as-fs-helper";
 const READ_ACL_MUTEX_NAME: &str = "Local\\CodexSandboxReadAcl";
 const WAIT_TIMEOUT: u32 = 0x0000_0102;
 
@@ -166,13 +171,19 @@ fn open_pipe(name: &str, access: u32) -> Result<HANDLE> {
 }
 
 /// Send an error frame back to the parent process.
-fn send_error(writer: &Arc<StdMutex<File>>, code: &str, message: String) -> Result<()> {
+fn send_error(
+    writer: &Arc<StdMutex<File>>,
+    stage: ErrorStage,
+    windows_error_code: Option<u32>,
+    message: String,
+) -> Result<()> {
     let msg = FramedMessage {
         version: IPC_PROTOCOL_VERSION,
         message: Message::Error {
             payload: ErrorPayload {
                 message,
-                code: code.to_string(),
+                stage,
+                windows_error_code,
             },
         },
     };
@@ -180,6 +191,15 @@ fn send_error(writer: &Arc<StdMutex<File>>, code: &str, message: String) -> Resu
         write_frame(&mut *guard, &msg)?;
     }
     Ok(())
+}
+
+fn windows_error_code(err: &anyhow::Error) -> Option<u32> {
+    err.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error)
+            .and_then(|code| u32::try_from(code).ok())
+    })
 }
 
 /// Read and validate the initial spawn request frame.
@@ -323,6 +343,11 @@ fn spawn_ipc_process(req: &SpawnRequest) -> Result<IpcSpawnedProcess> {
             &req.env,
             stdin_mode,
             StderrMode::Separate,
+            if req.command.get(1).is_some_and(|arg| arg == FS_HELPER_ARG) {
+                ConsoleMode::NoWindow
+            } else {
+                ConsoleMode::Inherit
+            },
             req.use_private_desktop,
             Some(log_dir.as_path()),
         )?;
@@ -528,7 +553,12 @@ pub fn main() -> Result<()> {
     let req = match read_spawn_request(&mut pipe_read) {
         Ok(v) => v,
         Err(err) => {
-            let _ = send_error(&pipe_write, "spawn_failed", err.to_string());
+            let _ = send_error(
+                &pipe_write,
+                ErrorStage::ReadSpawnRequest,
+                /*windows_error_code*/ None,
+                err.to_string(),
+            );
             return Err(err);
         }
     };
@@ -536,7 +566,12 @@ pub fn main() -> Result<()> {
     let ipc_spawn = match spawn_ipc_process(&req) {
         Ok(value) => value,
         Err(err) => {
-            let _ = send_error(&pipe_write, "spawn_failed", err.to_string());
+            let _ = send_error(
+                &pipe_write,
+                ErrorStage::SpawnChild,
+                windows_error_code(&err),
+                err.to_string(),
+            );
             return Err(err);
         }
     };
@@ -570,7 +605,12 @@ pub fn main() -> Result<()> {
     } else {
         anyhow::bail!("runner spawn_ready write failed: pipe_write lock poisoned");
     } {
-        let _ = send_error(&pipe_write, "spawn_failed", err.to_string());
+        let _ = send_error(
+            &pipe_write,
+            ErrorStage::WriteSpawnReady,
+            /*windows_error_code*/ None,
+            err.to_string(),
+        );
         return Err(err);
     }
     let log_dir_owned = log_dir.map(Path::to_path_buf);

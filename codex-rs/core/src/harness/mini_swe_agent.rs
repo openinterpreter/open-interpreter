@@ -55,7 +55,7 @@ pub(crate) fn inject_no_tool_call_format_error(stream: ResponseStream) -> Respon
                                     text: MINI_SWE_AGENT_NO_TOOL_CALL_ERROR.to_string(),
                                 }],
                                 phase: None,
-                                metadata: None,
+                                internal_chat_message_metadata_passthrough: None,
                             })))
                             .await
                             .is_err()
@@ -86,11 +86,13 @@ pub(crate) fn inject_no_tool_call_format_error(stream: ResponseStream) -> Respon
                 | Ok(ResponseEvent::OutputTextDelta(_))
                 | Ok(ResponseEvent::ToolCallInputDelta { .. })
                 | Ok(ResponseEvent::ReasoningSummaryDelta { .. })
+                | Ok(ResponseEvent::ReasoningSummaryDone { .. })
                 | Ok(ResponseEvent::ReasoningContentDelta { .. })
                 | Ok(ResponseEvent::ReasoningSummaryPartAdded { .. })
                 | Ok(ResponseEvent::RateLimits(_))
                 | Ok(ResponseEvent::ModelsEtag(_))
                 | Ok(ResponseEvent::TurnModerationMetadata(_))
+                | Ok(ResponseEvent::SafetyBuffering(_))
                 | Ok(ResponseEvent::OutputItemDone(_))
                 | Err(_) => {}
             }
@@ -285,12 +287,15 @@ fn build_messages(items: &[ResponseItem]) -> Result<Vec<Value>, serde_json::Erro
                 action,
                 ..
             } => {
-                let call_id = call_id.clone().or_else(|| id.clone()).ok_or_else(|| {
-                    serde_json::Error::io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "local_shell history item missing call id",
-                    ))
-                })?;
+                let call_id = call_id
+                    .clone()
+                    .or_else(|| id.as_ref().map(ToString::to_string))
+                    .ok_or_else(|| {
+                        serde_json::Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "local_shell history item missing call id",
+                        ))
+                    })?;
                 let arguments = match action {
                     LocalShellAction::Exec(exec) => json!({
                         "command": exec.command,
@@ -354,6 +359,7 @@ fn build_messages(items: &[ResponseItem]) -> Result<Vec<Value>, serde_json::Erro
             | ResponseItem::Compaction { .. }
             | ResponseItem::CompactionTrigger { .. }
             | ResponseItem::ContextCompaction { .. }
+            | ResponseItem::AdditionalTools { .. }
             | ResponseItem::Other => {}
         }
     }
@@ -557,7 +563,7 @@ fn plain_text_content(content: &[ContentItem]) -> Option<String> {
                 }
                 text.push_str(item_text);
             }
-            ContentItem::InputImage { .. } => {}
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {}
         }
     }
     (!text.is_empty()).then_some(text)
@@ -573,6 +579,8 @@ fn mini_swe_agent_tool_output_content(output: &FunctionCallOutputPayload) -> Str
             .filter_map(|item| match item {
                 FunctionCallOutputContentItem::InputText { text } => Some(text.as_str()),
                 FunctionCallOutputContentItem::InputImage { .. }
+                | FunctionCallOutputContentItem::InputAudio { .. }
+                | FunctionCallOutputContentItem::InputVideo { .. }
                 | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -597,7 +605,11 @@ mod tests {
             description: "bash".to_string(),
             strict: false,
             defer_loading: None,
-            parameters: codex_tools::JsonSchema::object(BTreeMap::new(), None, None),
+            parameters: codex_tools::JsonSchema::object(
+                BTreeMap::new(),
+                /*required*/ None,
+                /*additional_properties*/ None,
+            ),
             output_schema: None,
         })
     }
@@ -635,14 +647,16 @@ mod tests {
     fn first_user_message_is_wrapped_with_mini_prompt() {
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
-                id: Some("user".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "user".to_string(),
+                )),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "do the task".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             }],
             tools: vec![test_bash_tool()],
             ..Prompt::default()
@@ -672,33 +686,39 @@ mod tests {
         let prompt = Prompt {
             input: vec![
                 ResponseItem::Message {
-                    id: Some("user".to_string()),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "user".to_string(),
+                    )),
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
                         text: "do the task".to_string(),
                     }],
                     phase: None,
 
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
-                    id: Some("assistant".to_string()),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "assistant".to_string(),
+                    )),
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "I will run pwd.\n\n```bash\npwd\n```".to_string(),
                     }],
                     phase: None,
 
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCall {
-                    id: Some("call".to_string()),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "call".to_string(),
+                    )),
                     name: "bash".to_string(),
                     namespace: None,
                     arguments: "{\"command\":\"pwd\"}".to_string(),
                     call_id: "bash:0".to_string(),
 
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
@@ -707,7 +727,7 @@ mod tests {
                         "{\n  \"returncode\": 0,\n  \"output\": \"/workspace\\n\"\n}".to_string(),
                     ),
 
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             ],
             tools: vec![test_bash_tool()],
@@ -732,14 +752,16 @@ mod tests {
     #[test]
     fn detects_terminal_submit_call() {
         let item = ResponseItem::FunctionCall {
-            id: Some("call".to_string()),
+            id: Some(codex_protocol::ResponseItemId::from_server(
+                "call".to_string(),
+            )),
             name: "bash".to_string(),
             namespace: None,
             arguments: "{\"command\":\" echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\\n\"}"
                 .to_string(),
             call_id: "bash:0".to_string(),
 
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         };
 
         assert!(is_terminal_submit_call(&item));
@@ -754,14 +776,16 @@ mod tests {
             .expect("send created");
         tx_event
             .send(Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
-                id: Some("assistant".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "assistant".to_string(),
+                )),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "I forgot the tool.".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             })))
             .await
             .expect("send message");
@@ -812,27 +836,31 @@ mod tests {
             .expect("send created");
         tx_event
             .send(Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
-                id: Some("assistant".to_string()),
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "assistant".to_string(),
+                )),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "Running pwd.".to_string(),
                 }],
                 phase: None,
 
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             })))
             .await
             .expect("send message");
         tx_event
             .send(Ok(ResponseEvent::OutputItemDone(
                 ResponseItem::FunctionCall {
-                    id: Some("call".to_string()),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "call".to_string(),
+                    )),
                     name: "bash".to_string(),
                     namespace: None,
                     arguments: "{\"command\":\"pwd\"}".to_string(),
                     call_id: "bash:0".to_string(),
 
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             )))
             .await

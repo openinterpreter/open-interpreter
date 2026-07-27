@@ -6,6 +6,50 @@ use std::num::NonZeroU64;
 use tempfile::tempdir;
 
 #[test]
+fn openai_provider_version_header_uses_codex_compatibility_version() {
+    let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    let version = provider
+        .http_headers
+        .as_ref()
+        .and_then(|headers| headers.get("version"));
+
+    assert_eq!(
+        version.map(String::as_str),
+        Some(codex_product_info::Product::current().codex_compatibility_version())
+    );
+}
+
+#[test]
+fn kimi_and_moonshot_providers_default_to_current_kimi_code_harness() {
+    for (provider_id, name, base_url, model) in [
+        (
+            "kimi-for-coding",
+            "Kimi For Coding",
+            "https://api.kimi.com/coding/v1",
+            "k3",
+        ),
+        (
+            "moonshotai",
+            "Moonshot AI",
+            "https://api.moonshot.ai/v1",
+            "kimi-k3",
+        ),
+    ] {
+        let provider = ModelProviderInfo {
+            name: name.to_string(),
+            base_url: Some(base_url.to_string()),
+            wire_api: WireApi::Chat,
+            ..ModelProviderInfo::default()
+        };
+
+        assert_eq!(
+            default_harness_for_provider_model(provider_id, &provider, Some(model)),
+            Some("kimi-code")
+        );
+    }
+}
+
+#[test]
 fn test_deserialize_ollama_model_provider_toml() {
     let azure_provider_toml = r#"
 name = "Ollama"
@@ -149,6 +193,15 @@ fn test_personal_access_token_uses_chatgpt_codex_base_url() {
 }
 
 #[test]
+fn test_header_auth_uses_chatgpt_codex_base_url() {
+    let api_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+        .to_api_provider(Some(AuthMode::Headers))
+        .expect("OpenAI provider should build API provider");
+
+    assert_eq!(api_provider.base_url, CHATGPT_CODEX_BASE_URL);
+}
+
+#[test]
 fn test_supports_remote_compaction_for_azure_name() {
     let provider = ModelProviderInfo {
         name: "Azure".into(),
@@ -196,6 +249,31 @@ fn test_supports_remote_compaction_for_non_openai_non_azure_provider() {
     };
 
     assert!(!provider.supports_remote_compaction());
+}
+
+#[test]
+fn test_uses_openai_actor_authorization() {
+    let mut provider = ModelProviderInfo {
+        http_headers: Some(maplit::hashmap! {
+            "X-OpenAI-Actor-Authorization".to_string() => "actor-token".to_string(),
+        }),
+        ..ModelProviderInfo::default()
+    };
+    assert!(provider.uses_openai_actor_authorization());
+
+    provider.http_headers = None;
+    assert!(!provider.uses_openai_actor_authorization());
+
+    provider.http_headers = Some(maplit::hashmap! {
+        OPENAI_ACTOR_AUTHORIZATION_HEADER.to_string() => "  ".to_string(),
+    });
+    assert!(!provider.uses_openai_actor_authorization());
+
+    provider.http_headers = Some(maplit::hashmap! {
+        OPENAI_ACTOR_AUTHORIZATION_HEADER.to_string() => "actor-token".to_string(),
+    });
+    provider.requires_openai_auth = true;
+    assert!(!provider.uses_openai_actor_authorization());
 }
 
 #[test]
@@ -254,7 +332,7 @@ fn test_create_amazon_bedrock_provider() {
         ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
         ModelProviderInfo {
             name: "Amazon Bedrock".to_string(),
-            base_url: Some("https://bedrock-mantle.us-east-1.api.aws/openai/v1".to_string()),
+            base_url: None,
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
@@ -278,6 +356,19 @@ fn test_create_amazon_bedrock_provider() {
             supports_websockets: false,
         }
     );
+}
+
+fn provider_auth_for_test() -> ModelProviderAuthInfo {
+    ModelProviderAuthInfo {
+        command: "token-fetcher".to_string(),
+        args: vec!["fetch".to_string()],
+        timeout_ms: NonZeroU64::new(5_000).expect("timeout should be non-zero"),
+        refresh_interval_ms: 300_000,
+        cwd: std::env::current_dir()
+            .expect("current directory should be available")
+            .try_into()
+            .expect("current directory should be absolute"),
+    }
 }
 
 #[test]
@@ -390,6 +481,49 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_profile_override
 }
 
 #[test]
+fn test_merge_configured_model_providers_applies_amazon_bedrock_transport_overrides() {
+    let auth = provider_auth_for_test();
+    let configured_model_providers = std::collections::HashMap::from([(
+        AMAZON_BEDROCK_PROVIDER_ID.to_string(),
+        ModelProviderInfo {
+            base_url: Some("https://proxy.example.com/v1".to_string()),
+            auth: Some(auth.clone()),
+            aws: Some(ModelProviderAwsAuthInfo {
+                profile: Some("codex-bedrock".to_string()),
+                region: Some("us-west-2".to_string()),
+            }),
+            http_headers: Some(maplit::hashmap! {
+                "x-example-header".to_string() => "value".to_string(),
+            }),
+            ..ModelProviderInfo::default()
+        },
+    )]);
+
+    let mut expected = built_in_model_providers(/*openai_base_url*/ None);
+    let expected_provider = expected
+        .get_mut(AMAZON_BEDROCK_PROVIDER_ID)
+        .expect("Amazon Bedrock provider should be built in");
+    expected_provider.base_url = Some("https://proxy.example.com/v1".to_string());
+    expected_provider.auth = Some(auth);
+    expected_provider.aws = Some(ModelProviderAwsAuthInfo {
+        profile: Some("codex-bedrock".to_string()),
+        region: Some("us-west-2".to_string()),
+    });
+    expected_provider
+        .http_headers
+        .get_or_insert_default()
+        .insert("x-example-header".to_string(), "value".to_string());
+
+    assert_eq!(
+        merge_configured_model_providers(
+            built_in_model_providers(/*openai_base_url*/ None),
+            configured_model_providers,
+        ),
+        Ok(expected)
+    );
+}
+
+#[test]
 fn test_merge_configured_model_providers_rejects_amazon_bedrock_non_default_fields() {
     let configured_model_providers = std::collections::HashMap::from([(
         AMAZON_BEDROCK_PROVIDER_ID.to_string(),
@@ -409,7 +543,7 @@ fn test_merge_configured_model_providers_rejects_amazon_bedrock_non_default_fiel
             configured_model_providers,
         ),
         Err(
-            "model_providers.amazon-bedrock only supports changing `aws.profile` and `aws.region`; other non-default provider fields are not supported"
+            "model_providers.amazon-bedrock only supports changing `base_url`, `auth`, `http_headers`, `aws.profile`, and `aws.region`; other non-default provider fields are not supported"
                 .to_string()
         )
     );

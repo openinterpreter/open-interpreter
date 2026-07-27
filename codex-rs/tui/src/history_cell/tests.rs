@@ -15,11 +15,13 @@ use codex_otel::RuntimeMetricTotals;
 use codex_otel::RuntimeMetricsSummary;
 use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
+use codex_protocol::error::UnexpectedResponseError;
 use codex_protocol::parse_command::ParsedCommand;
 use dirs::home_dir;
 use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use reqwest::StatusCode;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -347,10 +349,10 @@ fn composite_cell_preserves_child_web_links() {
 
     assert_eq!(
         lines[2].hyperlinks,
-        vec![crate::terminal_hyperlinks::TerminalHyperlink {
-            columns: 0..destination.len(),
-            destination: destination.to_string(),
-        }]
+        vec![crate::terminal_hyperlinks::TerminalHyperlink::web(
+            /*columns*/ 0..destination.len(),
+            destination.to_string(),
+        )]
     );
 }
 
@@ -562,8 +564,8 @@ fn final_message_separator_hides_short_worked_label_and_includes_runtime_metrics
         responses_api_inference_time_ms: 1_940,
         responses_api_engine_iapi_ttft_ms: 410,
         responses_api_engine_service_ttft_ms: 460,
-        responses_api_engine_iapi_tbt_ms: 1_180,
-        responses_api_engine_service_tbt_ms: 1_240,
+        responses_api_engine_iapi_tbt_ms: 1_180.0,
+        responses_api_engine_service_tbt_ms: 1_240.0,
         turn_ttft_ms: 0,
         turn_ttfm_ms: 0,
     };
@@ -581,6 +583,17 @@ fn final_message_separator_hides_short_worked_label_and_includes_runtime_metrics
     assert!(rendered[0].contains("Responses API inference: 1.9s"));
     assert!(rendered[0].contains("TTFT: 410ms (iapi) 460ms (service)"));
     assert!(rendered[0].contains("TBT: 1.2s (iapi) 1.2s (service)"));
+}
+
+#[test]
+fn runtime_metrics_label_rounds_fractional_tbt_milliseconds() {
+    let summary = RuntimeMetricsSummary {
+        responses_api_engine_iapi_tbt_ms: 2.450638,
+        responses_api_engine_service_tbt_ms: 5.267279,
+        ..RuntimeMetricsSummary::default()
+    };
+
+    insta::assert_snapshot!(runtime_metrics_label(summary).expect("TBT label"), @"TBT: 2ms (iapi) 5ms (service)");
 }
 
 #[test]
@@ -698,6 +711,13 @@ fn cyber_policy_error_event_snapshot() {
 }
 
 #[test]
+fn safety_access_block_event_snapshot() {
+    let cell = new_safety_access_block_event();
+    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
 fn cyber_policy_error_event_narrow_snapshot() {
     let cell = new_cyber_policy_error_event();
     let rendered = render_lines(&cell.display_lines(/*width*/ 36)).join("\n");
@@ -749,6 +769,31 @@ fn error_event_oversized_input_snapshot() {
         "Message exceeds the maximum length of 1048576 characters (1048577 provided).".to_string(),
     );
     let rendered = render_lines(&cell.display_lines(/*width*/ 120)).join("\n");
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
+fn error_event_bedrock_expired_signature_snapshot() {
+    let error = UnexpectedResponseError {
+        status: StatusCode::UNAUTHORIZED,
+        body: "Signature expired: 20260609T133205Z is now earlier than 20260614T062525Z \
+(20260614T063025Z - 5 min.)"
+            .to_string(),
+        user_message: Some(
+            "Amazon Bedrock rejected the request because its AWS signature has expired. \
+Refresh your AWS credentials and retry. If `AWS_BEARER_TOKEN_BEDROCK` is set, update or \
+unset it, then restart Codex"
+                .to_string(),
+        ),
+        url: Some("https://bedrock-mantle.us-east-2.api.aws/openai/v1/responses".to_string()),
+        cf_ray: None,
+        request_id: None,
+        identity_authorization_error: None,
+        identity_error_code: None,
+    };
+    let cell = new_error_event(error.to_string());
+    let rendered = render_lines(&cell.display_lines(/*width*/ 100)).join("\n");
+
     insta::assert_snapshot!(rendered);
 }
 
@@ -1095,21 +1140,18 @@ fn standalone_unix_update_available_history_cell_snapshot() {
 }
 
 #[test]
-fn open_interpreter_standalone_unix_update_available_history_cell_snapshot() {
-    let cell = UpdateAvailableHistoryCell::new_with_source(
-        "9.9.9".to_string(),
-        Some(UpdateAction::StandaloneUnix),
-        crate::update_action::ProductUpdateSource::OpenInterpreter,
-    );
-    let rendered = render_lines(&cell.display_lines(/*width*/ 160)).join("\n");
+fn standalone_windows_update_available_history_cell_snapshot() {
+    let cell =
+        UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::StandaloneWindows));
+    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
 
     insta::assert_snapshot!(rendered);
 }
 
 #[test]
-fn standalone_windows_update_available_history_cell_snapshot() {
+fn pnpm_update_available_history_cell_snapshot() {
     let cell =
-        UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::StandaloneWindows));
+        UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::PnpmGlobalLatest));
     let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
 
     insta::assert_snapshot!(rendered);
@@ -1494,7 +1536,6 @@ fn session_header_includes_reasoning_level_when_present() {
         /*show_fast_status*/ true,
         std::env::temp_dir(),
         "test",
-        codex_product_info::Product::Codex,
     );
 
     let lines = render_lines(&cell.display_lines(/*width*/ 80));
@@ -1515,7 +1556,6 @@ fn session_header_hides_fast_status_when_disabled() {
         /*show_fast_status*/ false,
         std::env::temp_dir(),
         "test",
-        codex_product_info::Product::Codex,
     );
 
     let lines = render_lines(&cell.display_lines(/*width*/ 80));
@@ -1540,78 +1580,11 @@ fn session_header_indicates_yolo_mode() {
         /*show_fast_status*/ false,
         test_path_buf("/tmp/project").abs().to_path_buf(),
         "test",
-        codex_product_info::Product::Codex,
     )
     .with_yolo_mode(/*yolo_mode*/ true);
 
     let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
     insta::assert_snapshot!(rendered);
-}
-
-#[test]
-#[cfg_attr(
-    target_os = "windows",
-    ignore = "snapshot path rendering differs on Windows"
-)]
-fn open_interpreter_session_header_uses_product_name_without_border() {
-    let cell = SessionHeaderHistoryCell::new(
-        "gpt-5".to_string(),
-        /*reasoning_effort*/ None,
-        /*show_fast_status*/ false,
-        test_path_buf("/tmp/project").abs().to_path_buf(),
-        "test",
-        codex_product_info::Product::OpenInterpreter,
-    );
-
-    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
-    assert!(!rendered.contains(">_"));
-    assert!(!rendered.contains("model:"));
-    assert!(!rendered.contains("directory:"));
-    insta::assert_snapshot!(rendered);
-}
-
-#[test]
-fn open_interpreter_source_build_session_header_shows_debug_version() {
-    let cell = SessionHeaderHistoryCell::new(
-        "gpt-5".to_string(),
-        /*reasoning_effort*/ None,
-        /*show_fast_status*/ false,
-        test_cwd(),
-        "0.0.0",
-        codex_product_info::Product::OpenInterpreter,
-    );
-
-    let lines = render_lines(&cell.display_lines(/*width*/ 80));
-    let rendered = lines.join("\n");
-    assert!(rendered.contains("Open Interpreter (v0.0.0)"));
-    assert!(!rendered.contains(">_"));
-    assert!(!rendered.contains("model:"));
-    assert!(!rendered.contains("directory:"));
-}
-
-#[test]
-fn open_interpreter_tooltip_copy_filters_model_promos() {
-    let tip = super::session::productize_tip(
-        "GPT-5.5 is now available in Codex. OpenAI Codex keeps going.".to_string(),
-        codex_product_info::Product::OpenInterpreter,
-    );
-
-    assert_eq!(tip, None);
-}
-
-#[test]
-fn open_interpreter_tooltip_copy_replaces_generic_codex_branding() {
-    let tip = super::session::productize_tip(
-        "Use /permissions to control when Codex asks for confirmation.".to_string(),
-        codex_product_info::Product::OpenInterpreter,
-    );
-
-    assert_eq!(
-        tip,
-        Some(
-            "Use /permissions to control when Open Interpreter asks for confirmation.".to_string()
-        )
-    );
 }
 
 #[test]
@@ -1726,34 +1699,30 @@ fn coalesces_reads_across_multiple_calls() {
     // Call 1: Search only
     cell.complete_call("c1", CommandOutput::default(), Duration::from_millis(1));
     // Call 2: Read A
-    cell = cell
-        .with_added_call(
-            "c2".into(),
-            vec!["bash".into(), "-lc".into(), "echo".into()],
-            vec![ParsedCommand::Read {
-                name: "shimmer.rs".into(),
-                cmd: "cat shimmer.rs".into(),
-                path: "shimmer.rs".into(),
-            }],
-            ExecCommandSource::Agent,
-            /*interaction_input*/ None,
-        )
-        .unwrap();
+    assert!(cell.add_call(
+        "c2".into(),
+        vec!["bash".into(), "-lc".into(), "echo".into()],
+        vec![ParsedCommand::Read {
+            name: "shimmer.rs".into(),
+            cmd: "cat shimmer.rs".into(),
+            path: "shimmer.rs".into(),
+        }],
+        ExecCommandSource::Agent,
+        /*interaction_input*/ None,
+    ));
     cell.complete_call("c2", CommandOutput::default(), Duration::from_millis(1));
     // Call 3: Read B
-    cell = cell
-        .with_added_call(
-            "c3".into(),
-            vec!["bash".into(), "-lc".into(), "echo".into()],
-            vec![ParsedCommand::Read {
-                name: "status_indicator_widget.rs".into(),
-                cmd: "cat status_indicator_widget.rs".into(),
-                path: "status_indicator_widget.rs".into(),
-            }],
-            ExecCommandSource::Agent,
-            /*interaction_input*/ None,
-        )
-        .unwrap();
+    assert!(cell.add_call(
+        "c3".into(),
+        vec!["bash".into(), "-lc".into(), "echo".into()],
+        vec![ParsedCommand::Read {
+            name: "status_indicator_widget.rs".into(),
+            cmd: "cat status_indicator_widget.rs".into(),
+            path: "status_indicator_widget.rs".into(),
+        }],
+        ExecCommandSource::Agent,
+        /*interaction_input*/ None,
+    ));
     cell.complete_call("c3", CommandOutput::default(), Duration::from_millis(1));
 
     let lines = cell.display_lines(/*width*/ 80);
@@ -1943,11 +1912,7 @@ fn stderr_tail_more_than_five_lines_snapshot() {
         .join("\n");
     cell.complete_call(
         &call_id,
-        CommandOutput {
-            exit_code: 1,
-            formatted_output: String::new(),
-            aggregated_output: stderr,
-        },
+        CommandOutput::new(/*exit_code*/ 1, stderr),
         Duration::from_millis(1),
     );
 
@@ -1991,11 +1956,7 @@ fn ran_cell_multiline_with_stderr_snapshot() {
     let stderr = "error: first line on stderr\nerror: second line on stderr".to_string();
     cell.complete_call(
         &call_id,
-        CommandOutput {
-            exit_code: 1,
-            formatted_output: String::new(),
-            aggregated_output: stderr,
-        },
+        CommandOutput::new(/*exit_code*/ 1, stderr),
         Duration::from_millis(5),
     );
 
@@ -2016,7 +1977,7 @@ fn ran_cell_multiline_with_stderr_snapshot() {
 }
 #[test]
 fn user_history_cell_wraps_and_prefixes_each_line_snapshot() {
-    let msg = "one two three four five six seven";
+    let msg = "_count_r\x1b[13;2:3uows";
     let cell = UserHistoryCell {
         message: msg.to_string(),
         text_elements: Vec::new(),
@@ -2029,6 +1990,7 @@ fn user_history_cell_wraps_and_prefixes_each_line_snapshot() {
     let lines = cell.display_lines(width);
     let rendered = render_lines(&lines).join("\n");
 
+    assert_eq!(render_lines(&cell.raw_lines()), ["_count_rows"]);
     insta::assert_snapshot!(rendered);
 }
 
@@ -2046,29 +2008,6 @@ fn user_history_cell_renders_remote_image_urls() {
     assert!(rendered.contains("[Image #1]"));
     assert!(rendered.contains("describe these"));
     insta::assert_snapshot!(rendered);
-}
-
-#[test]
-fn user_history_cell_uses_gentle_separators_without_blank_padding() {
-    let cell = UserHistoryCell {
-        message: "hello".to_string(),
-        text_elements: Vec::new(),
-        local_image_paths: Vec::new(),
-        remote_image_urls: Vec::new(),
-    };
-
-    let rendered = render_lines(&cell.display_lines(/*width*/ 12));
-
-    assert_eq!(rendered.first().map(String::as_str), Some("────────────"));
-    assert_eq!(rendered.last().map(String::as_str), Some("────────────"));
-    assert_eq!(
-        rendered
-            .iter()
-            .rev()
-            .take_while(|line| line.trim().is_empty())
-            .count(),
-        0
-    );
 }
 
 #[test]
@@ -2142,7 +2081,7 @@ fn user_history_cell_trims_trailing_blank_message_lines() {
         .rev()
         .take_while(|line| line.trim().is_empty())
         .count();
-    assert_eq!(trailing_blank_count, 0);
+    assert_eq!(trailing_blank_count, 1);
     assert!(rendered.iter().any(|line| line.contains("line one")));
 }
 
@@ -2165,7 +2104,7 @@ fn user_history_cell_trims_trailing_blank_message_lines_with_text_elements() {
         .rev()
         .take_while(|line| line.trim().is_empty())
         .count();
-    assert_eq!(trailing_blank_count, 0);
+    assert_eq!(trailing_blank_count, 1);
     assert!(rendered.iter().any(|line| line.contains("tokenized")));
 }
 
@@ -2309,7 +2248,7 @@ fn plan_update_does_not_split_url_like_tokens_in_note_or_step() {
 #[test]
 fn reasoning_summary_block() {
     let cell = new_reasoning_summary_block(
-        "**High level reasoning**\n\nDetailed reasoning goes here.".to_string(),
+        vec!["**High level reasoning**\n\nDetailed reasoning goes here.".to_string()],
         &test_cwd(),
     );
 
@@ -2367,8 +2306,10 @@ fn reasoning_summary_height_matches_wrapped_rendering_for_url_like_content() {
 
 #[test]
 fn reasoning_summary_block_returns_reasoning_cell_when_feature_disabled() {
-    let cell =
-        new_reasoning_summary_block("Detailed reasoning goes here.".to_string(), &test_cwd());
+    let cell = new_reasoning_summary_block(
+        vec!["Detailed reasoning goes here.".to_string()],
+        &test_cwd(),
+    );
 
     let rendered = render_transcript(cell.as_ref());
     assert_eq!(rendered, vec!["• Detailed reasoning goes here."]);
@@ -2378,9 +2319,8 @@ fn reasoning_summary_block_returns_reasoning_cell_when_feature_disabled() {
 async fn reasoning_summary_block_respects_config_overrides() {
     let mut config = test_config().await;
     config.model = Some("gpt-3.5-turbo".to_string());
-    config.model_supports_reasoning_summaries = Some(true);
     let cell = new_reasoning_summary_block(
-        "**High level reasoning**\n\nDetailed reasoning goes here.".to_string(),
+        vec!["**High level reasoning**\n\nDetailed reasoning goes here.".to_string()],
         &test_cwd(),
     );
 
@@ -2391,7 +2331,7 @@ async fn reasoning_summary_block_respects_config_overrides() {
 #[test]
 fn reasoning_summary_block_falls_back_when_header_is_missing() {
     let cell = new_reasoning_summary_block(
-        "**High level reasoning without closing".to_string(),
+        vec!["**High level reasoning without closing".to_string()],
         &test_cwd(),
     );
 
@@ -2402,7 +2342,7 @@ fn reasoning_summary_block_falls_back_when_header_is_missing() {
 #[test]
 fn reasoning_summary_block_falls_back_when_summary_is_missing() {
     let cell = new_reasoning_summary_block(
-        "**High level reasoning without closing**".to_string(),
+        vec!["**High level reasoning without closing**".to_string()],
         &test_cwd(),
     );
 
@@ -2410,7 +2350,7 @@ fn reasoning_summary_block_falls_back_when_summary_is_missing() {
     assert_eq!(rendered, vec!["• High level reasoning without closing"]);
 
     let cell = new_reasoning_summary_block(
-        "**High level reasoning without closing**\n\n  ".to_string(),
+        vec!["**High level reasoning without closing**\n\n  ".to_string()],
         &test_cwd(),
     );
 
@@ -2421,7 +2361,7 @@ fn reasoning_summary_block_falls_back_when_summary_is_missing() {
 #[test]
 fn reasoning_summary_block_splits_header_and_summary_when_present() {
     let cell = new_reasoning_summary_block(
-        "**High level plan**\n\nWe should fix the bug next.".to_string(),
+        vec!["**High level plan**\n\nWe should fix the bug next.".to_string()],
         &test_cwd(),
     );
 
@@ -2430,6 +2370,100 @@ fn reasoning_summary_block_splits_header_and_summary_when_present() {
 
     let rendered_transcript = render_transcript(cell.as_ref());
     assert_eq!(rendered_transcript, vec!["• We should fix the bug next."]);
+}
+
+#[test]
+fn reasoning_summary_block_hides_empty_html_comment_parts() {
+    let cell = new_reasoning_summary_block(
+        vec![
+            "**Checking the first thing**\n\n<!-- -->".to_string(),
+            "**Checking the second thing**\n\n<!-- -->".to_string(),
+        ],
+        &test_cwd(),
+    );
+
+    let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
+    insta::assert_snapshot!(rendered_display.join("\n"), @"");
+
+    let rendered_transcript = render_transcript(cell.as_ref());
+    assert_eq!(rendered_transcript, Vec::<String>::new());
+}
+
+#[test]
+fn reasoning_summary_block_preserves_bold_content_after_empty_html_comment_part() {
+    let cell = new_reasoning_summary_block(
+        vec![
+            "**Status**\n\n<!-- -->".to_string(),
+            "**Important conclusion**".to_string(),
+            "<!-- -->".to_string(),
+        ],
+        &test_cwd(),
+    );
+
+    let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
+    insta::assert_snapshot!(rendered_display.join("\n"), @"• Important conclusion");
+
+    let rendered_transcript = render_transcript(cell.as_ref());
+    assert_eq!(rendered_transcript, vec!["• Important conclusion"]);
+
+    let cell = new_reasoning_summary_block(
+        vec![
+            "**Status**\n\n<!-- -->".to_string(),
+            "**Result:** keep **this**".to_string(),
+        ],
+        &test_cwd(),
+    );
+
+    let rendered_transcript = render_transcript(cell.as_ref());
+    assert_eq!(rendered_transcript, vec!["• Result: keep this"]);
+}
+
+#[test]
+fn reasoning_summary_block_strips_header_after_leading_empty_part() {
+    let cell = new_reasoning_summary_block(
+        vec![
+            "**Status**\n\n<!-- -->".to_string(),
+            "**Checking tests**\n\nTests passed".to_string(),
+        ],
+        &test_cwd(),
+    );
+
+    let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
+    insta::assert_snapshot!(rendered_display.join("\n"), @"• Tests passed");
+
+    let rendered_transcript = render_transcript(cell.as_ref());
+    assert_eq!(rendered_transcript, vec!["• Tests passed"]);
+}
+
+#[test]
+fn reasoning_summary_block_drops_empty_part_after_real_content() {
+    let cell = new_reasoning_summary_block(
+        vec![
+            "**Plan**\n\ndone".to_string(),
+            "**Checking tests**\n\n<!-- -->".to_string(),
+        ],
+        &test_cwd(),
+    );
+
+    let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
+    insta::assert_snapshot!(rendered_display.join("\n"), @"• done");
+
+    let rendered_transcript = render_transcript(cell.as_ref());
+    assert_eq!(rendered_transcript, vec!["• done"]);
+}
+
+#[test]
+fn reasoning_summary_block_preserves_literal_html_comment() {
+    let cell = new_reasoning_summary_block(
+        vec!["**Plan**\n\nUse `<!-- -->` in JSX.".to_string()],
+        &test_cwd(),
+    );
+
+    let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
+    insta::assert_snapshot!(rendered_display.join("\n"), @"• Use <!-- --> in JSX.");
+
+    let rendered_transcript = render_transcript(cell.as_ref());
+    assert_eq!(rendered_transcript, vec!["• Use <!-- --> in JSX."]);
 }
 
 #[test]

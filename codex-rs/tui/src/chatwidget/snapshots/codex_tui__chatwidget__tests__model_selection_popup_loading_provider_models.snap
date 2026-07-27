@@ -1,0 +1,19 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: loading_popup
+---
+  Select Provider
+  Choose a provider for the next chat.
+
+  Filter providers
+› OpenAI (current)  Sign in with ChatGPT
+  Anthropic         Use ANTHROPIC_API_KEY or paste a key | Harness: claude-
+                    code
+  OpenRouter        Use OPENROUTER_API_KEY or paste a key
+  Groq              Use GROQ_API_KEY or paste a key
+  GitHub Models     Use GITHUB_TOKEN or paste a key
+  OpenCode Zen      Use OPENCODE_API_KEY or paste a key
+  OpenCode Go       Use OPENCODE_API_KEY or paste a key
+  GitHub Copilot    Use GITHUB_TOKEN or paste a key
+
+  Type to filter • Enter to continue • Esc to dismiss

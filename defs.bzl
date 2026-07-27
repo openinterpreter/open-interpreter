@@ -110,8 +110,9 @@ def _windows_runfile_env_exports(ctx):
     lines = []
     for runfile_dep, env_var in ctx.attr.runfile_env.items():
         runfile = _runfile_env_file(runfile_dep)
-        lines.append('call :resolve_runfile {} "{}"'.format(env_var, _runfile_logical_path(runfile)))
+        lines.append('call :resolve_runfile "{}"'.format(_runfile_logical_path(runfile)))
         lines.append("if errorlevel 1 exit /b 1")
+        lines.append('set "{}=!resolve_runfile_result!"'.format(env_var))
     return "\n".join(lines)
 
 def _runfile_env_file(target):
@@ -193,6 +194,7 @@ def codex_rust_crate(
         deps_extra = [],
         integration_compile_data_extra = [],
         integration_test_args = [],
+        unit_test_args = [],
         integration_test_timeout = None,
         test_data_extra = [],
         test_shard_counts = {},
@@ -229,6 +231,7 @@ def codex_rust_crate(
             Typically only needed when features add additional deps.
         integration_compile_data_extra: Extra compile_data for integration tests.
         integration_test_args: Optional args for integration test binaries.
+        unit_test_args: Optional args for the unit test binary.
         integration_test_timeout: Optional Bazel timeout for integration test
             targets generated from `tests/*.rs`.
         test_data_extra: Extra runtime data for tests.
@@ -346,6 +349,8 @@ def codex_rust_crate(
         )
 
         unit_test_kwargs = {}
+        if unit_test_args:
+            unit_test_kwargs["args"] = unit_test_args
         if unit_test_timeout:
             unit_test_kwargs["timeout"] = unit_test_timeout
         if unit_test_shard_count:
@@ -538,7 +543,7 @@ def codex_rust_crate(
             wine_exec_server = wine_test_name + "-windows-exec-server"
             foreign_platform_binary(
                 name = wine_exec_server,
-                binary = "//codex-rs/exec-server/testing:windows-exec-server",
+                binary = "//codex-rs/exec-server/testing:exec-server",
                 extra_rustc_flags = WINDOWS_GNULLVM_RUSTC_LINK_FLAGS,
                 platform = "//:windows_x86_64_gnullvm",
                 tags = ["manual"],
@@ -571,7 +576,9 @@ def codex_rust_crate(
                 test_bin = "//codex-rs/exec-server/testing:wine-exec-test-runner",
                 workspace_root_marker = "//codex-rs/utils/cargo-bin:repo_root.marker",
                 target_compatible_with = WINE_TEST_TARGET_COMPATIBLE_WITH,
-                tags = test_tags + ["manual"],
+                # This wrapper has no Rust sources and transitions a data
+                # dependency to a Windows toolchain the lint does not register.
+                tags = test_tags + ["no-argument-comment-lint"],
                 **wine_test_kwargs
             )
 

@@ -342,6 +342,15 @@ pub enum ElicitationRequest {
         message: String,
         requested_schema: JsonValue,
     },
+    #[serde(rename = "openai/form")]
+    #[ts(rename = "openai/form")]
+    OpenAiForm {
+        #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional, rename = "_meta")]
+        meta: Option<JsonValue>,
+        message: String,
+        requested_schema: JsonValue,
+    },
     Url {
         #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
         #[ts(optional, rename = "_meta")]
@@ -350,14 +359,6 @@ pub enum ElicitationRequest {
         url: String,
         elicitation_id: String,
     },
-}
-
-impl ElicitationRequest {
-    pub fn message(&self) -> &str {
-        match self {
-            Self::Form { message, .. } | Self::Url { message, .. } => message,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]

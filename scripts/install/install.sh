@@ -13,6 +13,7 @@ RELEASE_TAG_PREFIX="${CODEX_RELEASE_TAG_PREFIX:-rust-v}"
 
 BIN_DIR="${OPEN_INTERPRETER_INSTALL_DIR:-${CODEX_INSTALL_DIR:-$HOME/.local/bin}}"
 BIN_PATH="$BIN_DIR/$COMMAND_NAME"
+CODE_MODE_HOST_BIN_PATH="$BIN_DIR/codex-code-mode-host"
 CODEX_HOME_DIR="${INTERPRETER_HOME:-${CODEX_HOME:-$HOME/.openinterpreter}}"
 STANDALONE_ROOT="$CODEX_HOME_DIR/packages/standalone"
 RELEASES_DIR="$STANDALONE_ROOT/releases"
@@ -130,6 +131,113 @@ download_text() {
   exit 1
 }
 
+parse_release_metadata() {
+  # Bound awk's record size so compact, single-line JSON stays fast on every
+  # supported awk implementation. JSON strings cannot contain literal newlines,
+  # so the record boundaries inserted by fold do not change the document.
+  LC_ALL=C fold -b -w 4096 | LC_ALL=C awk '
+    function finish_string(value) {
+      if (object_depth == 1 && key == "tag_name") {
+        print "tag_name\t" value
+      } else if (object_depth == asset_object_depth) {
+        if (key == "name") {
+          asset_name = value
+        } else if (key == "digest") {
+          asset_digest = value
+        }
+      }
+
+      expecting_value = 0
+      key = ""
+    }
+
+    {
+      for (i = 1; i <= length($0); i++) {
+        char = substr($0, i, 1)
+
+        if (in_string) {
+          if (escaped) {
+            token = token "\\" char
+            escaped = 0
+          } else if (char == "\\") {
+            escaped = 1
+          } else if (char == "\"") {
+            in_string = 0
+            if (string_is_value) {
+              finish_string(token)
+            } else {
+              pending_key = token
+            }
+          } else {
+            token = token char
+          }
+          continue
+        }
+
+        if (char == "\"") {
+          in_string = 1
+          token = ""
+          escaped = 0
+          string_is_value = expecting_value
+        } else if (char == ":" && pending_key != "") {
+          key = pending_key
+          pending_key = ""
+          expecting_value = 1
+        } else if (char == "{") {
+          object_depth++
+          if (assets_array_depth != 0 &&
+              array_depth == assets_array_depth &&
+              asset_object_depth == 0) {
+            asset_object_depth = object_depth
+            asset_name = ""
+            asset_digest = ""
+          }
+          expecting_value = 0
+          key = ""
+        } else if (char == "}") {
+          if (object_depth == asset_object_depth) {
+            if (asset_name != "" && asset_digest != "") {
+              print "asset\t" asset_name "\t" asset_digest
+            }
+            asset_object_depth = 0
+            asset_name = ""
+            asset_digest = ""
+          }
+          object_depth--
+          expecting_value = 0
+          key = ""
+          pending_key = ""
+        } else if (char == "[") {
+          array_depth++
+          if (expecting_value && key == "assets" && object_depth == 1) {
+            assets_array_depth = array_depth
+          }
+          expecting_value = 0
+          key = ""
+        } else if (char == "]") {
+          if (array_depth == assets_array_depth) {
+            assets_array_depth = 0
+          }
+          array_depth--
+          expecting_value = 0
+          key = ""
+          pending_key = ""
+        } else if (char == ",") {
+          expecting_value = 0
+          key = ""
+          pending_key = ""
+        }
+      }
+    }
+
+    END {
+      if (in_string || object_depth != 0 || array_depth != 0) {
+        exit 1
+      }
+    }
+  '
+}
+
 release_url_for_asset() {
   asset="$1"
   resolved_version="$2"
@@ -145,41 +253,11 @@ release_metadata_url() {
 
 release_asset_digest_or_empty() {
   asset="$1"
-  resolved_version="$2"
-  release_json="$(download_text "$(release_metadata_url "$resolved_version")")"
 
-  digest="$(printf '%s\n' "$release_json" | awk -v asset="$asset" '
-    /"name":[[:space:]]*"[^"]+"/ {
-      name = $0
-      sub(/^.*"name":[[:space:]]*"/, "", name)
-      sub(/".*$/, "", name)
-      if (name == asset) {
-        in_asset = 1
-        asset_depth = depth
-      }
-    }
-
-    in_asset && /"digest":[[:space:]]*"[^"]+"/ {
-      digest = $0
-      sub(/^.*"digest":[[:space:]]*"/, "", digest)
-      sub(/".*$/, "", digest)
-    }
-
-    {
-      line = $0
-      opens = gsub(/\{/, "{", line)
-      closes = gsub(/\}/, "}", line)
-      depth += opens - closes
-
-      if (in_asset && depth < asset_depth) {
-        in_asset = 0
-      }
-    }
-
-    END {
-      if (digest != "") {
-        print digest
-      }
+  digest="$(printf '%s\n' "$release_metadata" | awk -F '\t' -v asset="$asset" '
+    $1 == "asset" && $2 == asset {
+      print $3
+      exit
     }
   ')"
 
@@ -195,16 +273,14 @@ release_asset_digest_or_empty() {
 
 release_asset_exists() {
   asset="$1"
-  resolved_version="$2"
 
-  release_asset_digest_or_empty "$asset" "$resolved_version" >/dev/null 2>&1
+  release_asset_digest_or_empty "$asset" >/dev/null 2>&1
 }
 
 release_asset_digest() {
   asset="$1"
-  resolved_version="$2"
 
-  digest="$(release_asset_digest_or_empty "$asset" "$resolved_version" || true)"
+  digest="$(release_asset_digest_or_empty "$asset" || true)"
   if [ -z "$digest" ]; then
     echo "Could not find SHA-256 digest for release asset $asset." >&2
     exit 1
@@ -784,6 +860,7 @@ release_dir_is_complete() {
     package)
       [ -f "$release_dir/codex-package.json" ] &&
         [ -x "$release_dir/$(package_entrypoint_relative_path "$release_dir")" ] &&
+        [ -x "$release_dir/bin/codex-code-mode-host" ] &&
         [ -x "$release_dir/codex-path/rg" ] ||
         return 1
       ;;
@@ -825,11 +902,34 @@ package_entrypoint_relative_path() {
   fi
 }
 
+resolve_dir_realpath() {
+  dir="$1"
+
+  ( cd -P "$dir" 2>/dev/null && pwd -P ) || true
+}
+
+reject_self_referential_install_dir() {
+  release_dir="$1"
+  command_relative_path="$2"
+  managed_dir="$release_dir/$(dirname "$command_relative_path")"
+
+  managed_dir_real="$(resolve_dir_realpath "$managed_dir")"
+  bin_dir_real="$(resolve_dir_realpath "$BIN_DIR")"
+
+  if [ -n "$managed_dir_real" ] && [ "$managed_dir_real" = "$bin_dir_real" ]; then
+    echo "CODEX_INSTALL_DIR ($BIN_DIR) resolves to this release's managed executable directory ($managed_dir_real)." >&2
+    echo "Installing here would overwrite the managed executable with a self-referential symlink. Choose a different CODEX_INSTALL_DIR." >&2
+    exit 1
+  fi
+}
+
 update_visible_command() {
   release_dir="$1"
   mkdir -p "$BIN_DIR"
   tmp_link="$BIN_DIR/.$COMMAND_NAME.$$"
   command_relative_path="$(package_entrypoint_relative_path "$release_dir")"
+
+  reject_self_referential_install_dir "$release_dir" "$command_relative_path"
 
   replace_path_with_symlink "$BIN_PATH" "$CURRENT_LINK/$command_relative_path" "$tmp_link"
 
@@ -837,6 +937,17 @@ update_visible_command() {
     tmp_alias_link="$BIN_DIR/.$alias_name.$$"
     replace_path_with_symlink "$BIN_DIR/$alias_name" "$CURRENT_LINK/$command_relative_path" "$tmp_alias_link"
   done
+
+  if [ "$os" = "darwin" ] && [ -x "$release_dir/bin/codex-code-mode-host" ]; then
+    tmp_host_link="$BIN_DIR/.codex-code-mode-host.$$"
+    replace_path_with_symlink \
+      "$CODE_MODE_HOST_BIN_PATH" \
+      "$CURRENT_LINK/bin/codex-code-mode-host" \
+      "$tmp_host_link"
+  elif [ "$(readlink "$CODE_MODE_HOST_BIN_PATH" 2>/dev/null || true)" = \
+    "$CURRENT_LINK/bin/codex-code-mode-host" ]; then
+    rm -f "$CODE_MODE_HOST_BIN_PATH"
+  fi
 }
 
 verify_visible_command() {
@@ -844,6 +955,9 @@ verify_visible_command() {
   for alias_name in $ALIAS_COMMAND_NAMES; do
     "$BIN_DIR/$alias_name" --version >/dev/null
   done
+  if [ "$os" = "darwin" ] && [ "$install_layout" = "package" ]; then
+    [ -x "$CODE_MODE_HOST_BIN_PATH" ]
+  fi
 }
 
 parse_args "$@"
@@ -906,14 +1020,22 @@ else
 fi
 
 resolved_version="$(resolve_version)"
+if ! release_json="$(download_text "$(release_metadata_url "$resolved_version")")"; then
+  echo "Could not fetch GitHub release metadata for $PRODUCT_NAME $resolved_version. GitHub API may be unavailable or rate limited." >&2
+  exit 1
+fi
+if ! release_metadata="$(printf '%s\n' "$release_json" | parse_release_metadata)"; then
+  echo "Could not parse GitHub release metadata for $PRODUCT_NAME $resolved_version." >&2
+  exit 1
+fi
 package_asset="$PACKAGE_ASSET_STEM-$vendor_target.tar.gz"
 checksum_asset="codex-package_SHA256SUMS"
-if release_asset_exists "$package_asset" "$resolved_version" &&
-  release_asset_exists "$checksum_asset" "$resolved_version"; then
+if release_asset_exists "$package_asset" &&
+  release_asset_exists "$checksum_asset"; then
   install_layout="package"
   asset="$package_asset"
 elif [ "$PACKAGE_ASSET_STEM" = "codex-package" ] &&
-  release_asset_exists "codex-npm-$npm_tag-$resolved_version.tgz" "$resolved_version"; then
+  release_asset_exists "codex-npm-$npm_tag-$resolved_version.tgz"; then
   install_layout="legacy-platform-npm"
   asset="codex-npm-$npm_tag-$resolved_version.tgz"
 else
@@ -960,12 +1082,12 @@ if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target"
 
   step "Downloading $PRODUCT_NAME"
   if [ "$install_layout" = "package" ]; then
-    checksum_digest="$(release_asset_digest "$checksum_asset" "$resolved_version")"
+    checksum_digest="$(release_asset_digest "$checksum_asset")"
     download_file "$checksum_url" "$checksum_path"
     verify_archive_digest "$checksum_path" "$checksum_digest"
     expected_digest="$(package_archive_digest "$asset" "$checksum_path")"
   else
-    expected_digest="$(release_asset_digest "$asset" "$resolved_version")"
+    expected_digest="$(release_asset_digest "$asset")"
   fi
   download_file "$download_url" "$archive_path"
   verify_archive_digest "$archive_path" "$expected_digest"

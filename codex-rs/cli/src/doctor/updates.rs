@@ -11,6 +11,7 @@ use std::path::Path;
 use codex_core::config::Config;
 use codex_install_context::InstallContext;
 use codex_install_context::InstallMethod;
+use codex_product_info::Product;
 use serde::Deserialize;
 
 use super::CheckStatus;
@@ -22,7 +23,6 @@ use super::npm_global_root_check;
 use super::run_command;
 
 const VERSION_FILE_NAME: &str = "version.json";
-const GITHUB_LATEST_RELEASE_URL: &str = "https://api.github.com/repos/openai/codex/releases/latest";
 const HOMEBREW_CASK_API_URL: &str = "https://formulae.brew.sh/api/cask/codex.json";
 
 /// Builds the update-health row for the current installation.
@@ -85,7 +85,7 @@ pub(super) fn updates_check(config: &Config) -> DoctorCheck {
         }
     }
 
-    match fetch_latest_version(&install_context) {
+    match fetch_latest_version(&install_context, Product::current()) {
         Ok(latest_version) => {
             details.push(format!("latest version: {latest_version}"));
             if is_newer(&latest_version, env!("CARGO_PKG_VERSION")) == Some(true) {
@@ -133,29 +133,44 @@ fn update_action_label(context: &InstallContext) -> &'static str {
     match &context.method {
         InstallMethod::Npm => "npm install -g @openai/codex",
         InstallMethod::Bun => "bun install -g @openai/codex",
+        InstallMethod::Pnpm => "pnpm add -g @openai/codex",
         InstallMethod::Brew => "brew upgrade --cask codex",
         InstallMethod::Standalone { .. } => "standalone installer",
         InstallMethod::Other => "manual or unknown",
     }
 }
 
-fn fetch_latest_version(context: &InstallContext) -> Result<String, String> {
-    match &context.method {
-        InstallMethod::Brew => fetch_homebrew_cask_version(),
-        InstallMethod::Npm
-        | InstallMethod::Bun
-        | InstallMethod::Standalone { .. }
-        | InstallMethod::Other => fetch_latest_github_release_version(),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LatestVersionSource {
+    GitHub(&'static str),
+    Homebrew,
+}
+
+fn fetch_latest_version(context: &InstallContext, product: Product) -> Result<String, String> {
+    match latest_version_source(context, product) {
+        LatestVersionSource::Homebrew => fetch_homebrew_cask_version(),
+        LatestVersionSource::GitHub(url) => fetch_latest_github_release_version(url),
     }
 }
 
-fn fetch_latest_github_release_version() -> Result<String, String> {
+fn latest_version_source(context: &InstallContext, product: Product) -> LatestVersionSource {
+    match &context.method {
+        InstallMethod::Brew => LatestVersionSource::Homebrew,
+        InstallMethod::Npm
+        | InstallMethod::Bun
+        | InstallMethod::Pnpm
+        | InstallMethod::Standalone { .. }
+        | InstallMethod::Other => LatestVersionSource::GitHub(product.latest_release_url()),
+    }
+}
+
+fn fetch_latest_github_release_version(latest_release_url: &str) -> Result<String, String> {
     #[derive(Deserialize)]
     struct ReleaseInfo {
         tag_name: String,
     }
 
-    let info = http_get_json::<ReleaseInfo>(GITHUB_LATEST_RELEASE_URL)?;
+    let info = http_get_json::<ReleaseInfo>(latest_release_url)?;
     info.tag_name
         .strip_prefix("rust-v")
         .map(str::to_string)
@@ -225,10 +240,37 @@ mod tests {
         );
         assert_eq!(
             update_action_label(&InstallContext {
+                method: InstallMethod::Pnpm,
+                package_layout: None,
+            }),
+            "pnpm add -g @openai/codex"
+        );
+        assert_eq!(
+            update_action_label(&InstallContext {
                 method: InstallMethod::Other,
                 package_layout: None,
             }),
             "manual or unknown"
+        );
+    }
+
+    #[test]
+    fn update_probe_uses_the_running_product_release_channel() {
+        let context = InstallContext {
+            method: InstallMethod::Other,
+            package_layout: None,
+        };
+        assert_eq!(
+            latest_version_source(&context, Product::Codex),
+            LatestVersionSource::GitHub(
+                "https://api.github.com/repos/openai/codex/releases/latest"
+            )
+        );
+        assert_eq!(
+            latest_version_source(&context, Product::OpenInterpreter),
+            LatestVersionSource::GitHub(
+                "https://api.github.com/repos/openinterpreter/openinterpreter/releases/latest"
+            )
         );
     }
 }

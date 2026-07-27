@@ -1,6 +1,7 @@
 use super::head_tail_buffer::HeadTailBuffer;
 use super::*;
 use crate::codex_thread::BackgroundTerminalInfo;
+use crate::environment_selection::TurnEnvironmentState;
 use crate::exec::ExecCapturePolicy;
 use crate::exec::ExecExpiration;
 use crate::sandboxing::ExecRequest;
@@ -22,12 +23,13 @@ use codex_exec_server::WriteStatus;
 use codex_sandboxing::SandboxType;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_output_truncation::TruncationPolicy;
-use codex_utils_output_truncation::approx_token_count;
-use core_test_support::get_remote_test_env;
+use codex_utils_output_truncation::approx_tokens_from_byte_count;
+use core_test_support::skip_if_no_remote_env;
 use core_test_support::skip_if_sandbox;
 use core_test_support::test_codex::test_env as remote_test_env;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Notify;
@@ -77,6 +79,7 @@ fn test_exec_request(
         cwd,
         env,
         network,
+        /*network_environment_id*/ None,
         ExecExpiration::DefaultTimeout,
         ExecCapturePolicy::ShellTool,
         SandboxType::None,
@@ -107,7 +110,7 @@ async fn exec_command_with_tty(
 
     let process = Arc::new(
         manager
-            .open_session_with_exec_env(
+            .open_session_with_prepared_exec_env(
                 process_id,
                 &request,
                 tty,
@@ -153,18 +156,23 @@ async fn exec_command_with_tty(
         cancellation_token,
     } = process.output_handles();
     let deadline = started_at + Duration::from_millis(yield_time_ms);
-    let collected = UnifiedExecProcessManager::collect_output_until_deadline(
+    let collected_output = UnifiedExecProcessManager::collect_output_until_deadline(
         &output_buffer,
         &output_notify,
         &output_closed,
         &output_closed_notify,
         &cancellation_token,
-        Some(session.subscribe_out_of_band_elicitation_pause_state()),
+        Some(session.subscribe_elicitation_pause_state()),
         deadline,
     )
     .await;
     let wall_time = Instant::now().saturating_duration_since(started_at);
-    let text = String::from_utf8_lossy(&collected).to_string();
+    let original_token_count = usize::try_from(approx_tokens_from_byte_count(
+        collected_output.total_bytes(),
+    ))
+    .unwrap_or(usize::MAX);
+    let output_omitted_bytes = NonZeroUsize::new(collected_output.omitted_bytes());
+    let collected = collected_output.to_bytes_with_omission_marker();
     let has_exited = process.has_exited();
     let exit_code = process.exit_code();
     let response_process_id = if process_started_alive && !has_exited {
@@ -195,7 +203,8 @@ async fn exec_command_with_tty(
         max_output_tokens: None,
         process_id: response_process_id,
         exit_code,
-        original_token_count: Some(approx_token_count(&text)),
+        original_token_count: Some(original_token_count),
+        output_omitted_bytes,
         hook_command: Some(cmd.to_string()),
     })
 }
@@ -227,6 +236,7 @@ impl BlockingTerminateExecProcess {
             exit_code: None,
             closed: false,
             failure: None,
+            sandbox_denied: false,
         })
     }
 
@@ -285,17 +295,14 @@ async fn blocking_terminate_unified_process(
 ) -> anyhow::Result<Arc<UnifiedExecProcess>> {
     let (wake_tx, _wake_rx) = watch::channel(0);
     Ok(Arc::new(
-        UnifiedExecProcess::from_exec_server_started(
-            StartedExecProcess {
-                process: Arc::new(BlockingTerminateExecProcess {
-                    process_id: process_id.to_string().into(),
-                    terminate_started,
-                    allow_terminate,
-                    wake_tx,
-                }),
-            },
-            SandboxType::None,
-        )
+        UnifiedExecProcess::from_exec_server_started(StartedExecProcess {
+            process: Arc::new(BlockingTerminateExecProcess {
+                process_id: process_id.to_string().into(),
+                terminate_started,
+                allow_terminate,
+                wake_tx,
+            }),
+        })
         .await?,
     ))
 }
@@ -328,17 +335,11 @@ fn push_chunk_preserves_prefix_and_suffix() {
 
     assert_eq!(buffer.retained_bytes(), UNIFIED_EXEC_OUTPUT_MAX_BYTES);
     let snapshot = buffer.snapshot_chunks();
-
-    let first = snapshot.first().expect("expected at least one chunk");
-    assert_eq!(first.first(), Some(&b'a'));
-    assert!(snapshot.iter().any(|chunk| chunk.as_slice() == b"b"));
-    assert_eq!(
-        snapshot
-            .last()
-            .expect("expected at least one chunk")
-            .as_slice(),
-        b"c"
-    );
+    let head_bytes = UNIFIED_EXEC_OUTPUT_MAX_BYTES / 2;
+    let tail_bytes = UNIFIED_EXEC_OUTPUT_MAX_BYTES - head_bytes;
+    let mut expected_tail = vec![b'a'; tail_bytes - 2];
+    expected_tail.extend_from_slice(b"bc");
+    assert_eq!(snapshot, vec![vec![b'a'; head_bytes], expected_tail]);
 }
 
 #[test]
@@ -516,12 +517,11 @@ async fn unified_exec_pause_blocks_yield_timeout() -> anyhow::Result<()> {
     skip_if_sandbox!(Ok(()));
 
     let (session, turn) = test_session_and_turn().await;
-    session.set_out_of_band_elicitation_pause_state(/*paused*/ true);
+    let elicitation = session.services.elicitations.register();
 
-    let paused_session = Arc::clone(&session);
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
-        paused_session.set_out_of_band_elicitation_pause_state(/*paused*/ false);
+        drop(elicitation);
     });
 
     let started = tokio::time::Instant::now();
@@ -547,67 +547,6 @@ async fn unified_exec_pause_blocks_yield_timeout() -> anyhow::Result<()> {
     assert!(
         response.process_id.is_none(),
         "completed command should not leave a background process"
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore] // Ignored while we have a better way to test this.
-async fn requests_with_large_timeout_are_capped() -> anyhow::Result<()> {
-    let (session, turn) = test_session_and_turn().await;
-
-    let result = exec_command(
-        &session,
-        &turn,
-        "echo codex",
-        /*yield_time_ms*/ 120_000,
-        /*workdir*/ None,
-    )
-    .await?;
-
-    assert!(result.process_id.is_some());
-    assert!(
-        result
-            .truncated_output(DEFAULT_MAX_OUTPUT_TOKENS)
-            .contains("codex")
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore] // Ignored while we have a better way to test this.
-async fn completed_commands_do_not_persist_sessions() -> anyhow::Result<()> {
-    let (session, turn) = test_session_and_turn().await;
-    let result = exec_command(
-        &session,
-        &turn,
-        "echo codex",
-        /*yield_time_ms*/ 2_500,
-        /*workdir*/ None,
-    )
-    .await?;
-
-    assert!(
-        result.process_id.is_some(),
-        "completed command should report a process id"
-    );
-    assert!(
-        result
-            .truncated_output(DEFAULT_MAX_OUTPUT_TOKENS)
-            .contains("codex")
-    );
-
-    assert!(
-        session
-            .services
-            .unified_exec_manager
-            .process_store
-            .lock()
-            .await
-            .processes
-            .is_empty()
     );
 
     Ok(())
@@ -810,7 +749,7 @@ async fn completed_pipe_commands_preserve_exit_code() -> anyhow::Result<()> {
 
     let environment = codex_exec_server::Environment::default_for_tests();
     let process = UnifiedExecProcessManager::default()
-        .open_session_with_exec_env(
+        .open_session_with_prepared_exec_env(
             /*process_id*/ 1234,
             &request,
             /*tty*/ false,
@@ -837,9 +776,7 @@ async fn completed_pipe_commands_preserve_exit_code() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_uses_remote_exec_server_when_configured() -> anyhow::Result<()> {
     skip_if_sandbox!(Ok(()));
-    let Some(_remote_env) = get_remote_test_env() else {
-        return Ok(());
-    };
+    skip_if_no_remote_env!(Ok(()));
 
     let remote_test_env = remote_test_env().await?;
     let (_, turn) = make_session_and_context().await;
@@ -852,7 +789,7 @@ async fn unified_exec_uses_remote_exec_server_when_configured() -> anyhow::Resul
 
     let manager = UnifiedExecProcessManager::default();
     let process = manager
-        .open_session_with_exec_env(
+        .open_session_with_prepared_exec_env(
             /*process_id*/ 1234,
             &request,
             /*tty*/ true,
@@ -880,7 +817,8 @@ async fn unified_exec_uses_remote_exec_server_when_configured() -> anyhow::Resul
         /*pause_state*/ None,
         Instant::now() + Duration::from_millis(2_500),
     )
-    .await;
+    .await
+    .to_bytes_with_omission_marker();
 
     assert!(String::from_utf8_lossy(&collected).contains("remote-unified-exec"));
     Ok(())
@@ -889,14 +827,14 @@ async fn unified_exec_uses_remote_exec_server_when_configured() -> anyhow::Resul
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_exec_server_rejects_inherited_fd_launches() -> anyhow::Result<()> {
     skip_if_sandbox!(Ok(()));
-    let Some(_remote_env) = get_remote_test_env() else {
-        return Ok(());
-    };
+    skip_if_no_remote_env!(Ok(()));
 
     let remote_test_env = remote_test_env().await?;
     let (_, mut turn) = make_session_and_context().await;
-    turn.environments.turn_environments[0].environment =
-        Arc::new(remote_test_env.environment().clone());
+    let TurnEnvironmentState::Ready(environment) = &mut turn.environments.environments[0] else {
+        panic!("expected ready primary environment");
+    };
+    environment.environment = Arc::new(remote_test_env.environment().clone());
 
     #[allow(deprecated)]
     let cwd = turn.cwd.clone();
@@ -909,7 +847,7 @@ async fn remote_exec_server_rejects_inherited_fd_launches() -> anyhow::Result<()
 
     let manager = UnifiedExecProcessManager::default();
     let err = manager
-        .open_session_with_exec_env(
+        .open_session_with_prepared_exec_env(
             /*process_id*/ 1234,
             &request,
             /*tty*/ true,

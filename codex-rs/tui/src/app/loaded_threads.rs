@@ -14,8 +14,10 @@
 //! `SessionSource::SubAgent(ThreadSpawn { parent_thread_id, .. })` edges until no new children are
 //! found. The primary thread itself is never included in the output.
 
+use crate::app_server_session::thread_blocks_direct_input;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadStatus;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SubAgentSource;
 use std::collections::HashMap;
@@ -29,6 +31,9 @@ pub(crate) struct LoadedSubagentThread {
     pub(crate) agent_nickname: Option<String>,
     pub(crate) agent_role: Option<String>,
     pub(crate) agent_path: Option<String>,
+    pub(crate) blocks_direct_input: bool,
+    pub(crate) is_running: bool,
+    pub(crate) is_closed: bool,
 }
 
 /// Walks the spawn tree rooted at `primary_thread_id` and returns every descendant subagent.
@@ -84,6 +89,9 @@ pub(crate) fn find_loaded_subagent_threads_for_primary(
             threads_by_id
                 .remove(&thread_id)
                 .map(|thread| LoadedSubagentThread {
+                    blocks_direct_input: thread_blocks_direct_input(&thread),
+                    is_running: matches!(&thread.status, ThreadStatus::Active { .. }),
+                    is_closed: matches!(&thread.status, ThreadStatus::NotLoaded),
                     thread_id,
                     agent_nickname: thread.agent_nickname,
                     agent_role: thread.agent_role,
@@ -128,11 +136,13 @@ mod tests {
     fn test_thread(thread_id: ThreadId, source: SessionSource) -> Thread {
         Thread {
             id: thread_id.to_string(),
+            extra: None,
             session_id: thread_id.to_string(),
             forked_from_id: None,
             parent_thread_id: None,
             preview: String::new(),
             ephemeral: false,
+            history_mode: Default::default(),
             model_provider: "openai".to_string(),
             created_at: 0,
             updated_at: 0,
@@ -142,6 +152,7 @@ mod tests {
             cwd: test_path_buf("/tmp").abs(),
             cli_version: "0.0.0".to_string(),
             source,
+            can_accept_direct_input: None,
             thread_source: None,
             agent_nickname: None,
             agent_role: None,
@@ -189,6 +200,10 @@ mod tests {
         );
         child.agent_nickname = Some("Scout".to_string());
         child.agent_role = Some("explorer".to_string());
+        child.can_accept_direct_input = Some(true);
+        child.status = ThreadStatus::Active {
+            active_flags: Vec::new(),
+        };
 
         let mut grandchild = test_thread(
             grandchild_thread_id,
@@ -196,7 +211,8 @@ mod tests {
         );
         grandchild.agent_nickname = Some("Atlas".to_string());
         grandchild.agent_role = Some("worker".to_string());
-
+        grandchild.can_accept_direct_input = Some(false);
+        grandchild.status = ThreadStatus::NotLoaded;
         let unrelated_child = test_thread(
             unrelated_child_id,
             thread_spawn_source(unrelated_parent_id, /*depth*/ 1, "Other", "researcher"),
@@ -216,16 +232,22 @@ mod tests {
             loaded,
             vec![
                 LoadedSubagentThread {
+                    blocks_direct_input: false,
                     thread_id: child_thread_id,
                     agent_nickname: Some("Scout".to_string()),
                     agent_role: Some("explorer".to_string()),
                     agent_path: None,
+                    is_running: true,
+                    is_closed: false,
                 },
                 LoadedSubagentThread {
+                    blocks_direct_input: true,
                     thread_id: grandchild_thread_id,
                     agent_nickname: Some("Atlas".to_string()),
                     agent_role: Some("worker".to_string()),
                     agent_path: None,
+                    is_running: false,
+                    is_closed: true,
                 },
             ]
         );

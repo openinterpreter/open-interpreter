@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -117,8 +118,11 @@ def build_provider_entry(
     if not isinstance(base_url, str) or not base_url:
         raise SystemExit(f"missing api/base_url for provider {provider_id}")
 
+    env_key_overrides = overrides.get("env_key_overrides", {})
+    if not isinstance(env_key_overrides, dict):
+        env_key_overrides = {}
     env_keys = provider.get("env") or []
-    env_key = env_keys[0] if env_keys else None
+    env_key = env_key_overrides.get(provider_id) or (env_keys[0] if env_keys else None)
     sort_priorities = overrides.get("sort_priorities", {})
     if not isinstance(sort_priorities, dict):
         sort_priorities = {}
@@ -335,11 +339,30 @@ def should_include_provider(
     return isinstance(provider_npm, str) and provider_npm in supported_npm_packages
 
 
-def write_catalog() -> int:
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Regenerate the bundled hosted-provider catalog."
+    )
+    parser.add_argument(
+        "--provider",
+        action="append",
+        dest="provider_ids",
+        metavar="ID",
+        help=(
+            "replace only this provider in the existing catalog; repeat for multiple "
+            "providers"
+        ),
+    )
+    return parser.parse_args()
+
+
+def write_catalog(selected_provider_ids: set[str] | None = None) -> int:
     models_dev_catalog = load_models_dev_catalog()
     overrides = load_overrides()
-    providers = []
+    generated_providers = []
     for provider_id, provider in sorted(models_dev_catalog.items()):
+        if selected_provider_ids is not None and provider_id not in selected_provider_ids:
+            continue
         if not isinstance(provider, dict):
             continue
         if not should_include_provider(provider_id, provider, overrides):
@@ -347,7 +370,24 @@ def write_catalog() -> int:
 
         entry = build_provider_entry(provider_id, provider, overrides)
         if entry["models"]:
-            providers.append(entry)
+            generated_providers.append(entry)
+
+    generated_ids = {provider["id"] for provider in generated_providers}
+    if selected_provider_ids is not None:
+        missing = selected_provider_ids - generated_ids
+        if missing:
+            raise SystemExit(
+                "selected providers were not generated: " + ", ".join(sorted(missing))
+            )
+        existing_payload = json.loads(OUTPUT_PATH.read_text())
+        providers = [
+            provider
+            for provider in existing_payload.get("providers", [])
+            if provider.get("id") not in selected_provider_ids
+        ]
+        providers.extend(generated_providers)
+    else:
+        providers = generated_providers
     providers.sort(
         key=lambda provider: (
             int(provider["sort_priority"]),
@@ -377,4 +417,6 @@ def generated_from(overrides: dict[str, object]) -> str | list[str]:
 
 
 if __name__ == "__main__":
-    sys.exit(write_catalog())
+    args = parse_args()
+    selected_provider_ids = set(args.provider_ids) if args.provider_ids else None
+    sys.exit(write_catalog(selected_provider_ids))

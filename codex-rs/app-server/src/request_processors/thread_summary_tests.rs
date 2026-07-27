@@ -1,6 +1,7 @@
 use super::*;
 
 use anyhow::Result;
+use codex_protocol::protocol::USER_MESSAGE_BEGIN;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::path::PathBuf;
@@ -13,6 +14,7 @@ fn extract_conversation_summary_prefers_plain_user_messages() -> Result<()> {
 
     let head = vec![
         json!({
+            "session_id": conversation_id.to_string(),
             "id": conversation_id.to_string(),
             "timestamp": timestamp,
             "cwd": "/",

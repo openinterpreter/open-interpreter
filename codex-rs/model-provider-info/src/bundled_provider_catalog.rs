@@ -128,6 +128,39 @@ mod tests {
     }
 
     #[test]
+    fn bundled_catalog_contains_kimi_k3_for_both_official_provider_paths() {
+        for (provider_id, model_id, display_name) in [
+            ("kimi-for-coding", "k3", "Kimi K3"),
+            ("moonshotai", "kimi-k3", "Kimi K3"),
+        ] {
+            let provider =
+                bundled_provider_catalog_entry(provider_id).expect("Kimi provider should exist");
+            let model = provider
+                .models
+                .iter()
+                .find(|model| model.id == model_id)
+                .expect("Kimi K3 model should exist");
+
+            assert_eq!(
+                model,
+                &BundledProviderModelEntry {
+                    id: model_id.to_string(),
+                    display_name: display_name.to_string(),
+                    description: Some(
+                        "kimi-k3 • Reasoning • Tool calling • Image input • Video input"
+                            .to_string(),
+                    ),
+                    reasoning: true,
+                    thinking_toggle: true,
+                    input_modalities: vec![InputModality::Text, InputModality::Image],
+                    context_window: Some(1_048_576),
+                    priority: -1,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn bundled_catalog_matches_base_url_without_trailing_slash() {
         let provider =
             bundled_provider_catalog_entry_for_base_url("https://api.fireworks.ai/inference/v1")

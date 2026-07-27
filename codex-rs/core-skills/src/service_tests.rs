@@ -2,9 +2,9 @@ use super::*;
 use crate::SkillMetadata;
 use crate::config_rules::resolve_disabled_skill_paths;
 use crate::config_rules::skill_config_rules_from_stack;
-use codex_app_server_protocol::ConfigLayerSource;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerEntry;
+use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigRequirementsToml;
 use codex_exec_server::LOCAL_FS;
@@ -22,6 +22,13 @@ use tempfile::TempDir;
 
 fn write_user_skill(codex_home: &TempDir, dir: &str, name: &str, description: &str) {
     let skill_dir = codex_home.path().join("skills").join(dir);
+    fs::create_dir_all(&skill_dir).unwrap();
+    let content = format!("---\nname: {name}\ndescription: {description}\n---\n\n# Body\n");
+    fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+}
+
+fn write_home_agents_skill(user_home: &TempDir, dir: &str, name: &str, description: &str) {
+    let skill_dir = user_home.path().join(".agents").join("skills").join(dir);
     fs::create_dir_all(&skill_dir).unwrap();
     let content = format!("---\nname: {name}\ndescription: {description}\n---\n\n# Body\n");
     fs::write(skill_dir.join("SKILL.md"), content).unwrap();
@@ -55,7 +62,11 @@ fn write_plugin_skill(
     skill_path
 }
 
-fn plugin_skill_root_for_skill_path(skill_path: &Path, plugin_id: &str) -> PluginSkillRoot {
+fn plugin_skill_root_for_skill_path(
+    skill_path: &Path,
+    plugin_id: &str,
+    plugin_namespace: &str,
+) -> PluginSkillRoot {
     let skills_root = skill_path
         .parent()
         .and_then(Path::parent)
@@ -66,6 +77,7 @@ fn plugin_skill_root_for_skill_path(skill_path: &Path, plugin_id: &str) -> Plugi
     PluginSkillRoot {
         path: skills_root.abs(),
         plugin_id: plugin_id.to_string(),
+        plugin_namespace: plugin_namespace.to_string(),
         plugin_root: plugin_root.abs(),
     }
 }
@@ -194,6 +206,33 @@ fn new_with_disabled_bundled_skills_removes_stale_cached_system_skills() {
         !codex_home.path().join("skills/.system").exists(),
         "expected disabling system skills to remove stale cached bundled skills"
     );
+}
+
+#[tokio::test]
+async fn explicit_user_home_isolates_user_installed_skill_discovery() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let user_home = tempfile::tempdir().expect("tempdir");
+    let other_home = tempfile::tempdir().expect("tempdir");
+    let cwd = tempfile::tempdir().expect("tempdir");
+    write_home_agents_skill(&user_home, "included", "included-skill", "included");
+    write_home_agents_skill(&other_home, "excluded", "excluded-skill", "excluded");
+    let config_layer_stack = config_stack(&codex_home, "");
+    let skills_service = SkillsService::new_with_restriction_product_and_user_home(
+        codex_home.path().abs(),
+        /*bundled_skills_enabled*/ false,
+        Some(Product::Codex),
+        user_home.path().abs(),
+    );
+
+    let outcome =
+        skills_for_config_with_stack(&skills_service, &cwd, &config_layer_stack, &[]).await;
+    let names = outcome
+        .skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect::<HashSet<_>>();
+
+    assert_eq!(names, HashSet::from(["included-skill"]));
 }
 
 #[tokio::test]
@@ -364,7 +403,8 @@ async fn skills_for_config_disables_plugin_skills_by_name() {
         &codex_home,
         &name_toggle_config("sample:sample-search", /*enabled*/ false),
     );
-    let plugin_skill_root = plugin_skill_root_for_skill_path(&skill_path, "test-plugin@test");
+    let plugin_skill_root =
+        plugin_skill_root_for_skill_path(&skill_path, "test-plugin@test", "sample");
     let skills_service = SkillsService::new(
         codex_home.path().abs(),
         /*bundled_skills_enabled*/ true,

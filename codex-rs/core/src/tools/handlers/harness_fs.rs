@@ -185,7 +185,7 @@ fn ensure_allowed(
     )))
 }
 
-fn policy_candidates_for_path(path: &Path) -> Vec<PathBuf> {
+pub(crate) fn policy_candidates_for_path(path: &Path) -> Vec<PathBuf> {
     let mut candidates = vec![path.to_path_buf()];
     if let Ok(canonical) = fs::canonicalize(path) {
         if canonical != path {
@@ -205,5 +205,5 @@ fn policy_candidates_for_path(path: &Path) -> Vec<PathBuf> {
 }
 
 pub(crate) fn normalize_model_path_text(text: &str) -> String {
-    text.replace("/private/private/tmp/", "/private/tmp/")
+    text.replace("/private/private/", "/private/")
 }

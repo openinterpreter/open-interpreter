@@ -1,8 +1,8 @@
-# OpenAI Codex Python SDK (Beta) - API Reference
+# OpenAI Codex Python SDK - API Reference
 
 Public surface of `openai_codex` for Codex workflows.
 
-This SDK is in beta. Public APIs may change before `1.0`. Turn streams are routed by turn ID so one client can consume multiple active turns concurrently.
+Turn streams are routed by turn ID so one client can consume multiple active turns concurrently.
 Thread starts default to `ApprovalMode.auto_review`; turn starts accept an optional `approval_mode` override.
 
 ## Package Entry
@@ -244,6 +244,9 @@ InputItem = TextInput | ImageInput | LocalImageInput | SkillInput | MentionInput
 Input = list[InputItem] | InputItem
 RunInput = Input | str
 ```
+
+Use `ImageInput` with a base64-encoded `data:image/...` URL. HTTP and HTTPS image URLs are
+deprecated; download remote images and pass their local paths with `LocalImageInput` instead.
 
 Use a plain `str` as shorthand for `TextInput(...)` anywhere a turn input is accepted:
 `thread.run("...")`, `thread.turn("...")`, and `turn.steer("...")`.

@@ -82,7 +82,9 @@ async fn models_client_hits_models_endpoint() {
             upgrade: None,
             base_instructions: "base instructions".to_string(),
             model_messages: None,
+            include_skills_usage_instructions: false,
             supports_reasoning_summaries: false,
+            supports_reasoning_summary_parameter: true,
             default_reasoning_summary: ReasoningSummary::Auto,
             support_verbosity: false,
             default_verbosity: None,
@@ -119,10 +121,12 @@ async fn models_client_hits_models_endpoint() {
         .await;
 
     let transport = ReqwestTransport::new(reqwest::Client::new());
-    let client = ModelsClient::new(transport, provider(&base_url), Arc::new(DummyAuth));
+    let provider = provider(&base_url);
+    let request_url = ModelsClient::<ReqwestTransport>::request_url(&provider, "0.1.0");
+    let client = ModelsClient::new(transport, provider, Arc::new(DummyAuth));
 
     let (models, _) = client
-        .list_models("0.1.0", HeaderMap::new())
+        .list_models(request_url, HeaderMap::new())
         .await
         .expect("models request should succeed");
 

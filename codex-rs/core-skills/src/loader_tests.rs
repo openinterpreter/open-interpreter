@@ -4,19 +4,36 @@ use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigRequirements;
 use codex_config::ConfigRequirementsToml;
+use codex_exec_server::CopyOptions;
+use codex_exec_server::CreateDirectoryOptions;
+use codex_exec_server::ExecutorFileSystem;
+use codex_exec_server::ExecutorFileSystemFuture;
+use codex_exec_server::FileMetadata;
+use codex_exec_server::FileSystemReadStream;
+use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::LOCAL_FS;
+use codex_exec_server::ReadDirectoryEntry;
+use codex_exec_server::RemoveOptions;
+use codex_exec_server::WalkOptions;
+use codex_exec_server::WalkOutcome;
 use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::test_support::PathBufExt;
 use codex_utils_absolute_path::test_support::PathExt;
+use codex_utils_path_uri::PathUri;
 use dunce::canonicalize as canonicalize_path;
 use pretty_assertions::assert_eq;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use tempfile::TempDir;
+use tokio::sync::Notify;
+use tokio::sync::Semaphore;
 use toml::Value as TomlValue;
 
 const REPO_ROOT_CONFIG_DIR_NAME: &str = ".codex";
@@ -24,6 +41,154 @@ const REPO_ROOT_CONFIG_DIR_NAME: &str = ".codex";
 struct TestConfig {
     cwd: AbsolutePathBuf,
     config_layer_stack: ConfigLayerStack,
+}
+
+struct BlockingRepoSkillRootFileSystem {
+    inner: Arc<dyn ExecutorFileSystem>,
+    metadata_calls: Arc<BlockingMetadataCalls>,
+    blocked_walk_root: Option<PathUri>,
+    blocked_walk_gate: Semaphore,
+    walks_started: AtomicUsize,
+    walk_started: Notify,
+}
+
+struct BlockingMetadataCalls {
+    paths: Mutex<Vec<PathUri>>,
+    started: Notify,
+    release: Semaphore,
+}
+
+impl Default for BlockingMetadataCalls {
+    fn default() -> Self {
+        Self {
+            paths: Mutex::new(Vec::new()),
+            started: Notify::new(),
+            release: Semaphore::new(0),
+        }
+    }
+}
+
+impl ExecutorFileSystem for BlockingRepoSkillRootFileSystem {
+    fn canonicalize<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, PathUri> {
+        self.inner.canonicalize(path, sandbox)
+    }
+
+    fn read_file<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
+        self.inner.read_file(path, sandbox)
+    }
+
+    fn read_file_stream<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, FileSystemReadStream> {
+        self.inner.read_file_stream(path, sandbox)
+    }
+
+    fn write_file<'a>(
+        &'a self,
+        path: &'a PathUri,
+        contents: Vec<u8>,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        self.inner.write_file(path, contents, sandbox)
+    }
+
+    fn create_directory<'a>(
+        &'a self,
+        path: &'a PathUri,
+        options: CreateDirectoryOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        self.inner.create_directory(path, options, sandbox)
+    }
+
+    fn get_metadata<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, FileMetadata> {
+        let repo_skill_root_suffix = Path::new(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME);
+        let Ok(path_abs) = path.to_abs_path() else {
+            return self.inner.get_metadata(path, sandbox);
+        };
+        if !path_abs.ends_with(repo_skill_root_suffix) {
+            return self.inner.get_metadata(path, sandbox);
+        }
+
+        self.metadata_calls
+            .paths
+            .lock()
+            .expect("metadata paths lock")
+            .push(path.clone());
+        self.metadata_calls.started.notify_one();
+        Box::pin(async move {
+            self.metadata_calls
+                .release
+                .acquire()
+                .await
+                .expect("metadata release semaphore")
+                .forget();
+            self.inner.get_metadata(path, sandbox).await
+        })
+    }
+
+    fn read_directory<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, Vec<ReadDirectoryEntry>> {
+        self.inner.read_directory(path, sandbox)
+    }
+
+    fn walk<'a>(
+        &'a self,
+        path: &'a PathUri,
+        options: WalkOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, WalkOutcome> {
+        self.walks_started.fetch_add(/*val*/ 1, Ordering::AcqRel);
+        self.walk_started.notify_waiters();
+        if self.blocked_walk_root.as_ref() != Some(path) {
+            return self.inner.walk(path, options, sandbox);
+        }
+        Box::pin(async move {
+            self.blocked_walk_gate
+                .acquire()
+                .await
+                .expect("blocked walk gate should remain open")
+                .forget();
+            self.inner.walk(path, options, sandbox).await
+        })
+    }
+
+    fn remove<'a>(
+        &'a self,
+        path: &'a PathUri,
+        options: RemoveOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        self.inner.remove(path, options, sandbox)
+    }
+
+    fn copy<'a>(
+        &'a self,
+        source_path: &'a PathUri,
+        destination_path: &'a PathUri,
+        options: CopyOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        self.inner
+            .copy(source_path, destination_path, options, sandbox)
+    }
 }
 
 async fn make_config(codex_home: &TempDir) -> TestConfig {
@@ -128,6 +293,8 @@ async fn load_skills_for_test(config: &TestConfig) -> SkillLoadOutcome {
             /*home_dir*/ None,
         )
         .await,
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
     )
     .await
 }
@@ -193,11 +360,11 @@ async fn skill_roots_from_layer_stack_maps_user_to_user_and_system_cache_and_sys
     assert_eq!(
         got,
         vec![
-            (SkillScope::User, user_folder.join("skills")),
             (
                 SkillScope::User,
                 home_folder.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME)
             ),
+            (SkillScope::User, user_folder.join("skills")),
             (
                 SkillScope::System,
                 user_folder.join("skills").join(".system")
@@ -263,11 +430,11 @@ async fn skill_roots_from_layer_stack_includes_disabled_project_layers() -> anyh
         got,
         vec![
             (SkillScope::Repo, dot_codex.join("skills")),
-            (SkillScope::User, user_folder.join("skills")),
             (
                 SkillScope::User,
                 home_folder.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME)
             ),
+            (SkillScope::User, user_folder.join("skills")),
             (
                 SkillScope::System,
                 user_folder.join("skills").join(".system")
@@ -315,7 +482,12 @@ async fn loads_skills_from_home_agents_dir_for_user_scope() -> anyhow::Result<()
         Some(&home_folder_abs),
     )
     .await;
-    let outcome = load_skills_from_roots(roots).await;
+    let outcome = load_skills_from_roots(
+        roots,
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
+    .await;
     assert!(
         outcome.errors.is_empty(),
         "unexpected errors: {:?}",
@@ -385,6 +557,42 @@ fn write_skill_metadata_at(skill_dir: &Path, contents: &str) -> PathBuf {
 
 fn write_skill_interface_at(skill_dir: &Path, contents: &str) -> PathBuf {
     write_skill_metadata_at(skill_dir, contents)
+}
+
+fn write_plugin_manifest(plugin_root: &Path, contents: &str) {
+    let manifest_path = plugin_root.join(".codex-plugin/plugin.json");
+    fs::create_dir_all(manifest_path.parent().expect("manifest parent")).unwrap();
+    fs::write(manifest_path, contents).unwrap();
+}
+
+async fn load_user_skills_root(root: &Path) -> SkillLoadOutcome {
+    load_skills_from_roots(
+        [SkillRoot {
+            path: root.abs(),
+            scope: SkillScope::User,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_id: None,
+            plugin_namespace: None,
+            plugin_root: None,
+        }],
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
+    .await
+}
+
+fn expected_user_skill(path: &Path, name: &str, description: &str) -> SkillMetadata {
+    SkillMetadata {
+        name: name.to_string(),
+        description: description.to_string(),
+        short_description: None,
+        interface: None,
+        dependencies: None,
+        policy: None,
+        path_to_skills_md: normalized(path),
+        scope: SkillScope::User,
+        plugin_id: None,
+    }
 }
 
 #[tokio::test]
@@ -845,13 +1053,18 @@ interface:
     );
 
     let plugin_root_abs = plugin_root.abs();
-    let outcome = load_skills_from_roots([SkillRoot {
-        path: plugin_root.join("skills").abs(),
-        scope: SkillScope::User,
-        file_system: Arc::clone(&LOCAL_FS),
-        plugin_id: Some("twilio-developer-kit@test".to_string()),
-        plugin_root: Some(plugin_root_abs.clone()),
-    }])
+    let outcome = load_skills_from_roots(
+        [SkillRoot {
+            path: plugin_root.join("skills").abs(),
+            scope: SkillScope::User,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_id: Some("twilio-developer-kit@test".to_string()),
+            plugin_namespace: None,
+            plugin_root: Some(plugin_root_abs.clone()),
+        }],
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
     .await;
 
     assert!(
@@ -902,13 +1115,18 @@ interface:
 "##,
     );
 
-    let outcome = load_skills_from_roots([SkillRoot {
-        path: plugin_root.join("skills").abs(),
-        scope: SkillScope::User,
-        file_system: Arc::clone(&LOCAL_FS),
-        plugin_id: Some("twilio-developer-kit@test".to_string()),
-        plugin_root: Some(plugin_root.abs()),
-    }])
+    let outcome = load_skills_from_roots(
+        [SkillRoot {
+            path: plugin_root.join("skills").abs(),
+            scope: SkillScope::User,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_id: Some("twilio-developer-kit@test".to_string()),
+            plugin_namespace: None,
+            plugin_root: Some(plugin_root.abs()),
+        }],
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
     .await;
 
     assert!(
@@ -974,6 +1192,32 @@ async fn loads_skills_via_symlinked_subdir_for_user_scope() {
             scope: SkillScope::User,
             plugin_id: None,
         }]
+    );
+}
+
+// Directory symlinks on Windows can require Developer Mode or administrator privileges.
+#[tokio::test]
+#[cfg(unix)]
+async fn loads_skills_through_visible_alias_to_hidden_directory() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let hidden_root = root.path().join(".hidden");
+    let skill_path = write_skill_at(&hidden_root, "search", "search-skill", "search description");
+    symlink_dir(&hidden_root, &root.path().join("visible"));
+
+    let outcome = load_user_skills_root(root.path()).await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![expected_user_skill(
+            &skill_path,
+            "search-skill",
+            "search description",
+        )]
     );
 }
 
@@ -1048,13 +1292,18 @@ async fn loads_skills_via_symlinked_subdir_for_admin_scope() {
     fs::create_dir_all(admin_root.path()).unwrap();
     symlink_dir(shared.path(), &admin_root.path().join("shared"));
 
-    let outcome = load_skills_from_roots([SkillRoot {
-        path: admin_root.path().abs(),
-        scope: SkillScope::Admin,
-        file_system: Arc::clone(&LOCAL_FS),
-        plugin_id: None,
-        plugin_root: None,
-    }])
+    let outcome = load_skills_from_roots(
+        [SkillRoot {
+            path: admin_root.path().abs(),
+            scope: SkillScope::Admin,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_id: None,
+            plugin_namespace: None,
+            plugin_root: None,
+        }],
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
     .await;
 
     assert!(
@@ -1130,13 +1379,18 @@ async fn system_scope_ignores_symlinked_subdir() {
     fs::create_dir_all(&system_root).unwrap();
     symlink_dir(shared.path(), &system_root.join("shared"));
 
-    let outcome = load_skills_from_roots([SkillRoot {
-        path: system_root.abs(),
-        scope: SkillScope::System,
-        file_system: Arc::clone(&LOCAL_FS),
-        plugin_id: None,
-        plugin_root: None,
-    }])
+    let outcome = load_skills_from_roots(
+        [SkillRoot {
+            path: system_root.abs(),
+            scope: SkillScope::System,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_id: None,
+            plugin_namespace: None,
+            plugin_root: None,
+        }],
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
     .await;
     assert!(
         outcome.errors.is_empty(),
@@ -1164,13 +1418,18 @@ async fn respects_max_scan_depth_for_user_scope() {
     );
 
     let skills_root = codex_home.path().join("skills");
-    let outcome = load_skills_from_roots([SkillRoot {
-        path: skills_root.abs(),
-        scope: SkillScope::User,
-        file_system: Arc::clone(&LOCAL_FS),
-        plugin_id: None,
-        plugin_root: None,
-    }])
+    let outcome = load_skills_from_roots(
+        [SkillRoot {
+            path: skills_root.abs(),
+            scope: SkillScope::User,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_id: None,
+            plugin_namespace: None,
+            plugin_root: None,
+        }],
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
     .await;
 
     assert!(
@@ -1256,7 +1515,7 @@ async fn falls_back_to_directory_name_when_skill_name_is_missing() {
 }
 
 #[tokio::test]
-async fn namespaces_plugin_skills_using_plugin_name() {
+async fn namespaces_plugin_skills_using_provided_namespace() {
     let root = tempfile::tempdir().expect("tempdir");
     let plugin_root = root.path().join("plugins/sample");
     let skill_path = write_raw_skill_at(
@@ -1267,17 +1526,22 @@ async fn namespaces_plugin_skills_using_plugin_name() {
     fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
     fs::write(
         plugin_root.join(".codex-plugin/plugin.json"),
-        r#"{"name":"sample"}"#,
+        r#"{"name":"should-not-be-read"}"#,
     )
     .unwrap();
 
-    let outcome = load_skills_from_roots([SkillRoot {
-        path: plugin_root.join("skills").abs(),
-        scope: SkillScope::User,
-        file_system: Arc::clone(&LOCAL_FS),
-        plugin_id: Some("sample@test".to_string()),
-        plugin_root: Some(plugin_root.abs()),
-    }])
+    let outcome = load_skills_from_roots(
+        [SkillRoot {
+            path: plugin_root.join("skills").abs(),
+            scope: SkillScope::User,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_id: Some("sample@test".to_string()),
+            plugin_namespace: Some("sample".to_string()),
+            plugin_root: Some(plugin_root.abs()),
+        }],
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
     .await;
 
     assert!(
@@ -1302,6 +1566,204 @@ async fn namespaces_plugin_skills_using_plugin_name() {
 }
 
 #[tokio::test]
+async fn namespaces_nested_plugin_skills_without_namespacing_plain_siblings() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let skills_root = root.path().join("skills");
+    let plain_skill_path =
+        write_skill_at(&skills_root, "plain", "plain-skill", "plain description");
+    let plugin_root = skills_root.join("nested-plugin");
+    write_plugin_manifest(&plugin_root, r#"{"name":"nested"}"#);
+    let plugin_skill_path = write_skill_at(
+        &plugin_root.join("skills"),
+        "search",
+        "plugin-skill",
+        "plugin description",
+    );
+
+    let outcome = load_user_skills_root(&skills_root).await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![
+            expected_user_skill(
+                &plugin_skill_path,
+                "nested:plugin-skill",
+                "plugin description"
+            ),
+            expected_user_skill(&plain_skill_path, "plain-skill", "plain description"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn inherits_plugin_namespace_from_above_scanned_skills_root() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let plugin_root = root.path().join("plugin");
+    write_plugin_manifest(&plugin_root, r#"{"name":"outer"}"#);
+    let skills_root = plugin_root.join("skills");
+    let skill_path = write_skill_at(&skills_root, "search", "search-skill", "search description");
+
+    let outcome = load_user_skills_root(&skills_root).await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![expected_user_skill(
+            &skill_path,
+            "outer:search-skill",
+            "search description",
+        )]
+    );
+}
+
+#[tokio::test]
+async fn nearest_valid_nested_plugin_namespace_overrides_outer_namespace() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let outer_plugin_root = root.path().join("outer-plugin");
+    write_plugin_manifest(&outer_plugin_root, r#"{"name":"outer"}"#);
+    let skills_root = outer_plugin_root.join("skills");
+    let nested_plugin_root = skills_root.join("nested-plugin");
+    write_plugin_manifest(&nested_plugin_root, r#"{"name":"nested"}"#);
+    let skill_path = write_skill_at(
+        &nested_plugin_root.join("skills"),
+        "search",
+        "search-skill",
+        "search description",
+    );
+
+    let outcome = load_user_skills_root(&skills_root).await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![expected_user_skill(
+            &skill_path,
+            "nested:search-skill",
+            "search description",
+        )]
+    );
+}
+
+#[tokio::test]
+async fn invalid_nested_plugin_manifest_falls_back_to_outer_namespace() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let outer_plugin_root = root.path().join("outer-plugin");
+    write_plugin_manifest(&outer_plugin_root, r#"{"name":"outer"}"#);
+    let skills_root = outer_plugin_root.join("skills");
+    let nested_plugin_root = skills_root.join("nested-plugin");
+    write_plugin_manifest(&nested_plugin_root, "not json");
+    let skill_path = write_skill_at(
+        &nested_plugin_root.join("skills"),
+        "search",
+        "search-skill",
+        "search description",
+    );
+
+    let outcome = load_user_skills_root(&skills_root).await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![expected_user_skill(
+            &skill_path,
+            "outer:search-skill",
+            "search description",
+        )]
+    );
+}
+
+// Directory symlinks on Windows can require Developer Mode or administrator privileges.
+#[cfg(unix)]
+#[tokio::test]
+async fn does_not_inherit_namespace_for_skills_in_symlinked_plain_dir() {
+    // outer-plugin/
+    // ├── .codex-plugin/plugin.json
+    // └── skills/linked-plain -> plain-root/
+    // plain-root/
+    // └── search/SKILL.md
+    let root = tempfile::tempdir().expect("tempdir");
+    let plugin_root = root.path().join("outer-plugin");
+    write_plugin_manifest(&plugin_root, r#"{"name":"outer"}"#);
+    let skills_root = plugin_root.join("skills");
+    let plain_root = tempfile::tempdir().expect("tempdir");
+    let skill_path = write_skill_at(
+        plain_root.path(),
+        "search",
+        "plain-skill",
+        "plain description",
+    );
+    fs::create_dir_all(&skills_root).unwrap();
+    symlink_dir(plain_root.path(), &skills_root.join("linked-plain"));
+
+    let outcome = load_user_skills_root(&skills_root).await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![expected_user_skill(
+            &skill_path,
+            "plain-skill",
+            "plain description",
+        )]
+    );
+}
+
+// Directory symlinks on Windows can require Developer Mode or administrator privileges.
+#[cfg(unix)]
+#[tokio::test]
+async fn keeps_inherited_namespace_when_symlink_target_is_scan_root_ancestor() {
+    // temp-root/
+    // └── a/b/c/d/e/f/outer-plugin/
+    //     ├── .codex-plugin/plugin.json
+    //     └── skills/
+    //         ├── root/SKILL.md
+    //         └── link -> temp-root/
+    let root = tempfile::tempdir().expect("tempdir");
+    let plugin_root = root.path().join("a/b/c/d/e/f/outer-plugin");
+    write_plugin_manifest(&plugin_root, r#"{"name":"outer"}"#);
+    let skills_root = plugin_root.join("skills");
+    let skill_path = write_skill_at(&skills_root, "root", "root-skill", "root description");
+    symlink_dir(root.path(), &skills_root.join("link"));
+
+    let outcome = load_user_skills_root(&skills_root).await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![expected_user_skill(
+            &skill_path,
+            "outer:root-skill",
+            "root description",
+        )]
+    );
+}
+
+#[tokio::test]
 async fn plugin_skill_name_length_limit_allows_max_qualified_name() {
     let root = tempfile::tempdir().expect("tempdir");
     let plugin_name = "p".repeat(MAX_NAME_LEN - 1);
@@ -1316,13 +1778,18 @@ async fn plugin_skill_name_length_limit_allows_max_qualified_name() {
     )
     .unwrap();
 
-    let outcome = load_skills_from_roots([SkillRoot {
-        path: plugin_root.join("skills").abs(),
-        scope: SkillScope::User,
-        file_system: Arc::clone(&LOCAL_FS),
-        plugin_id: Some("sample@test".to_string()),
-        plugin_root: Some(plugin_root.abs()),
-    }])
+    let outcome = load_skills_from_roots(
+        [SkillRoot {
+            path: plugin_root.join("skills").abs(),
+            scope: SkillScope::User,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_id: Some("sample@test".to_string()),
+            plugin_namespace: Some(plugin_name.clone()),
+            plugin_root: Some(plugin_root.abs()),
+        }],
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
     .await;
 
     assert!(
@@ -1361,13 +1828,18 @@ async fn plugin_skill_name_length_limit_rejects_overlong_qualified_name() {
     )
     .unwrap();
 
-    let outcome = load_skills_from_roots([SkillRoot {
-        path: plugin_root.join("skills").abs(),
-        scope: SkillScope::User,
-        file_system: Arc::clone(&LOCAL_FS),
-        plugin_id: Some("sample@test".to_string()),
-        plugin_root: Some(plugin_root.abs()),
-    }])
+    let outcome = load_skills_from_roots(
+        [SkillRoot {
+            path: plugin_root.join("skills").abs(),
+            scope: SkillScope::User,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_id: Some("sample@test".to_string()),
+            plugin_namespace: Some(plugin_name.clone()),
+            plugin_root: Some(plugin_root.abs()),
+        }],
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
     .await;
 
     assert_eq!(outcome.skills, Vec::new());
@@ -1540,7 +2012,7 @@ async fn preserves_block_scalar_body_while_repairing_other_fields() {
 }
 
 #[tokio::test]
-async fn enforces_short_description_length_limits() {
+async fn preserves_overlong_short_descriptions() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let skill_dir = codex_home.path().join("skills/demo");
     fs::create_dir_all(&skill_dir).unwrap();
@@ -1552,15 +2024,13 @@ async fn enforces_short_description_length_limits() {
 
     let cfg = make_config(&codex_home).await;
     let outcome = load_skills_for_test(&cfg).await;
-    assert_eq!(outcome.skills.len(), 0);
-    assert_eq!(outcome.errors.len(), 1);
     assert!(
-        outcome.errors[0]
-            .message
-            .contains("invalid metadata.short-description"),
-        "expected length error, got: {:?}",
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
         outcome.errors
     );
+    assert_eq!(outcome.skills.len(), 1);
+    assert_eq!(outcome.skills[0].short_description, Some(too_long));
 }
 
 #[tokio::test]
@@ -1592,7 +2062,7 @@ async fn skips_hidden_and_invalid() {
 }
 
 #[tokio::test]
-async fn enforces_length_limits() {
+async fn preserves_overlong_descriptions() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let max_desc = "\u{1F4A1}".repeat(MAX_DESCRIPTION_LEN);
     write_skill(&codex_home, "max-len", "max-len", &max_desc);
@@ -1609,12 +2079,18 @@ async fn enforces_length_limits() {
     let too_long_desc = "\u{1F4A1}".repeat(MAX_DESCRIPTION_LEN + 1);
     write_skill(&codex_home, "too-long", "too-long", &too_long_desc);
     let outcome = load_skills_for_test(&cfg).await;
-    assert_eq!(outcome.skills.len(), 1);
-    assert_eq!(outcome.errors.len(), 1);
     assert!(
-        outcome.errors[0].message.contains("invalid description"),
-        "expected length error"
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
     );
+    assert_eq!(outcome.skills.len(), 2);
+    let too_long_skill = outcome
+        .skills
+        .iter()
+        .find(|skill| skill.name == "too-long")
+        .expect("too-long skill");
+    assert_eq!(too_long_skill.description, too_long_desc);
 }
 
 #[tokio::test]
@@ -1755,6 +2231,240 @@ async fn loads_skills_from_all_codex_dirs_under_project_root() {
 }
 
 #[tokio::test]
+async fn repo_skill_root_search_limits_concurrent_probes_and_preserves_order() {
+    const CONCURRENCY_LIMIT: usize = 256;
+
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tempfile::tempdir().expect("tempdir");
+    mark_as_git_repo(repo_dir.path());
+
+    let mut directories = vec![repo_dir.path().to_path_buf()];
+    let mut cwd = repo_dir.path().to_path_buf();
+    for _ in 0..CONCURRENCY_LIMIT {
+        cwd.push("d");
+        directories.push(cwd.clone());
+    }
+    fs::create_dir_all(&cwd).expect("nested cwd");
+
+    let expected_roots = [0, CONCURRENCY_LIMIT / 2, CONCURRENCY_LIMIT]
+        .map(|index| {
+            directories[index]
+                .join(AGENTS_DIR_NAME)
+                .join(SKILLS_DIR_NAME)
+        })
+        .map(|path| {
+            fs::create_dir_all(&path).expect("repo skill root");
+            path.abs()
+        });
+    let expected_probes = directories
+        .iter()
+        .map(|directory| {
+            PathUri::from_abs_path(&directory.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME).abs())
+        })
+        .collect::<Vec<_>>();
+    let cfg = make_config_for_cwd(&codex_home, cwd).await;
+    let metadata_calls = Arc::new(BlockingMetadataCalls::default());
+    let fs: Arc<dyn ExecutorFileSystem> = Arc::new(BlockingRepoSkillRootFileSystem {
+        inner: Arc::clone(&LOCAL_FS),
+        metadata_calls: Arc::clone(&metadata_calls),
+        blocked_walk_root: None,
+        blocked_walk_gate: Semaphore::new(/*permits*/ 0),
+        walks_started: AtomicUsize::new(/*v*/ 0),
+        walk_started: Notify::new(),
+    });
+
+    let assertions = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let started = metadata_calls.started.notified();
+                if metadata_calls
+                    .paths
+                    .lock()
+                    .expect("metadata paths lock")
+                    .len()
+                    >= CONCURRENCY_LIMIT
+                {
+                    break;
+                }
+                started.await;
+            }
+        })
+        .await
+        .expect("initial repo skill root window should start");
+        assert_eq!(
+            metadata_calls
+                .paths
+                .lock()
+                .expect("metadata paths lock")
+                .as_slice(),
+            &expected_probes[..CONCURRENCY_LIMIT]
+        );
+
+        metadata_calls.release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let started = metadata_calls.started.notified();
+                if metadata_calls
+                    .paths
+                    .lock()
+                    .expect("metadata paths lock")
+                    .len()
+                    > CONCURRENCY_LIMIT
+                {
+                    break;
+                }
+                started.await;
+            }
+        })
+        .await
+        .expect("next repo skill root probe should start");
+        assert_eq!(
+            metadata_calls
+                .paths
+                .lock()
+                .expect("metadata paths lock")
+                .as_slice(),
+            expected_probes.as_slice()
+        );
+
+        metadata_calls.release.add_permits(expected_probes.len());
+    };
+    let (roots, ()) = tokio::join!(
+        super::repo_agents_skill_roots(Some(fs), &cfg.config_layer_stack, &cfg.cwd),
+        assertions
+    );
+
+    assert_eq!(
+        roots.into_iter().map(|root| root.path).collect::<Vec<_>>(),
+        expected_roots
+    );
+}
+
+#[tokio::test]
+async fn merges_root_results_in_input_order_when_scans_finish_out_of_order() {
+    const ROOT_COUNT: usize = MAX_CONCURRENT_ROOT_SCANS + 1;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let roots = (0..ROOT_COUNT)
+        .map(|index| temp.path().join(format!("root-{index}")))
+        .collect::<Vec<_>>();
+    for root in &roots {
+        fs::create_dir_all(root).expect("create root");
+    }
+    let first_skill = roots[0].join("broken/SKILL.md");
+    let second_skill = roots[1].join("broken/SKILL.md");
+    for (path, contents) in [
+        (&first_skill, "missing frontmatter"),
+        (&second_skill, "also missing frontmatter"),
+    ] {
+        fs::create_dir_all(path.parent().expect("skill parent")).expect("create skill directory");
+        fs::write(path, contents).expect("write skill");
+    }
+
+    let blocked_walk_root = PathUri::from_abs_path(&roots[0].abs());
+    let file_system = Arc::new(BlockingRepoSkillRootFileSystem {
+        inner: Arc::clone(&LOCAL_FS),
+        metadata_calls: Arc::new(BlockingMetadataCalls::default()),
+        blocked_walk_root: Some(blocked_walk_root),
+        blocked_walk_gate: Semaphore::new(/*permits*/ 0),
+        walks_started: AtomicUsize::new(/*v*/ 0),
+        walk_started: Notify::new(),
+    });
+    let root_file_system: Arc<dyn ExecutorFileSystem> = file_system.clone();
+    let skill_roots = roots
+        .iter()
+        .enumerate()
+        .map(|(index, root)| SkillRoot {
+            path: root.abs(),
+            scope: if index == 0 {
+                SkillScope::Repo
+            } else {
+                SkillScope::User
+            },
+            file_system: Arc::clone(&root_file_system),
+            plugin_id: None,
+            plugin_namespace: Some("test".to_string()),
+            plugin_root: None,
+        })
+        .collect::<Vec<_>>();
+    let root_scan_slots = Semaphore::new(MAX_CONCURRENT_ROOT_SCANS);
+    let load = tokio::spawn(async move {
+        crate::root_loader::load_and_merge_skill_roots(
+            skill_roots,
+            /*plugin_skill_snapshots*/ None,
+            &root_scan_slots,
+        )
+        .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 5), async {
+        loop {
+            let started = file_system.walk_started.notified();
+            if file_system.walks_started.load(Ordering::Acquire) == ROOT_COUNT {
+                break;
+            }
+            started.await;
+        }
+    })
+    .await
+    .expect("all skill-root walks should start despite the blocked first root");
+    file_system.blocked_walk_gate.add_permits(/*n*/ 1);
+    let outcome = load.await.expect("skill-root load should finish");
+
+    assert_eq!(outcome.skills, Vec::new());
+    assert_eq!(
+        outcome.errors,
+        vec![
+            SkillError {
+                path: canonicalize_path(first_skill)
+                    .expect("canonical first skill")
+                    .abs(),
+                message: "missing YAML frontmatter delimited by ---".to_string(),
+            },
+            SkillError {
+                path: canonicalize_path(second_skill)
+                    .expect("canonical second skill")
+                    .abs(),
+                message: "missing YAML frontmatter delimited by ---".to_string(),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn skill_root_scans_wait_for_shared_capacity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("root");
+    fs::create_dir_all(&root).expect("create root");
+    let root_scan_slots = Semaphore::new(MAX_CONCURRENT_ROOT_SCANS);
+    let held_slots = root_scan_slots
+        .try_acquire_many(
+            u32::try_from(MAX_CONCURRENT_ROOT_SCANS).expect("root scan limit should fit in u32"),
+        )
+        .expect("root scan slots should be available");
+    let load = crate::root_loader::load_and_merge_skill_roots(
+        [SkillRoot {
+            path: root.abs(),
+            scope: SkillScope::Repo,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_id: None,
+            plugin_namespace: Some("test".to_string()),
+            plugin_root: None,
+        }],
+        /*plugin_skill_snapshots*/ None,
+        &root_scan_slots,
+    );
+    tokio::pin!(load);
+
+    assert!(futures::poll!(load.as_mut()).is_pending());
+    drop(held_slots);
+    let outcome = load.await;
+
+    assert_eq!(outcome.skills, Vec::new());
+    assert_eq!(outcome.errors, Vec::new());
+}
+
+#[tokio::test]
 async fn loads_skills_from_codex_dir_when_not_git_repo() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let work_dir = tempfile::tempdir().expect("tempdir");
@@ -1799,22 +2509,28 @@ async fn deduplicates_by_path_preferring_first_root() {
 
     let skill_path = write_skill_at(root.path(), "dupe", "dupe-skill", "from repo");
 
-    let outcome = load_skills_from_roots([
-        SkillRoot {
-            path: root.path().abs(),
-            scope: SkillScope::Repo,
-            file_system: Arc::clone(&LOCAL_FS),
-            plugin_id: None,
-            plugin_root: None,
-        },
-        SkillRoot {
-            path: root.path().abs(),
-            scope: SkillScope::User,
-            file_system: Arc::clone(&LOCAL_FS),
-            plugin_id: None,
-            plugin_root: None,
-        },
-    ])
+    let outcome = load_skills_from_roots(
+        [
+            SkillRoot {
+                path: root.path().abs(),
+                scope: SkillScope::Repo,
+                file_system: Arc::clone(&LOCAL_FS),
+                plugin_id: None,
+                plugin_namespace: None,
+                plugin_root: None,
+            },
+            SkillRoot {
+                path: root.path().abs(),
+                scope: SkillScope::User,
+                file_system: Arc::clone(&LOCAL_FS),
+                plugin_id: None,
+                plugin_namespace: None,
+                plugin_root: None,
+            },
+        ],
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
     .await;
 
     assert!(
@@ -2100,11 +2816,13 @@ async fn loads_skills_from_system_cache_when_present() {
 async fn skill_roots_include_admin_with_lowest_priority() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let cfg = make_config(&codex_home).await;
+    let user_home = codex_home.path().abs();
 
-    let scopes: Vec<SkillScope> = super::skill_roots(
+    let scopes: Vec<SkillScope> = super::skill_roots_with_home_dir(
         Some(Arc::clone(&LOCAL_FS)),
         &cfg.config_layer_stack,
         &cfg.cwd,
+        Some(&user_home),
         Vec::new(),
         Vec::new(),
     )
@@ -2112,10 +2830,11 @@ async fn skill_roots_include_admin_with_lowest_priority() {
     .into_iter()
     .map(|root| root.scope)
     .collect();
-    let mut expected = vec![SkillScope::User, SkillScope::System];
-    if home_dir().is_some() {
-        expected.insert(1, SkillScope::User);
-    }
-    expected.push(SkillScope::Admin);
+    let expected = vec![
+        SkillScope::User,
+        SkillScope::User,
+        SkillScope::System,
+        SkillScope::Admin,
+    ];
     assert_eq!(scopes, expected);
 }

@@ -7,6 +7,17 @@ Open Interpreter does not maintain a separate SDK. It is a drop-in replacement
 for Codex surfaces, so SDK integrations should use OpenAI's Codex SDK and point
 the launched agent process at Open Interpreter.
 
+For the TypeScript SDK, an existing integration needs one changed line:
+
+```diff
+-const codex = new Codex();
++const codex = new Codex({ codexPathOverride: "interpreter" });
+```
+
+The SDK continues to speak the Codex exec protocol; only the launched binary
+changes. Run `scripts/test-codex-sdk-compat.sh` from a source checkout for a
+provider-free smoke test against an installed `interpreter` binary.
+
 Use the upstream SDK docs for the complete API:
 
 - [Codex SDK](https://developers.openai.com/codex/sdk)
@@ -33,8 +44,8 @@ oi_server = AppServerConfig(
 with Codex(config=oi_server) as codex:
     thread = codex.thread_start(
         model_provider="moonshotai",
-        model="kimi-k2.5",
-        config={"harness": "kimi-cli"},
+        model="kimi-k3",
+        config={"harness": "kimi-code"},
     )
     result = thread.run("Review this repo and list the first migration step.")
     print(result.final_response)
@@ -55,11 +66,11 @@ const codex = new Codex({
   codexPathOverride: "interpreter",
   config: {
     model_provider: "moonshotai",
-    harness: "kimi-cli",
+    harness: "kimi-code",
   },
 });
 
-const thread = codex.startThread({ model: "kimi-k2.5" });
+const thread = codex.startThread({ model: "kimi-k3" });
 const result = await thread.run(
   "Review this repo and list the first migration step.",
 );
@@ -78,8 +89,8 @@ embedding the SDK:
 ```bash
 interpreter exec \
   -c 'model_provider="moonshotai"' \
-  -c 'harness="kimi-cli"' \
-  -m "kimi-k2.5" \
+  -c 'harness="kimi-code"' \
+  -m "kimi-k3" \
   "Review this pull request and report blocking issues."
 ```
 

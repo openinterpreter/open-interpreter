@@ -77,6 +77,7 @@ replace_symlink() {
 
   rm -f "$tmp_link"
   ln -s "$target_path" "$tmp_link"
+  rm -f "$link_path"
   mv -f "$tmp_link" "$link_path"
 }
 

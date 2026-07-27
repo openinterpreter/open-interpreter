@@ -1,5 +1,11 @@
 pub const OPEN_INTERPRETER_BRAND_ENV_VAR: &str = "OPEN_INTERPRETER_BRAND";
 
+/// Upstream Codex release whose client behavior is embedded in Open Interpreter.
+///
+/// Open Interpreter has an independent product version, so backend compatibility
+/// checks must not interpret that product version as the embedded Codex version.
+pub const OPEN_INTERPRETER_CODEX_COMPATIBILITY_VERSION: &str = "0.145.0";
+
 const CODEX_RELEASE_NOTES_URL: &str = "https://github.com/openai/codex/releases/latest";
 const OPEN_INTERPRETER_RELEASE_NOTES_URL: &str =
     "https://github.com/openinterpreter/openinterpreter/releases/latest";
@@ -71,6 +77,14 @@ impl Product {
         match self {
             Product::Codex => "codex",
             Product::OpenInterpreter => "interpreter",
+        }
+    }
+
+    /// Version advertised to Codex services for client compatibility checks.
+    pub fn codex_compatibility_version(self) -> &'static str {
+        match self {
+            Product::Codex => env!("CARGO_PKG_VERSION"),
+            Product::OpenInterpreter => OPEN_INTERPRETER_CODEX_COMPATIBILITY_VERSION,
         }
     }
 
@@ -213,6 +227,10 @@ mod tests {
             "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
         );
         assert_eq!(Product::Codex.installer_env(), &[]);
+        assert_eq!(
+            Product::Codex.codex_compatibility_version(),
+            env!("CARGO_PKG_VERSION")
+        );
     }
 
     #[test]
@@ -228,6 +246,10 @@ mod tests {
         assert_eq!(
             Product::OpenInterpreter.installer_url(),
             "https://www.openinterpreter.com/install"
+        );
+        assert_eq!(
+            Product::OpenInterpreter.codex_compatibility_version(),
+            OPEN_INTERPRETER_CODEX_COMPATIBILITY_VERSION
         );
         assert!(
             Product::OpenInterpreter

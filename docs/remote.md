@@ -23,4 +23,7 @@ Tokens are intended for secure transports. For plain `ws://`, use localhost or
 another explicitly trusted local endpoint.
 
 Remote mode is an advanced integration surface. Most users should run
-`interpreter` normally and let the launcher manage the local daemon.
+`interpreter` normally; the TUI starts an embedded local runtime and does not
+require a daemon. If you explicitly start the optional shared daemon, the TUI
+can reuse its Unix socket when the launch settings are compatible. See
+[Daemon](/docs/daemon).

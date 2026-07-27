@@ -194,10 +194,14 @@ fn provider_description(provider_id: &str, provider: &ModelProviderInfo) -> Stri
             WireApi::Messages => "Anthropic Messages".to_string(),
         }
     };
-    codex_model_provider_info::default_harness_for_provider_model(provider_id, provider, None)
-        .map_or(description.clone(), |harness| {
-            format!("{description} | Harness: {harness}")
-        })
+    codex_model_provider_info::default_harness_for_provider_model(
+        provider_id,
+        provider,
+        /*model*/ None,
+    )
+    .map_or(description.clone(), |harness| {
+        format!("{description} | Harness: {harness}")
+    })
 }
 
 fn harness_choices(

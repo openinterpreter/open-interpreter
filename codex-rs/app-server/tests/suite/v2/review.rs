@@ -17,6 +17,7 @@ use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ReviewStartResponse;
 use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
@@ -26,6 +27,8 @@ use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_skills::system_cache_root_dir;
+use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
@@ -33,6 +36,55 @@ use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
+const COLLIDING_REVIEW_SKILL_MARKER: &str = "COLLIDING_REVIEW_SKILL_MARKER";
+
+#[tokio::test]
+async fn review_start_rejects_detached_delivery_for_paginated_parent() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let start_id = mcp
+        .send_thread_start_request(ThreadStartParams {
+            history_mode: Some(ThreadHistoryMode::Paginated),
+            ..Default::default()
+        })
+        .await?;
+    let start_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(start_id)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response(start_resp)?;
+
+    let review_id = mcp
+        .send_review_start_request(ReviewStartParams {
+            thread_id: thread.id,
+            delivery: Some(ReviewDelivery::Detached),
+            target: ReviewTarget::Custom {
+                instructions: "detached review".to_string(),
+            },
+        })
+        .await?;
+    let review_err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(review_id)),
+    )
+    .await??;
+    assert_eq!(review_err.error.code, -32600);
+    assert_eq!(
+        review_err.error.message,
+        "paginated threads do not support detached review"
+    );
+
+    Ok(())
+}
 
 #[tokio::test]
 async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()> {
@@ -59,7 +111,10 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_id = start_default_thread(&mut mcp).await?;
@@ -110,8 +165,8 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
         let started: ItemStartedNotification =
             serde_json::from_value(item_started.params.expect("params must be present"))?;
         match started.item {
-            ThreadItem::EnteredReviewMode { id, review } => {
-                assert_eq!(id, turn_id);
+            ThreadItem::EnteredReviewMode { review, .. } => {
+                assert_eq!(started.turn_id, turn_id);
                 assert_eq!(review, "commit 1234567: Tidy UI colors");
                 saw_entered_review_mode = true;
                 break;
@@ -136,8 +191,8 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
         let completed: ItemCompletedNotification =
             serde_json::from_value(review_notif.params.expect("params must be present"))?;
         match completed.item {
-            ThreadItem::ExitedReviewMode { id, review } => {
-                assert_eq!(id, turn_id);
+            ThreadItem::ExitedReviewMode { review, .. } => {
+                assert_eq!(completed.turn_id, turn_id);
                 review_body = Some(review);
                 break;
             }
@@ -173,7 +228,10 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
     let codex_home = TempDir::new()?;
     create_config_toml_with_approval_policy(codex_home.path(), &server.uri(), "untrusted")?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_id = start_default_thread(&mut mcp).await?;
@@ -256,7 +314,10 @@ async fn review_start_rejects_empty_base_branch() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
     let thread_id = start_default_thread(&mut mcp).await?;
 
@@ -287,19 +348,47 @@ async fn review_start_rejects_empty_base_branch() -> Result<()> {
 #[cfg_attr(target_os = "windows", ignore = "flaky on windows CI")]
 #[tokio::test]
 async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<()> {
-    let review_payload = json!({
-        "findings": [],
-        "overall_correctness": "ok",
-        "overall_explanation": "detached review",
-        "overall_confidence_score": 0.5
-    })
-    .to_string();
-    let server = create_mock_responses_server_repeating_assistant(&review_payload).await;
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("materialize-response"),
+                responses::ev_assistant_message("materialize-message", "materialized"),
+                responses::ev_completed("materialize-response"),
+            ]),
+            responses::sse(vec![
+                responses::ev_response_created("review-response"),
+                responses::ev_assistant_message("review-message", "No findings."),
+                responses::ev_completed("review-response"),
+            ]),
+        ],
+    )
+    .await;
 
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
+    let colliding_skill_dir = codex_home.path().join("skills/review-agent-collision");
+    std::fs::create_dir_all(&colliding_skill_dir)?;
+    std::fs::write(
+        colliding_skill_dir.join("SKILL.md"),
+        format!(
+            "---\nname: review-agent\ndescription: Colliding user review skill.\n---\n\n{COLLIDING_REVIEW_SKILL_MARKER}\n"
+        ),
+    )?;
+    let canonical_codex_home = std::fs::canonicalize(codex_home.path())?.try_into()?;
+    let review_skill_path = system_cache_root_dir(&canonical_codex_home)
+        .join("review-agent")
+        .join("SKILL.md");
+    let expected_prompt = format!(
+        "Use [$review-agent]({}) for this review.\n\ndetached review",
+        review_skill_path.display()
+    );
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let thread_id = start_default_thread(&mut mcp).await?;
@@ -332,7 +421,7 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
             id: turn.id.clone(),
             client_id: None,
             content: vec![V2UserInput::Text {
-                text: "detached review".to_string(),
+                text: expected_prompt.clone(),
                 text_elements: Vec::new(),
             }],
         }]
@@ -368,6 +457,26 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
     assert_eq!(started.thread.id, review_thread_id);
     assert_eq!(started.thread.session_id, review_thread_id);
 
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    let review_request = &requests[1];
+    assert_eq!(review_request.header("x-openai-subagent"), None);
+    assert!(review_request.body_contains_text("Colliding user review skill."));
+    let user_messages = review_request.message_input_texts("user");
+    assert!(user_messages.iter().any(|text| text == &expected_prompt));
+    assert!(user_messages.iter().any(|text| {
+        text.starts_with("<skill>")
+            && text.contains("<name>review-agent</name>")
+            && text.contains("Do not modify files")
+    }));
+    assert!(!review_request.body_contains_text(COLLIDING_REVIEW_SKILL_MARKER));
+
     Ok(())
 }
 
@@ -377,7 +486,10 @@ async fn review_start_rejects_empty_commit_sha() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
     let thread_id = start_default_thread(&mut mcp).await?;
 
@@ -412,7 +524,10 @@ async fn review_start_rejects_empty_custom_instructions() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
     let thread_id = start_default_thread(&mut mcp).await?;
 
@@ -445,7 +560,7 @@ async fn review_start_rejects_empty_custom_instructions() -> Result<()> {
 
 async fn start_default_thread(mcp: &mut TestAppServer) -> Result<String> {
     let thread_req = mcp
-        .send_thread_start_request(ThreadStartParams {
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             ..Default::default()
         })

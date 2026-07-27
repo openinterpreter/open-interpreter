@@ -1,0 +1,68 @@
+import { DocsTerminalHero } from "@/components/docs/docs-terminal-hero";
+import { DocsAgentHandoff } from "@/components/docs/docs-agent-handoff";
+
+# Open Interpreter
+
+<DocsTerminalHero />
+
+<DocsAgentHandoff />
+
+Open Interpreter 是一个运行在终端中的编码代理。打开一个项目，输入 `interpreter`，它会读取你的文件、编辑它们并代表你执行命令。
+
+它基于 Codex 构建，并保持对提供商中立，因此你可以接入 OpenAI、Anthropic、本地模型或其他任何模型。
+
+<CardGroup cols={2}>
+  <Card title="安装" href="/docs/install">
+    在你的机器上获取 `interpreter` 命令。
+  </Card>
+  <Card title="快速入门" href="/docs/quickstart">
+    在一分钟内运行你的第一个会话。
+  </Card>
+  <Card title="身份验证" href="/docs/authentication">
+    登录或连接一个提供商。
+  </Card>
+  <Card title="配置" href="/docs/config">
+    调整提供商、沙箱和功能。
+  </Card>
+</CardGroup>
+
+## 功能概述
+
+- **就地编辑代码。** 提出修改请求并在提交前审查差异。
+- **在明确的护栏下运行命令。** 沙箱决定哪些操作是可能的，审批模式决定何时先询问。
+- **使用你自己的模型。** 选择适合任务的提供商和模型。随时使用 `/model` 切换。
+- **恢复长时间会话。** 使用 `interpreter resume --last` 继续之前的工作。
+- **保持 Codex 的使用体验。** 使用熟悉的 `exec`、会话、MCP、`AGENTS.md`、技能、钩子、权限和子代理，配合 Open Interpreter 的提供商无关模型选择器。
+
+## 使用体验
+
+```bash
+$ cd my-project
+$ interpreter
+> add a /health endpoint that returns the build sha
+```
+
+Open Interpreter 会规划变更、编辑文件，并在超出当前沙箱范围时先询问确认。
+
+## 接下来该做什么
+
+<CardGroup cols={2}>
+  <Card title="斜杠命令" href="/docs/slash_commands">
+    在编辑器中切换模型、管理会话等。
+  </Card>
+  <Card title="AGENTS.md" href="/docs/agents_md">
+    为代理提供项目特定的指导，它会始终读取。
+  </Card>
+  <Card title="技能" href="/docs/skills">
+    打包可重用的工作流，代理可以自动使用。
+  </Card>
+  <Card title="沙箱与审批" href="/docs/sandbox">
+    决定哪些操作自动执行，哪些先询问。
+  </Card>
+  <Card title="CLI 参考" href="/docs/cli-reference">
+    查看公开的 `interpreter` 命令和参数。
+  </Card>
+  <Card title="Harness" href="/docs/harness">
+    有意使用 harness 形兼容模式。
+  </Card>
+</CardGroup>

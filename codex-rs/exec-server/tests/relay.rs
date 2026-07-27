@@ -15,7 +15,9 @@ use anyhow::Result;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use codex_api::AuthProvider;
+use codex_exec_server::EnvironmentConnectionState;
 use codex_exec_server::EnvironmentManager;
+use codex_exec_server::EnvironmentReadyInfo;
 use codex_exec_server::ExecParams;
 use codex_exec_server::ExecResponse;
 use codex_exec_server::ExecServerClient;
@@ -29,8 +31,9 @@ use codex_exec_server::NoiseRendezvousConnectBundle;
 use codex_exec_server::NoiseRendezvousConnectProvider;
 use codex_exec_server::ProcessId;
 use codex_exec_server::RemoteEnvironmentConfig;
+use codex_protocol::capabilities::CapabilityRootLocation;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_utils_path_uri::PathUri;
-use futures::FutureExt;
 use futures::SinkExt;
 use futures::StreamExt;
 use futures::future::BoxFuture;
@@ -43,6 +46,7 @@ use relay_proto::relay_message_frame;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
+use tokio::sync::watch;
 use tokio::time::timeout;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::accept_async;
@@ -72,66 +76,167 @@ impl AuthProvider for StaticRegistryAuthProvider {
     }
 }
 
-struct FailingNoiseConnectProvider {
-    attempts: Arc<AtomicUsize>,
-}
-
-impl NoiseRendezvousConnectProvider for FailingNoiseConnectProvider {
-    fn connect_bundle(
-        &self,
-        _: NoiseChannelPublicKey,
-    ) -> BoxFuture<'_, Result<NoiseRendezvousConnectBundle, ExecServerError>> {
-        self.attempts.fetch_add(1, Ordering::SeqCst);
-        async {
-            Err(ExecServerError::Protocol(
-                "test registry connect failure".to_string(),
-            ))
-        }
-        .boxed()
-    }
-}
-
 fn static_registry_auth_provider() -> codex_api::SharedAuthProvider {
     Arc::new(StaticRegistryAuthProvider)
 }
 
-#[tokio::test]
-async fn noise_environment_refreshes_bundle_for_each_connection_attempt() -> Result<()> {
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let manager = EnvironmentManager::without_environments();
-    manager.upsert_noise_environment(
-        ENVIRONMENT_ID.to_string(),
-        Arc::new(FailingNoiseConnectProvider {
-            attempts: Arc::clone(&attempts),
-        }),
-    )?;
-    let backend = manager
-        .get_environment(ENVIRONMENT_ID)
-        .context("Noise environment should be materialized")?
-        .get_exec_backend();
+struct FreshBundleNoiseConnectProvider {
+    websocket_url: String,
+    executor_public_key: NoiseChannelPublicKey,
+    calls: AtomicUsize,
+}
 
-    for attempt in 1..=2 {
-        let result = backend
-            .start(ExecParams {
-                process_id: ProcessId::new(format!("proc-{attempt}")),
-                argv: vec!["true".to_string()],
-                cwd: PathUri::from_path(std::env::current_dir()?)?,
-                env_policy: None,
-                env: HashMap::new(),
-                tty: false,
-                pipe_stdin: false,
-                arg0: None,
-            })
-            .await;
-        assert!(matches!(
-            result,
-            Err(ExecServerError::Protocol(ref message))
-                if message == "test registry connect failure"
-        ));
+impl FreshBundleNoiseConnectProvider {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::Relaxed)
     }
+}
 
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+impl NoiseRendezvousConnectProvider for FreshBundleNoiseConnectProvider {
+    fn connect_bundle(
+        &self,
+        _: NoiseChannelPublicKey,
+    ) -> BoxFuture<'_, Result<NoiseRendezvousConnectBundle, ExecServerError>> {
+        let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+        let bundle = NoiseRendezvousConnectBundle {
+            websocket_url: self.websocket_url.clone(),
+            environment_id: ENVIRONMENT_ID.to_string(),
+            executor_registration_id: EXECUTOR_REGISTRATION_ID.to_string(),
+            executor_public_key: self.executor_public_key.clone(),
+            harness_key_authorization: format!("{HARNESS_KEY_AUTHORIZATION}-{call}"),
+        };
+        Box::pin(async move { Ok(bundle) })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deferred_noise_environment_connects_and_reconnects_with_fresh_bundle() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let rendezvous_url = format!("ws://{}", listener.local_addr()?);
+    let registry = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/cloud/environment/{ENVIRONMENT_ID}/register"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "environment_id": ENVIRONMENT_ID,
+            "url": format!("{rendezvous_url}/relay?role=environment"),
+            "security_profile": "noise_hybrid_ik_v1",
+            "executor_registration_id": EXECUTOR_REGISTRATION_ID,
+        })))
+        .expect(1)
+        .mount(&registry)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/cloud/environment/{ENVIRONMENT_ID}/validate"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "valid": true,
+        })))
+        .expect(2)
+        .mount(&registry)
+        .await;
+
+    let (codex_exe, codex_linux_sandbox_exe) = common::current_test_binary_helper_paths()?;
+    let runtime_paths = ExecServerRuntimePaths::new(codex_exe, codex_linux_sandbox_exe)?;
+    let config = RemoteEnvironmentConfig::new(
+        registry.uri(),
+        ENVIRONMENT_ID.to_string(),
+        static_registry_auth_provider(),
+    )?;
+    let remote_environment = tokio::spawn(codex_exec_server::run_remote_environment(
+        config,
+        runtime_paths,
+    ));
+
+    let environment_websocket = accept_websocket(&listener, "environment").await?;
+    let provider = Arc::new(FreshBundleNoiseConnectProvider {
+        websocket_url: format!("{rendezvous_url}/relay?role=harness"),
+        executor_public_key: registered_executor_public_key(&registry).await?,
+        calls: AtomicUsize::new(0),
+    });
+    let manager = EnvironmentManager::without_environments();
+    let registration = manager
+        .register_deferred_noise_environment(ENVIRONMENT_ID.to_string(), provider.clone())?;
+    let environment = manager
+        .get_environment(ENVIRONMENT_ID)
+        .context("deferred Noise environment")?;
+    let mut connection_state = environment
+        .subscribe_connection_state()
+        .context("remote environment connection state")?;
+
+    assert_eq!(provider.calls(), 0);
+    let selected_capability_roots = vec![SelectedCapabilityRoot {
+        id: "executor-plugin".to_string(),
+        location: CapabilityRootLocation::Environment {
+            environment_id: ENVIRONMENT_ID.to_string(),
+            path: PathUri::parse("file:///plugins/executor-plugin")?,
+        },
+    }];
+    registration.complete(Ok(EnvironmentReadyInfo {
+        selected_capability_roots: selected_capability_roots.clone(),
+    }))?;
+    let harness_websocket = accept_websocket(&listener, "harness").await?;
+    let first_relay = tokio::spawn(proxy_relay_frames(
+        environment_websocket,
+        harness_websocket,
+        Arc::new(Mutex::new(Vec::new())),
+    ));
+    let initial_info = timeout(TEST_TIMEOUT, environment.info())
+        .await
+        .context("deferred Noise environment should become ready")??;
+    assert_eq!(
+        environment.selected_capability_roots(),
+        selected_capability_roots
+    );
+    assert_eq!(provider.calls(), 1);
+    assert_eq!(
+        next_connection_state(&mut connection_state).await?,
+        EnvironmentConnectionState::Connected
+    );
+
+    first_relay.abort();
+    let _ = first_relay.await;
+    assert_eq!(
+        next_connection_state(&mut connection_state).await?,
+        EnvironmentConnectionState::Disconnected
+    );
+    let first_reconnected_websocket = accept_websocket(&listener, "reconnected peer").await?;
+    let second_reconnected_websocket = accept_websocket(&listener, "reconnected peer").await?;
+    let second_relay = tokio::spawn(proxy_relay_frames(
+        first_reconnected_websocket,
+        second_reconnected_websocket,
+        Arc::new(Mutex::new(Vec::new())),
+    ));
+    let recovered_info = timeout(TEST_TIMEOUT, environment.info())
+        .await
+        .context("deferred Noise environment should reconnect")??;
+
+    assert_eq!(recovered_info, initial_info);
+    assert_eq!(
+        environment.selected_capability_roots(),
+        selected_capability_roots
+    );
+    assert_eq!(provider.calls(), 2);
+    assert_eq!(
+        next_connection_state(&mut connection_state).await?,
+        EnvironmentConnectionState::Connected
+    );
+    registry.verify().await;
+
+    second_relay.abort();
+    remote_environment.abort();
+    let _ = second_relay.await;
+    let _ = remote_environment.await;
     Ok(())
+}
+
+async fn next_connection_state(
+    state: &mut watch::Receiver<EnvironmentConnectionState>,
+) -> Result<EnvironmentConnectionState> {
+    timeout(TEST_TIMEOUT, state.changed()).await??;
+    Ok(*state.borrow_and_update())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -209,18 +314,22 @@ async fn remote_environment_routes_encrypted_exec_server_rpc() -> Result<()> {
         .exec(ExecParams {
             process_id: ProcessId::from("proc-1"),
             argv: vec!["true".to_string()],
-            cwd: PathUri::from_path(std::env::current_dir()?)?,
+            cwd: PathUri::from_host_native_path(std::env::current_dir()?)?,
             env_policy: None,
             env: HashMap::new(),
             tty: false,
             pipe_stdin: false,
             arg0: None,
+            sandbox: None,
+            enforce_managed_network: false,
+            managed_network: None,
+            network_proxy: None,
         })
         .await?;
     assert_eq!(
         response,
         ExecResponse {
-            process_id: ProcessId::from("proc-1")
+            process_id: ProcessId::from("proc-1"),
         }
     );
 
@@ -230,7 +339,7 @@ async fn remote_environment_routes_encrypted_exec_server_rpc() -> Result<()> {
     std::fs::write(&large_file_path, &large_file_contents)?;
     let read_response = client
         .fs_read_file(FsReadFileParams {
-            path: PathUri::from_path(large_file_path)?,
+            path: PathUri::from_host_native_path(large_file_path)?,
             sandbox: None,
         })
         .await?;

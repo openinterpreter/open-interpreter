@@ -53,8 +53,8 @@ For another provider, set the provider's API key and pass config overrides:
   run: |
     interpreter exec \
       -c 'model_provider="moonshotai"' \
-      -c 'harness="kimi-cli"' \
-      -m kimi-k2.6 \
+      -c 'harness="kimi-code"' \
+      -m kimi-k3 \
       "Summarize the risky parts of this change."
 ```
 

@@ -5,6 +5,7 @@ use codex_api::ResponseEvent;
 use codex_api::ResponseStream;
 use codex_api::SseTelemetry;
 use codex_client::ByteStream;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
@@ -108,8 +109,8 @@ impl StreamState {
     fn new() -> Self {
         Self {
             response_id: "chatcmpl-compat".to_string(),
-            message_item_id: "chat-message-1".to_string(),
-            reasoning_item_id: "chat-reasoning-1".to_string(),
+            message_item_id: std::convert::identity("chat-message-1".to_string()),
+            reasoning_item_id: std::convert::identity("chat-reasoning-1".to_string()),
             created_sent: false,
             assistant_item_started: false,
             assistant_text: String::new(),
@@ -234,13 +235,15 @@ async fn process_chat_sse(
                         if tx_event
                             .send(Ok(ResponseEvent::OutputItemAdded(
                                 ResponseItem::Reasoning {
-                                    id: Some(state.reasoning_item_id.clone()),
+                                    id: Some(ResponseItemId::from_server(
+                                        state.reasoning_item_id.clone(),
+                                    )),
                                     summary: vec![],
                                     content: Some(vec![ReasoningItemContent::ReasoningText {
                                         text: String::new(),
                                     }]),
                                     encrypted_content: None,
-                                    metadata: None,
+                                    internal_chat_message_metadata_passthrough: None,
                                 },
                             )))
                             .await
@@ -269,13 +272,15 @@ async fn process_chat_sse(
                             state.assistant_item_started = true;
                             if tx_event
                                 .send(Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message {
-                                    id: Some(state.message_item_id.clone()),
+                                    id: Some(ResponseItemId::from_server(
+                                        state.message_item_id.clone(),
+                                    )),
                                     role: "assistant".to_string(),
                                     content: vec![ContentItem::OutputText {
                                         text: String::new(),
                                     }],
                                     phase: None,
-                                    metadata: None,
+                                    internal_chat_message_metadata_passthrough: None,
                                 })))
                                 .await
                                 .is_err()
@@ -403,6 +408,7 @@ async fn finalize_and_complete(
             token_usage: state.usage.map(|usage| TokenUsage {
                 input_tokens: usage.prompt_tokens.unwrap_or(0),
                 cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
                 output_tokens: usage.completion_tokens.unwrap_or(0),
                 reasoning_output_tokens: 0,
                 total_tokens: usage.total_tokens.unwrap_or_else(|| {
@@ -425,13 +431,13 @@ async fn finalize_assistant_message(
     }
     tx_event
         .send(Ok(ResponseEvent::OutputItemDone(ResponseItem::Message {
-            id: Some(state.message_item_id.clone()),
+            id: Some(ResponseItemId::from_server(state.message_item_id.clone())),
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: state.assistant_text.clone(),
             }],
             phase: None,
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         })))
         .await
         .map_err(|_| ApiError::Stream("chat stream channel closed".to_string()))?;
@@ -449,13 +455,13 @@ async fn finalize_reasoning(
 
     tx_event
         .send(Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
-            id: Some(state.reasoning_item_id.clone()),
+            id: Some(ResponseItemId::from_server(state.reasoning_item_id.clone())),
             summary: vec![],
             content: Some(vec![ReasoningItemContent::ReasoningText {
                 text: std::mem::take(&mut state.reasoning_content),
             }]),
             encrypted_content: None,
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         })))
         .await
         .map_err(|_| ApiError::Stream("chat stream channel closed".to_string()))?;
@@ -500,7 +506,7 @@ async fn finalize_tool_calls_until(
                 namespace: None,
                 arguments: tool_call.arguments,
                 call_id,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             Some(ToolOutputKind::NamespacedFunction {
                 name: output_name,
@@ -511,7 +517,7 @@ async fn finalize_tool_calls_until(
                 namespace: Some(namespace.clone()),
                 arguments: tool_call.arguments,
                 call_id,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
             Some(ToolOutputKind::Custom) => {
                 let input = match serde_json::from_str::<Value>(&tool_call.arguments) {
@@ -527,8 +533,9 @@ async fn finalize_tool_calls_until(
                     status: None,
                     call_id,
                     name,
+                    namespace: None,
                     input,
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 }
             }
             None => ResponseItem::FunctionCall {
@@ -537,7 +544,7 @@ async fn finalize_tool_calls_until(
                 namespace: None,
                 arguments: tool_call.arguments,
                 call_id,
-                metadata: None,
+                internal_chat_message_metadata_passthrough: None,
             },
         };
         tx_event

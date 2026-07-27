@@ -369,7 +369,21 @@ fn relative_api_path_is_invalid_when_converted_to_a_path_uri() {
         path.to_path_uri(PathConvention::Posix),
         Err(LegacyAppPathStringError::InvalidNativePath {
             path: raw_path.to_string(),
-            convention: PathConvention::Posix,
+            convention: Some(PathConvention::Posix),
+        })
+    );
+    assert_eq!(
+        PathUri::try_from(path.clone()),
+        Err(LegacyAppPathStringError::InvalidNativePath {
+            path: raw_path.to_string(),
+            convention: None,
+        })
+    );
+    assert_eq!(
+        AbsolutePathBuf::try_from(path),
+        Err(LegacyAppPathStringError::InvalidNativePath {
+            path: raw_path.to_string(),
+            convention: None,
         })
     );
 }
@@ -388,7 +402,7 @@ fn other_non_absolute_api_paths_cannot_be_converted_to_path_uris() {
             path.to_path_uri(convention),
             Err(LegacyAppPathStringError::InvalidNativePath {
                 path: raw_path.to_string(),
-                convention,
+                convention: Some(convention),
             })
         );
     }
@@ -424,6 +438,52 @@ fn infers_absolute_path_conventions_from_api_text() {
 }
 
 #[test]
+fn converts_absolute_api_paths_using_the_inferred_convention() {
+    for (raw_path, convention, expected_uri) in [
+        (
+            r"C:\workspace\file.rs",
+            PathConvention::Windows,
+            "file:///C:/workspace/file.rs",
+        ),
+        (
+            "/workspace/file.rs",
+            PathConvention::Posix,
+            "file:///workspace/file.rs",
+        ),
+    ] {
+        let path = serde_json::from_value::<LegacyAppPathString>(serde_json::json!(raw_path))
+            .expect("absolute API path should deserialize");
+
+        assert_eq!(
+            path.to_inferred_path_uri(),
+            Some(PathUri::parse(expected_uri).expect("expected URI should parse")),
+        );
+        assert_eq!(path.render_for_ui(), raw_path);
+        assert_eq!(
+            PathUri::try_from(path.clone()),
+            path.to_path_uri(convention)
+        );
+    }
+}
+
+#[test]
+fn converts_native_api_path_to_inferred_absolute_path() {
+    #[cfg(windows)]
+    let raw_path = r"C:\workspace\file.rs";
+    #[cfg(not(windows))]
+    let raw_path = "/workspace/file.rs";
+    let path = serde_json::from_value::<LegacyAppPathString>(serde_json::json!(raw_path))
+        .expect("absolute API path should deserialize");
+    let expected = AbsolutePathBuf::try_from(raw_path).expect("native absolute path should parse");
+
+    assert_eq!(
+        AbsolutePathBuf::try_from(path.clone()),
+        Ok(expected.clone())
+    );
+    assert_eq!(path.to_inferred_abs_path(), Some(expected));
+}
+
+#[test]
 fn foreign_absolute_syntax_deserializes_without_host_interpretation() {
     for (raw_path, convention) in [
         (r"C:\workspace\file.rs", PathConvention::Windows),
@@ -435,6 +495,23 @@ fn foreign_absolute_syntax_deserializes_without_host_interpretation() {
         assert_eq!(path.as_str(), raw_path);
         assert_eq!(path.infer_absolute_path_convention(), Some(convention));
     }
+}
+
+#[test]
+fn from_path_preserves_foreign_absolute_path_for_uri_conversion() {
+    #[cfg(not(windows))]
+    let (foreign_path, expected_uri) = (r"C:\Users\openai\share", "file:///C:/Users/openai/share");
+    #[cfg(windows)]
+    let (foreign_path, expected_uri) = ("/home/openai/share", "file:///home/openai/share");
+
+    let path: PathUri = LegacyAppPathString::from_path(std::path::Path::new(foreign_path))
+        .try_into()
+        .expect("foreign absolute path should convert");
+
+    assert_eq!(
+        path,
+        PathUri::parse(expected_uri).expect("valid expected URI")
+    );
 }
 
 #[test]

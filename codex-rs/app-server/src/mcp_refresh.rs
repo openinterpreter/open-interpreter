@@ -226,6 +226,8 @@ mod tests {
             ThreadManager::new(
                 &good_config,
                 auth_manager.clone(),
+                codex_core::build_models_manager(&good_config, auth_manager.clone()),
+                codex_core::CodexAppsToolsCache::default(),
                 SessionSource::Exec,
                 Arc::clone(&environment_manager),
                 thread_extensions(
@@ -247,9 +249,10 @@ mod tests {
                 )),
                 /*analytics_events_client*/ None,
                 Arc::clone(&thread_store),
-                Some(state_db.clone()),
+                codex_core::local_agent_graph_store_from_state_db(Some(&state_db)),
                 "11111111-1111-4111-8111-111111111111".to_string(),
                 /*attestation_provider*/ None,
+                /*external_time_provider*/ None,
             )
         });
         thread_manager.start_thread(good_config).await?;

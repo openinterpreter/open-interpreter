@@ -1,3 +1,5 @@
+use codex_feedback::CODEX_APP_DIRECTORY_CACHE_ATTACHMENT_FILENAME;
+use codex_feedback::CODEX_APPS_TOOLS_CACHE_ATTACHMENT_FILENAME;
 use codex_feedback::DOCTOR_REPORT_ATTACHMENT_FILENAME;
 use codex_feedback::FEEDBACK_DIAGNOSTICS_ATTACHMENT_FILENAME;
 use codex_feedback::FeedbackDiagnostics;
@@ -28,8 +30,10 @@ use super::popup_consts::standard_popup_hint_line;
 use super::textarea::TextArea;
 use super::textarea::TextAreaState;
 
-const BASE_CLI_BUG_ISSUE_URL: &str =
+const CODEX_CLI_BUG_ISSUE_URL: &str =
     "https://github.com/openai/codex/issues/new?template=3-cli.yml";
+const OPEN_INTERPRETER_CLI_BUG_ISSUE_URL: &str =
+    "https://github.com/openinterpreter/openinterpreter/issues/new?template=3-cli.yml";
 /// Internal routing link for employee feedback follow-ups. This must not be shown to external users.
 const CODEX_FEEDBACK_INTERNAL_URL: &str = "http://go/codex-feedback-internal";
 
@@ -377,7 +381,13 @@ fn issue_url_for_category(
         | FeedbackCategory::Other => Some(match feedback_audience {
             FeedbackAudience::OpenAiEmployee => slack_feedback_url(thread_id),
             FeedbackAudience::External => {
-                format!("{BASE_CLI_BUG_ISSUE_URL}&steps=Uploaded%20thread:%20{thread_id}")
+                let issue_url = match codex_product_info::Product::current() {
+                    codex_product_info::Product::Codex => CODEX_CLI_BUG_ISSUE_URL,
+                    codex_product_info::Product::OpenInterpreter => {
+                        OPEN_INTERPRETER_CLI_BUG_ISSUE_URL
+                    }
+                };
+                format!("{issue_url}&steps=Uploaded%20thread:%20{thread_id}")
             }
         }),
         FeedbackCategory::GoodResult => None,
@@ -508,6 +518,16 @@ pub(crate) fn feedback_upload_consent_params(
         Line::from(vec![
             "  • ".into(),
             DOCTOR_REPORT_ATTACHMENT_FILENAME.into(),
+        ])
+        .into(),
+        Line::from(vec![
+            "  • ".into(),
+            format!("{CODEX_APPS_TOOLS_CACHE_ATTACHMENT_FILENAME} (if available)").into(),
+        ])
+        .into(),
+        Line::from(vec![
+            "  • ".into(),
+            format!("{CODEX_APP_DIRECTORY_CACHE_ATTACHMENT_FILENAME} (if available)").into(),
         ])
         .into(),
     ];

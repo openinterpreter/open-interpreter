@@ -8,8 +8,13 @@
 use std::path::Path;
 use std::process::Command;
 
-fn run(bin: &Path, args: &[&str], envs: &[(&str, &str)], removed: &[&str]) -> (String, String) {
-    run_in(bin, args, envs, removed, None)
+fn run(
+    bin: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    removed: &[&str],
+) -> anyhow::Result<(String, String)> {
+    run_in(bin, args, envs, removed, /*cwd*/ None)
 }
 
 fn run_in(
@@ -18,7 +23,7 @@ fn run_in(
     envs: &[(&str, &str)],
     removed: &[&str],
     cwd: Option<&Path>,
-) -> (String, String) {
+) -> anyhow::Result<(String, String)> {
     let mut command = Command::new(bin);
     command.args(args);
     if let Some(cwd) = cwd {
@@ -30,18 +35,35 @@ fn run_in(
     for key in removed {
         command.env_remove(key);
     }
-    let output = command.output().expect("spawn binary");
-    (
+    let output = command.output()?;
+    Ok((
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
+    ))
 }
 
-fn canonical_str(path: &Path) -> String {
-    path.canonicalize()
-        .expect("canonicalize")
-        .to_string_lossy()
-        .into_owned()
+fn canonical_str(path: &Path) -> anyhow::Result<String> {
+    let path = path.canonicalize()?.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
+        return Ok(format!(r"\\{path}"));
+    } else if let Some(path) = path.strip_prefix(r"\\?\") {
+        return Ok(path.to_string());
+    }
+    Ok(path)
+}
+
+fn json_contains_string(value: &serde_json::Value, needle: &str) -> bool {
+    match value {
+        serde_json::Value::String(value) => value.contains(needle),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_string(value, needle)),
+        serde_json::Value::Object(values) => values
+            .values()
+            .any(|value| json_contains_string(value, needle)),
+        _ => false,
+    }
 }
 
 #[test]
@@ -57,8 +79,8 @@ fn i_alias_runs_as_open_interpreter_with_interpreter_home() -> anyhow::Result<()
     let interpreter_home = tempfile::tempdir()?;
     let codex_home_decoy = tempfile::tempdir()?;
     let envs = [
-        ("INTERPRETER_HOME", canonical_str(interpreter_home.path())),
-        ("CODEX_HOME", canonical_str(codex_home_decoy.path())),
+        ("INTERPRETER_HOME", canonical_str(interpreter_home.path())?),
+        ("CODEX_HOME", canonical_str(codex_home_decoy.path())?),
     ];
     let env_refs: Vec<(&str, &str)> = envs
         .iter()
@@ -66,7 +88,7 @@ fn i_alias_runs_as_open_interpreter_with_interpreter_home() -> anyhow::Result<()
         .collect();
 
     // Brand: the version line must identify as interpreter, not codex.
-    let (stdout, _) = run(&alias, &["--version"], &env_refs, &[]);
+    let (stdout, _) = run(&alias, &["--version"], &env_refs, &[])?;
     assert!(
         stdout.starts_with("interpreter "),
         "expected interpreter version line, got: {stdout}"
@@ -74,15 +96,16 @@ fn i_alias_runs_as_open_interpreter_with_interpreter_home() -> anyhow::Result<()
 
     // Home isolation: the resolved home must be INTERPRETER_HOME, and the
     // CODEX_HOME decoy must not leak into the resolved configuration.
-    let (stdout, stderr) = run(&alias, &["doctor", "--json"], &env_refs, &[]);
-    let interpreter_home_str = canonical_str(interpreter_home.path());
-    let decoy_str = canonical_str(codex_home_decoy.path());
+    let (stdout, stderr) = run(&alias, &["doctor", "--json"], &env_refs, &[])?;
+    let interpreter_home_str = canonical_str(interpreter_home.path())?;
+    let decoy_str = canonical_str(codex_home_decoy.path())?;
+    let doctor: serde_json::Value = serde_json::from_str(&stdout)?;
     assert!(
-        stdout.contains(&interpreter_home_str),
+        json_contains_string(&doctor, &interpreter_home_str),
         "doctor output should reference INTERPRETER_HOME {interpreter_home_str}; stdout: {stdout}; stderr: {stderr}"
     );
     assert!(
-        !stdout.contains(&decoy_str),
+        !json_contains_string(&doctor, &decoy_str),
         "doctor output must not reference CODEX_HOME decoy {decoy_str}; stdout: {stdout}"
     );
     Ok(())
@@ -91,7 +114,7 @@ fn i_alias_runs_as_open_interpreter_with_interpreter_home() -> anyhow::Result<()
 #[test]
 fn codex_name_keeps_codex_identity_in_dev_builds() -> anyhow::Result<()> {
     let codex_bin = codex_utils_cargo_bin::cargo_bin("codex")?;
-    let (stdout, _) = run(&codex_bin, &["--version"], &[], &["OPEN_INTERPRETER_BRAND"]);
+    let (stdout, _) = run(&codex_bin, &["--version"], &[], &["OPEN_INTERPRETER_BRAND"])?;
     assert!(
         stdout.starts_with("codex "),
         "dev codex binary should keep codex identity, got: {stdout}"
@@ -110,11 +133,21 @@ fn i_alias_never_loads_codex_project_config() -> anyhow::Result<()> {
     std::fs::copy(&codex_bin, &alias)?;
 
     let project = tempfile::tempdir()?;
-    let project_path = canonical_str(project.path());
+    let project_path = canonical_str(project.path())?;
     let interpreter_home = tempfile::tempdir()?;
+    let config = toml::Table::from_iter([(
+        "projects".to_string(),
+        toml::Value::Table(toml::Table::from_iter([(
+            project_path,
+            toml::Value::Table(toml::Table::from_iter([(
+                "trust_level".to_string(),
+                toml::Value::String("trusted".to_string()),
+            )])),
+        )])),
+    )]);
     std::fs::write(
         interpreter_home.path().join("config.toml"),
-        format!("[projects.\"{project_path}\"]\ntrust_level = \"trusted\"\n"),
+        toml::to_string(&config)?,
     )?;
 
     // A repository's Codex configuration must never load as Interpreter
@@ -124,7 +157,7 @@ fn i_alias_never_loads_codex_project_config() -> anyhow::Result<()> {
         project.path().join(".codex/config.toml"),
         "model = \"codex-leak-canary\"\n",
     )?;
-    let home_str = canonical_str(interpreter_home.path());
+    let home_str = canonical_str(interpreter_home.path())?;
     let envs = [("INTERPRETER_HOME", home_str.as_str())];
     let (stdout, stderr) = run_in(
         &alias,
@@ -132,7 +165,7 @@ fn i_alias_never_loads_codex_project_config() -> anyhow::Result<()> {
         &envs,
         &[],
         Some(project.path()),
-    );
+    )?;
     assert!(
         !stdout.contains("codex-leak-canary") && !stderr.contains("codex-leak-canary"),
         "Interpreter must not load .codex project config; stdout: {stdout}"
@@ -150,7 +183,7 @@ fn i_alias_never_loads_codex_project_config() -> anyhow::Result<()> {
         &envs,
         &[],
         Some(project.path()),
-    );
+    )?;
     assert!(
         stdout.contains("interpreter-canary"),
         "Interpreter should load .openinterpreter project config; stdout: {stdout}; stderr: {stderr}"

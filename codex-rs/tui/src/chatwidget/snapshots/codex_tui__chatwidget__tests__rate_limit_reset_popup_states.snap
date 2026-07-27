@@ -2,41 +2,43 @@
 source: tui/src/chatwidget/tests/usage.rs
 expression: "states.join(\"\\n---\\n\")"
 ---
-  Rate-limit resets
+  Usage limit resets
   Checking your available resets...
 
 ›    Loading...
 
   Press enter to confirm or esc to go back
 ---
-  Rate-limit resets
-  You have 2 rate-limit resets available.
+  Usage limit resets
+  2 usage limit resets available.
 
-  1. Use a reset  Reset your current Codex usage windows.
-› 2. Cancel
+› 1. Full reset (Weekly + 5 hr)  Expires 09:39 on 18 Jun 2026.
+  2. Full reset (Weekly + 5 hr)  Expires 08:59 on 27 Jun 2026.
+  3. Cancel
 
   Press enter to confirm or esc to go back
 ---
-  Rate-limit resets
-  You don't have any rate-limit resets available.
+  Usage limit resets
+  You don't have any usage limit resets available.
 
 › 1. Close
 
   Press enter to confirm or esc to go back
 ---
-  Rate-limit resets
-  Couldn't load rate-limit resets. Please try again.
+  Usage limit resets
+  Couldn't load usage limit resets. Please try again.
 
-› 1. Close
+› 1. Try again
+  2. Close
 
   Press enter to confirm or esc to go back
 ---
-  Rate-limit resets
+  Usage limit resets
   Resetting your usage...
 
 ›    Using a reset...
 ---
-  Rate-limit resets
+  Usage limit resets
   Couldn't reset usage. Please try again.
 
 › 1. Try again
@@ -44,27 +46,27 @@ expression: "states.join(\"\\n---\\n\")"
 
   Press enter to confirm or esc to go back
 ---
-  Rate-limit resets
+  Usage limit resets
   Your usage does not need a reset right now.
 
 › 1. Close
 
   Press enter to confirm or esc to go back
 ---
-  Rate-limit resets
-  No rate-limit resets are available.
+  Usage limit resets
+  No usage limit resets are available.
 
 › 1. Close
 
   Press enter to confirm or esc to go back
 ---
-  Rate-limit resets
+  Usage limit resets
   Usage reset. Checking your remaining resets...
 
 ›    Refreshing...
 ---
-  Rate-limit resets
-  Usage reset. You have 1 rate-limit reset left.
+  Usage limit resets
+  Usage reset. You have 1 usage limit reset left.
 
 › 1. Close
 

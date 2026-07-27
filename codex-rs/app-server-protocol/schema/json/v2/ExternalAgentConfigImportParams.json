@@ -54,6 +54,7 @@
         "SUBAGENTS",
         "HOOKS",
         "COMMANDS",
+        "MEMORY",
         "SESSIONS"
       ],
       "type": "string"
@@ -103,6 +104,12 @@
           },
           "type": "array"
         },
+        "memory": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "plugins": {
           "default": [],
           "items": {
@@ -114,6 +121,13 @@
           "default": [],
           "items": {
             "$ref": "#/definitions/SessionMigration"
+          },
+          "type": "array"
+        },
+        "skills": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/SkillMigration"
           },
           "type": "array"
         },
@@ -166,6 +180,17 @@
       ],
       "type": "object"
     },
+    "SkillMigration": {
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
     "SubagentMigration": {
       "properties": {
         "name": {
@@ -185,8 +210,15 @@
       },
       "type": "array"
     },
+    "migrationSource": {
+      "description": "Migration-source selector used to produce the migration items. Pass the same value to detection and import; missing or unrecognized values use the default source.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "source": {
-      "description": "Source product that produced the migration items. Missing means unspecified.",
+      "description": "Optional identifier for the product that initiated the import.",
       "type": [
         "string",
         "null"

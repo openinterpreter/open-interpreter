@@ -1,5 +1,5 @@
 use super::*;
-use codex_config::config_toml::ConfigToml;
+use codex_core::config::permission_profile_catalog;
 use futures::StreamExt;
 
 #[derive(Clone)]
@@ -72,6 +72,7 @@ fn hooks_to_info(hooks: &[codex_hooks::HookListEntry]) -> Vec<HookMetadata> {
             command: hook.command.clone(),
             timeout_sec: hook.timeout_sec,
             status_message: hook.status_message.clone(),
+            additional_context_limit: hook.additional_context_limit,
             source_path: hook.source_path.clone(),
             source: hook.source.into(),
             plugin_id: hook.plugin_id.clone(),
@@ -157,9 +158,13 @@ impl CatalogRequestProcessor {
         &self,
         params: ModelListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.list_models(self.thread_manager.clone(), params)
-            .await
-            .map(|response| Some(response.into()))
+        self.list_models(
+            self.thread_manager.clone(),
+            self.config.http_client_factory(),
+            params,
+        )
+        .await
+        .map(|response| Some(response.into()))
     }
 
     pub(crate) async fn interpreter_provider_list(
@@ -190,6 +195,7 @@ impl CatalogRequestProcessor {
         let response = self
             .list_models(
                 self.thread_manager.clone(),
+                self.config.http_client_factory(),
                 ModelListParams {
                     cursor: None,
                     limit: None,
@@ -333,6 +339,7 @@ impl CatalogRequestProcessor {
     async fn list_models(
         &self,
         thread_manager: Arc<ThreadManager>,
+        http_client_factory: codex_http_client::HttpClientFactory,
         params: ModelListParams,
     ) -> Result<ModelListResponse, JSONRPCErrorError> {
         let ModelListParams {
@@ -349,10 +356,11 @@ impl CatalogRequestProcessor {
                     self.auth_manager.clone(),
                     provider_id.as_str(),
                     include_hidden,
+                    http_client_factory,
                 )
                 .await
             }
-            None => supported_models(thread_manager, include_hidden).await,
+            None => supported_models(thread_manager, include_hidden, http_client_factory).await,
         };
         let total = models.len();
 
@@ -558,35 +566,15 @@ impl CatalogRequestProcessor {
                 .await
                 .map_err(|err| internal_error(format!("failed to reload config: {err}")))?,
         };
-        let effective_config: ConfigToml = config_layer_stack
-            .effective_config()
-            .try_into()
-            .map_err(|err| internal_error(format!("failed to read effective config: {err}")))?;
-        let mut profiles = vec![
-            PermissionProfileSummary {
-                id: BUILT_IN_PERMISSION_PROFILE_READ_ONLY.to_string(),
-                description: None,
-            },
-            PermissionProfileSummary {
-                id: BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string(),
-                description: None,
-            },
-            PermissionProfileSummary {
-                id: BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS.to_string(),
-                description: None,
-            },
-        ];
-        let mut configured_profiles = effective_config
-            .permissions
+        let profiles = permission_profile_catalog(&config_layer_stack)
+            .map_err(|err| internal_error(format!("failed to resolve permission profiles: {err}")))?
             .into_iter()
-            .flat_map(|permissions| permissions.entries)
-            .map(|(id, profile)| PermissionProfileSummary {
-                id,
+            .map(|profile| PermissionProfileSummary {
+                id: profile.id,
                 description: profile.description,
+                allowed: profile.allowed,
             })
             .collect::<Vec<_>>();
-        configured_profiles.sort_by(|left, right| left.id.cmp(&right.id));
-        profiles.extend(configured_profiles);
         let total = profiles.len();
         let effective_limit = limit.unwrap_or(total as u32).max(1) as usize;
         let effective_limit = effective_limit.min(total);

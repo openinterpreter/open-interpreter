@@ -3,6 +3,9 @@ use crate::ImportedExternalAgentSession;
 use crate::MessageRole;
 use crate::records::read_session_import;
 use crate::summarize_for_label;
+use crate::title::IMPORTED_SESSION_FALLBACK_TITLE;
+use crate::title::SessionTitleCandidates;
+use crate::title::fallback_title_from_user_message;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
@@ -36,11 +39,22 @@ pub(crate) fn load_session_for_import_with_content_sha256(
         return Ok(None);
     };
     let messages = parsed.messages;
-    let first_user_message = messages
+    let first_user_message_text = messages
         .iter()
         .find(|message| message.role == MessageRole::User)
-        .map(|message| summarize_for_label(&message.text));
-    let title = parsed.source_title.or_else(|| first_user_message.clone());
+        .map(|message| message.text.as_str());
+    let first_user_message = first_user_message_text.map(summarize_for_label);
+    let fallback_title = messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .find_map(|message| fallback_title_from_user_message(&message.text))
+        .or_else(|| first_user_message_text.map(|_| IMPORTED_SESSION_FALLBACK_TITLE.to_string()));
+    let title = SessionTitleCandidates {
+        custom_title: parsed.custom_title,
+        ai_title: parsed.ai_title,
+        fallback_title,
+    }
+    .select();
     let rollout_items = rollout_items_from_messages(messages);
     if rollout_items.is_empty() {
         return Ok(None);
@@ -141,7 +155,7 @@ fn response_item(message: ConversationMessage) -> ResponseItem {
         },
         content: vec![content],
         phase: None,
-        metadata: None,
+        internal_chat_message_metadata_passthrough: None,
     }
 }
 
@@ -168,6 +182,8 @@ fn turn_complete_item(turn_id: String, completed_at: Option<i64>) -> RolloutItem
     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
         turn_id,
         last_agent_message: None,
+        error: None,
+        started_at: None,
         completed_at,
         duration_ms: None,
         time_to_first_token_ms: None,
@@ -371,6 +387,91 @@ mod tests {
             .expect("session");
 
         assert_eq!(imported.title.as_deref(), Some("named by source app"));
+    }
+
+    #[test]
+    fn sanitizes_only_the_imported_session_fallback_title() {
+        let root = TempDir::new().expect("tempdir");
+        let project_root = root.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let path = root.path().join("session.jsonl");
+        let message = "<system-reminder>\ncontrol context\n</system-reminder>\nFix auth flow";
+        std::fs::write(&path, jsonl(&[record("user", message, &project_root)])).expect("session");
+
+        let imported = load_session_for_import(&path)
+            .expect("load")
+            .expect("session");
+        let imported_user_message = imported.rollout_items.iter().find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::UserMessage(event)) => Some(event.message.as_str()),
+            _ => None,
+        });
+
+        assert_eq!(imported.title.as_deref(), Some("Fix auth flow"));
+        assert_eq!(
+            imported.first_user_message.as_deref(),
+            Some("<system-reminder>")
+        );
+        assert_eq!(imported_user_message, Some(message));
+    }
+
+    #[test]
+    fn skips_control_only_user_messages_when_choosing_fallback_title() {
+        let root = TempDir::new().expect("tempdir");
+        let project_root = root.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let path = root.path().join("session.jsonl");
+        let control_message = "<ide_selection>src/auth.rs:1-5</ide_selection>";
+        std::fs::write(
+            &path,
+            jsonl(&[
+                record("user", control_message, &project_root),
+                record("user", "Fix auth flow", &project_root),
+            ]),
+        )
+        .expect("session");
+
+        let imported = load_session_for_import(&path)
+            .expect("load")
+            .expect("session");
+
+        assert_eq!(imported.title.as_deref(), Some("Fix auth flow"));
+        assert_eq!(
+            imported.first_user_message.as_deref(),
+            Some(control_message)
+        );
+    }
+
+    #[test]
+    fn uses_safe_fallback_after_all_user_messages_are_control_only() {
+        let root = TempDir::new().expect("tempdir");
+        let project_root = root.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let path = root.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            jsonl(&[
+                record(
+                    "user",
+                    "<ide_selection>src/auth.rs:1-5</ide_selection>",
+                    &project_root,
+                ),
+                record(
+                    "user",
+                    "<local-command-stderr>tests failed</local-command-stderr>",
+                    &project_root,
+                ),
+            ]),
+        )
+        .expect("session");
+
+        let imported = load_session_for_import(&path)
+            .expect("load")
+            .expect("session");
+
+        assert_eq!(
+            imported.title.as_deref(),
+            Some(IMPORTED_SESSION_FALLBACK_TITLE)
+        );
     }
 
     #[test]

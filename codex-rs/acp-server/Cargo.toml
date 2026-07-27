@@ -7,6 +7,8 @@ license.workspace = true
 [lib]
 name = "codex_acp_server"
 path = "src/lib.rs"
+test = false
+doctest = false
 
 [lints]
 workspace = true
@@ -23,9 +25,9 @@ codex-core = { workspace = true }
 codex-feedback = { workspace = true }
 codex-login = { workspace = true }
 codex-protocol = { workspace = true }
+codex-product-info = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync"] }
 tokio-util = { workspace = true, features = ["compat"] }
-tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }

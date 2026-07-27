@@ -1,0 +1,142 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "aspen",
+  "name": "Open Interpreter",
+  "description": "Open Interpreter 中文文档。",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "colors": {
+    "primary": "#171717",
+    "light": "#f5f5f5",
+    "dark": "#525252"
+  },
+  "appearance": {
+    "default": "light"
+  },
+  "background": {
+    "color": {
+      "light": "#ffffff",
+      "dark": "#000000"
+    }
+  },
+  "styling": {
+    "codeblocks": "dark"
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "快速开始",
+        "pages": [
+          "docs/zh/getting-started",
+          "docs/zh/quickstart",
+          "docs/zh/use-cases",
+          "docs/zh/migrate",
+          "docs/zh/portability",
+          {
+            "group": "核心概念",
+            "pages": [
+              "docs/zh/prompting",
+              "docs/zh/workflows",
+              "docs/zh/models",
+              "docs/zh/harness",
+              "docs/zh/subagents"
+            ]
+          }
+        ]
+      },
+      {
+        "group": "模型提供商",
+        "pages": [
+          "docs/zh/providers",
+          "docs/zh/kimi-k3",
+          "docs/zh/deepseek",
+          "docs/zh/zai-glm"
+        ]
+      },
+      {
+        "group": "CLI",
+        "pages": [
+          "docs/zh/interactive",
+          "docs/zh/cli-reference",
+          "docs/zh/sessions",
+          "docs/zh/daemon",
+          "docs/zh/slash_commands",
+          "docs/zh/web-search",
+          "docs/zh/auto-review"
+        ]
+      },
+      {
+        "group": "配置",
+        "pages": [
+          "docs/zh/config",
+          "docs/zh/config-reference",
+          "docs/zh/authentication",
+          {
+            "group": "项目上下文",
+            "pages": [
+              "docs/zh/agents_md",
+              "docs/zh/customization",
+              "docs/zh/skills",
+              "docs/zh/rules",
+              "docs/zh/memories"
+            ]
+          },
+          {
+            "group": "扩展",
+            "pages": [
+              "docs/zh/mcp",
+              "docs/zh/plugins",
+              "docs/zh/hooks"
+            ]
+          },
+          {
+            "group": "性能",
+            "pages": ["docs/zh/speed"]
+          }
+        ]
+      },
+      {
+        "group": "自动化",
+        "pages": [
+          "docs/zh/exec",
+          "docs/zh/sdk",
+          "docs/zh/app-server",
+          "docs/zh/acp",
+          "docs/zh/mcp-server",
+          "docs/zh/github-action",
+          {
+            "group": "服务器部署",
+            "pages": ["docs/zh/remote"]
+          }
+        ]
+      },
+      {
+        "group": "安全",
+        "pages": [
+          "docs/zh/sandbox",
+          "docs/zh/permissions",
+          "docs/zh/execpolicy",
+          "docs/zh/cyber-safety"
+        ]
+      },
+      {
+        "group": "项目",
+        "pages": [
+          "docs/zh/contributing",
+          "docs/zh/project-license",
+          "docs/zh/license"
+        ]
+      },
+      {
+        "group": "参考",
+        "pages": [
+          "docs/zh/install",
+          "docs/zh/windows",
+          "docs/zh/example-config"
+        ]
+      }
+    ]
+  }
+}

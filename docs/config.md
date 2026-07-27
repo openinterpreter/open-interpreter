@@ -158,14 +158,15 @@ the agent surface like another coding harness while still running through the
 native Open Interpreter runtime.
 
 ```toml
-harness = "kimi-cli"
+harness = "kimi-code"
 harness_guidance = true
 ```
 
 Supported values are implementation-dependent, but the current codebase
-includes native, Claude Code, DeepSeek TUI, Kimi CLI, Qwen Code, SWE-agent, and
-minimal harness modes. Use this when you intentionally need a harness-shaped
-prompt/tool surface. Leave it unset for normal Open Interpreter behavior.
+includes native, Claude Code, DeepSeek TUI, current Kimi Code, legacy Kimi CLI,
+Qwen Code, SWE-agent, and minimal harness modes. Use this when you intentionally
+need a harness-shaped prompt/tool surface. Leave it unset to let Open
+Interpreter choose the recommended harness for the selected provider and model.
 
 `harness_guidance` lets Open Interpreter include a small reliability guidance
 block where that harness mode allows it. Set it to `false` if you need stricter

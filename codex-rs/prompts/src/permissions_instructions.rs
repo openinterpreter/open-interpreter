@@ -4,6 +4,8 @@ use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::format_allow_prefixes;
+use codex_protocol::openai_models::ApprovalMessages;
+use codex_protocol::openai_models::PermissionMessages;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
@@ -18,13 +20,12 @@ const APPROVAL_POLICY_NEVER: &str =
     include_str!("../templates/permissions/approval_policy/never.md");
 const APPROVAL_POLICY_UNLESS_TRUSTED: &str =
     include_str!("../templates/permissions/approval_policy/unless_trusted.md");
-const APPROVAL_POLICY_ON_FAILURE: &str =
-    include_str!("../templates/permissions/approval_policy/on_failure.md");
 const APPROVAL_POLICY_ON_REQUEST_RULE: &str =
     include_str!("../templates/permissions/approval_policy/on_request.md");
 const APPROVAL_POLICY_ON_REQUEST_RULE_REQUEST_PERMISSION: &str =
     include_str!("../templates/permissions/approval_policy/on_request_rule_request_permission.md");
 const AUTO_REVIEW_APPROVAL_SUFFIX: &str = "`approvals_reviewer` is `auto_review`: Sandbox escalations with require_escalated will be reviewed for compliance with the policy. If a rejection happens, you should proceed only with a materially safer alternative, or inform the user of the risk and send a final message to ask for approval.";
+const NETWORK_ACCESS_PLACEHOLDER: &str = "{{ network_access }}";
 
 const SANDBOX_MODE_DANGER_FULL_ACCESS: &str =
     include_str!("../templates/permissions/sandbox_mode/danger_full_access.md");
@@ -49,6 +50,8 @@ static SANDBOX_MODE_READ_ONLY_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
 struct PermissionsPromptConfig<'a> {
     approval_policy: AskForApproval,
     approvals_reviewer: ApprovalsReviewer,
+    approval_messages: Option<&'a ApprovalMessages>,
+    permission_messages: Option<&'a PermissionMessages>,
     exec_policy: &'a Policy,
     exec_permission_approvals_enabled: bool,
     request_permissions_tool_enabled: bool,
@@ -60,12 +63,33 @@ pub struct PermissionsInstructions {
     text: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ApprovalPromptContext<'a> {
+    reviewer: ApprovalsReviewer,
+    messages: Option<&'a ApprovalMessages>,
+    permission_messages: Option<&'a PermissionMessages>,
+}
+
+impl<'a> ApprovalPromptContext<'a> {
+    pub fn new(
+        reviewer: ApprovalsReviewer,
+        messages: Option<&'a ApprovalMessages>,
+        permission_messages: Option<&'a PermissionMessages>,
+    ) -> Self {
+        Self {
+            reviewer,
+            messages,
+            permission_messages,
+        }
+    }
+}
+
 impl PermissionsInstructions {
     /// Builds permissions instructions from the effective permission profile and approval policy.
     pub fn from_permission_profile(
         permission_profile: &PermissionProfile,
         approval_policy: AskForApproval,
-        approvals_reviewer: ApprovalsReviewer,
+        approval_context: ApprovalPromptContext<'_>,
         exec_policy: &Policy,
         cwd: &Path,
         exec_permission_approvals_enabled: bool,
@@ -80,7 +104,9 @@ impl PermissionsInstructions {
             network_access_from_policy(permission_profile.network_sandbox_policy()),
             PermissionsPromptConfig {
                 approval_policy,
-                approvals_reviewer,
+                approvals_reviewer: approval_context.reviewer,
+                approval_messages: approval_context.messages,
+                permission_messages: approval_context.permission_messages,
                 exec_policy,
                 exec_permission_approvals_enabled,
                 request_permissions_tool_enabled,
@@ -118,12 +144,16 @@ impl PermissionsInstructions {
         denied_reads: Option<String>,
     ) -> Self {
         let mut text = String::new();
-        append_section(&mut text, &sandbox_text(sandbox_mode, network_access));
+        let sandbox = sandbox_text(sandbox_mode, network_access, config.permission_messages);
+        if !sandbox.is_empty() {
+            append_section(&mut text, &sandbox);
+        }
         append_section(
             &mut text,
             &approval_text(
                 config.approval_policy,
                 config.approvals_reviewer,
+                config.approval_messages,
                 config.exec_policy,
                 config.exec_permission_approvals_enabled,
                 config.request_permissions_tool_enabled,
@@ -194,10 +224,26 @@ fn append_section(text: &mut String, section: &str) {
 fn approval_text(
     approval_policy: AskForApproval,
     approvals_reviewer: ApprovalsReviewer,
+    approval_messages: Option<&ApprovalMessages>,
     exec_policy: &Policy,
     exec_permission_approvals_enabled: bool,
     request_permissions_tool_enabled: bool,
 ) -> String {
+    if let Some(approval_messages) = approval_messages {
+        let selected = match &approval_policy {
+            AskForApproval::OnRequest => match approvals_reviewer {
+                ApprovalsReviewer::User => approval_messages.on_request.as_ref(),
+                ApprovalsReviewer::AutoReview => approval_messages.on_request_auto_review.as_ref(),
+            },
+            AskForApproval::Never => approval_messages.never.as_ref(),
+            AskForApproval::UnlessTrusted => approval_messages.unless_trusted.as_ref(),
+            AskForApproval::Granular(_) => None,
+        };
+        if let Some(selected) = selected {
+            return selected.clone();
+        }
+    }
+
     let with_request_permissions_tool = |text: &str| {
         if request_permissions_tool_enabled {
             format!("{text}\n\n{}", request_permissions_tool_prompt_section())
@@ -227,7 +273,6 @@ fn approval_text(
         AskForApproval::UnlessTrusted => {
             with_request_permissions_tool(APPROVAL_POLICY_UNLESS_TRUSTED)
         }
-        AskForApproval::OnFailure => with_request_permissions_tool(APPROVAL_POLICY_ON_FAILURE),
         AskForApproval::OnRequest => on_request_instructions(),
         AskForApproval::Granular(granular_config) => granular_instructions(
             granular_config,
@@ -246,7 +291,24 @@ fn approval_text(
     }
 }
 
-fn sandbox_text(mode: SandboxMode, network_access: NetworkAccess) -> String {
+fn sandbox_text(
+    mode: SandboxMode,
+    network_access: NetworkAccess,
+    permission_messages: Option<&PermissionMessages>,
+) -> String {
+    let selected = permission_messages.and_then(|messages| match mode {
+        SandboxMode::DangerFullAccess => messages.danger_full_access.as_deref(),
+        SandboxMode::WorkspaceWrite => messages.workspace_write.as_deref(),
+        SandboxMode::ReadOnly => messages.read_only.as_deref(),
+    });
+    if let Some(selected) = selected {
+        if selected.is_empty() {
+            return String::new();
+        }
+        let network_access = network_access.to_string();
+        return selected.replace(NETWORK_ACCESS_PLACEHOLDER, network_access.as_str());
+    }
+
     let template = match mode {
         SandboxMode::DangerFullAccess => &*SANDBOX_MODE_DANGER_FULL_ACCESS_TEMPLATE,
         SandboxMode::WorkspaceWrite => &*SANDBOX_MODE_WORKSPACE_WRITE_TEMPLATE,
