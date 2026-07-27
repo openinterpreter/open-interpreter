@@ -240,24 +240,45 @@ pub fn create_model_provider(
     provider_info: ModelProviderInfo,
     auth_manager: Option<Arc<AuthManager>>,
 ) -> SharedModelProvider {
+    let cache_provider_id = provider_info.name.clone();
+    create_model_provider_with_cache_id(cache_provider_id, provider_info, auth_manager)
+}
+
+/// Creates the default runtime model provider with the exact configured ID
+/// used to scope provider-specific disk caches.
+pub fn create_model_provider_with_cache_id(
+    cache_provider_id: String,
+    provider_info: ModelProviderInfo,
+    auth_manager: Option<Arc<AuthManager>>,
+) -> SharedModelProvider {
     if provider_info.is_amazon_bedrock() {
         Arc::new(AmazonBedrockModelProvider::new(provider_info, auth_manager))
     } else {
-        Arc::new(ConfiguredModelProvider::new(provider_info, auth_manager))
+        Arc::new(ConfiguredModelProvider::new(
+            cache_provider_id,
+            provider_info,
+            auth_manager,
+        ))
     }
 }
 
 /// Runtime model provider backed by configured `ModelProviderInfo`.
 #[derive(Clone, Debug)]
 struct ConfiguredModelProvider {
+    cache_provider_id: String,
     info: ModelProviderInfo,
     auth_manager: Option<Arc<AuthManager>>,
 }
 
 impl ConfiguredModelProvider {
-    fn new(provider_info: ModelProviderInfo, auth_manager: Option<Arc<AuthManager>>) -> Self {
+    fn new(
+        cache_provider_id: String,
+        provider_info: ModelProviderInfo,
+        auth_manager: Option<Arc<AuthManager>>,
+    ) -> Self {
         let auth_manager = auth_manager_for_provider(auth_manager, &provider_info);
         Self {
+            cache_provider_id,
             info: provider_info,
             auth_manager,
         }
@@ -347,8 +368,9 @@ impl ModelProvider for ConfiguredModelProvider {
                     self.info.clone(),
                     self.auth_manager.clone(),
                 ));
-                Arc::new(OpenAiModelsManager::new_with_base_models(
+                Arc::new(OpenAiModelsManager::new_with_base_models_for_provider(
                     codex_home,
+                    self.cache_provider_id.clone(),
                     endpoint,
                     self.auth_manager.clone(),
                     bundled_provider_model_infos(&self.info),

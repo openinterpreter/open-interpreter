@@ -38,6 +38,7 @@ use wiremock::MockServer;
 
 const ETAG: &str = "\"models-etag-ttl\"";
 const CACHE_FILE: &str = "models_cache.json";
+const PROVIDER_ID: &str = "openai";
 const REMOTE_MODEL: &str = "codex-test-ttl";
 const VERSIONED_MODEL: &str = "codex-test-versioned";
 const MISSING_VERSION_MODEL: &str = "codex-test-missing-version";
@@ -171,6 +172,7 @@ async fn uses_cache_when_version_matches() -> Result<()> {
             let cache = ModelsCache {
                 fetched_at: Utc::now(),
                 etag: None,
+                provider_id: Some(PROVIDER_ID.to_string()),
                 client_version: Some(client_version_to_whole()),
                 models: vec![cached_model],
             };
@@ -221,6 +223,7 @@ async fn refreshes_when_cache_version_missing() -> Result<()> {
             let cache = ModelsCache {
                 fetched_at: Utc::now(),
                 etag: None,
+                provider_id: Some(PROVIDER_ID.to_string()),
                 client_version: None,
                 models: vec![cached_model],
             };
@@ -272,6 +275,7 @@ async fn refreshes_when_cache_version_differs() -> Result<()> {
             let cache = ModelsCache {
                 fetched_at: Utc::now(),
                 etag: None,
+                provider_id: Some(PROVIDER_ID.to_string()),
                 client_version: Some(format!("{client_version}-diff")),
                 models: vec![cached_model],
             };
@@ -301,6 +305,117 @@ async fn refreshes_when_cache_version_differs() -> Result<()> {
     assert!(
         models_request_count >= 1,
         "/models should be called when cache version differs"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refreshes_when_cache_provider_differs() -> Result<()> {
+    let server = MockServer::start().await;
+    let cached_model = test_remote_model("cached-other-provider", /*priority*/ 1);
+    let models_mock = responses::mount_models_once(
+        &server,
+        ModelsResponse {
+            models: vec![test_remote_model(
+                "remote-current-provider",
+                /*priority*/ 2,
+            )],
+        },
+    )
+    .await;
+
+    let mut builder = test_codex().with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    builder = builder
+        .with_pre_build_hook(move |home| {
+            let cache = ModelsCache {
+                fetched_at: Utc::now(),
+                etag: None,
+                provider_id: Some("different-provider".to_string()),
+                client_version: Some(client_version_to_whole()),
+                models: vec![cached_model],
+            };
+            let cache_path = home.join(CACHE_FILE);
+            write_cache_sync(&cache_path, &cache).expect("write cache");
+        })
+        .with_config(|config| {
+            config.model_provider.request_max_retries = Some(0);
+        });
+
+    let test = builder.build(&server).await?;
+    let models = test
+        .thread_manager
+        .get_models_manager()
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
+
+    assert!(
+        models
+            .iter()
+            .any(|preset| preset.model == "remote-current-provider"),
+        "expected models for the active provider"
+    );
+    assert_eq!(
+        models_mock.requests().len(),
+        1,
+        "/models should be called when the cache provider differs"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refreshes_when_cache_provider_missing() -> Result<()> {
+    let server = MockServer::start().await;
+    let cached_model = test_remote_model("cached-legacy-provider", /*priority*/ 1);
+    let models_mock = responses::mount_models_once(
+        &server,
+        ModelsResponse {
+            models: vec![test_remote_model("remote-provider", /*priority*/ 2)],
+        },
+    )
+    .await;
+
+    let mut builder = test_codex().with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    builder = builder
+        .with_pre_build_hook(move |home| {
+            let cache = ModelsCache {
+                fetched_at: Utc::now(),
+                etag: None,
+                provider_id: None,
+                client_version: Some(client_version_to_whole()),
+                models: vec![cached_model],
+            };
+            let cache_path = home.join(CACHE_FILE);
+            write_cache_sync(&cache_path, &cache).expect("write cache");
+        })
+        .with_config(|config| {
+            config.model_provider.request_max_retries = Some(0);
+        });
+
+    let test = builder.build(&server).await?;
+    let models = test
+        .thread_manager
+        .get_models_manager()
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
+
+    assert!(
+        models
+            .iter()
+            .any(|preset| preset.model == "remote-provider"),
+        "expected refreshed models"
+    );
+    assert_eq!(
+        models_mock.requests().len(),
+        1,
+        "/models should be called when the cache provider is missing"
     );
 
     Ok(())
@@ -336,6 +451,8 @@ struct ModelsCache {
     fetched_at: DateTime<Utc>,
     #[serde(default)]
     etag: Option<String>,
+    #[serde(default)]
+    provider_id: Option<String>,
     #[serde(default)]
     client_version: Option<String>,
     models: Vec<ModelInfo>,

@@ -38,6 +38,7 @@ use codex_login::CodexAuth;
 use codex_login::default_client::CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR;
 use codex_login::default_client::originator;
 use codex_model_provider::create_model_provider;
+use codex_model_provider::create_model_provider_with_cache_id;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_models_manager::manager::RefreshStrategy;
@@ -272,7 +273,11 @@ pub fn build_models_manager(
     config: &Config,
     auth_manager: Arc<AuthManager>,
 ) -> SharedModelsManager {
-    let provider = create_model_provider(config.model_provider.clone(), Some(auth_manager));
+    let provider = create_model_provider_with_cache_id(
+        config.model_provider_id.clone(),
+        config.model_provider.clone(),
+        Some(auth_manager),
+    );
     provider.models_manager(
         config.codex_home.to_path_buf(),
         config.model_catalog.clone(),

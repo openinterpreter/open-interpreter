@@ -16,14 +16,16 @@ use tracing::info;
 pub(crate) struct ModelsCacheManager {
     cache_path: PathBuf,
     cache_ttl: Duration,
+    provider_id: String,
 }
 
 impl ModelsCacheManager {
-    /// Create a new cache manager with the given path and TTL.
-    pub(crate) fn new(cache_path: PathBuf, cache_ttl: Duration) -> Self {
+    /// Create a new cache manager with the given path, TTL, and provider identity.
+    pub(crate) fn new(cache_path: PathBuf, cache_ttl: Duration, provider_id: String) -> Self {
         Self {
             cache_path,
             cache_ttl,
+            provider_id,
         }
     }
 
@@ -31,6 +33,7 @@ impl ModelsCacheManager {
     pub(crate) async fn load_fresh(&self, expected_version: &str) -> Option<ModelsCache> {
         info!(
             cache_path = %self.cache_path.display(),
+            expected_provider_id = %self.provider_id,
             expected_version,
             "models cache: attempting load_fresh"
         );
@@ -43,10 +46,20 @@ impl ModelsCacheManager {
         };
         info!(
             cache_path = %self.cache_path.display(),
+            cached_provider_id = ?cache.provider_id,
             cached_version = ?cache.client_version,
             fetched_at = %cache.fetched_at,
             "models cache: loaded cache file"
         );
+        if cache.provider_id.as_deref() != Some(self.provider_id.as_str()) {
+            info!(
+                cache_path = %self.cache_path.display(),
+                expected_provider_id = %self.provider_id,
+                cached_provider_id = ?cache.provider_id,
+                "models cache: provider mismatch"
+            );
+            return None;
+        }
         if cache.client_version.as_deref() != Some(expected_version) {
             info!(
                 cache_path = %self.cache_path.display(),
@@ -83,6 +96,7 @@ impl ModelsCacheManager {
         let cache = ModelsCache {
             fetched_at: Utc::now(),
             etag,
+            provider_id: Some(self.provider_id.clone()),
             client_version: Some(client_version),
             models: models.to_vec(),
         };
@@ -92,11 +106,19 @@ impl ModelsCacheManager {
     }
 
     /// Renew the cache TTL by updating the fetched_at timestamp to now.
-    pub(crate) async fn renew_cache_ttl(&self) -> io::Result<()> {
+    pub(crate) async fn renew_cache_ttl(&self, expected_version: &str) -> io::Result<()> {
         let mut cache = match self.load().await? {
             Some(cache) => cache,
             None => return Err(io::Error::new(ErrorKind::NotFound, "cache not found")),
         };
+        if cache.provider_id.as_deref() != Some(self.provider_id.as_str())
+            || cache.client_version.as_deref() != Some(expected_version)
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "cache identity changed before TTL renewal",
+            ));
+        }
         cache.fetched_at = Utc::now();
         self.save_internal(&cache).await
     }
@@ -163,6 +185,8 @@ pub(crate) struct ModelsCache {
     pub(crate) fetched_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) etag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) client_version: Option<String>,
     pub(crate) models: Vec<ModelInfo>,

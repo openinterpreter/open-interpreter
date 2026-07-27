@@ -26,6 +26,7 @@ use tracing::info;
 
 const MODEL_CACHE_FILE: &str = "models_cache.json";
 const DEFAULT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
+const DEFAULT_PROVIDER_CACHE_ID: &str = "openai";
 
 /// Remote endpoint used by the OpenAI-compatible model manager.
 ///
@@ -239,7 +240,29 @@ impl OpenAiModelsManager {
         endpoint_client: Arc<dyn ModelsEndpointClient>,
         auth_manager: Option<Arc<AuthManager>>,
     ) -> Self {
-        Self::new_with_base_models(codex_home, endpoint_client, auth_manager, Vec::new())
+        Self::new_for_provider(
+            codex_home,
+            DEFAULT_PROVIDER_CACHE_ID.to_string(),
+            endpoint_client,
+            auth_manager,
+        )
+    }
+
+    /// Construct an OpenAI-compatible remote model manager whose disk cache is
+    /// scoped to the configured provider identity.
+    pub fn new_for_provider(
+        codex_home: PathBuf,
+        provider_id: String,
+        endpoint_client: Arc<dyn ModelsEndpointClient>,
+        auth_manager: Option<Arc<AuthManager>>,
+    ) -> Self {
+        Self::new_with_base_models_for_provider(
+            codex_home,
+            provider_id,
+            endpoint_client,
+            auth_manager,
+            Vec::new(),
+        )
     }
 
     /// Construct an OpenAI-compatible model manager seeded with provider-local
@@ -250,9 +273,31 @@ impl OpenAiModelsManager {
         auth_manager: Option<Arc<AuthManager>>,
         base_models: Vec<ModelInfo>,
     ) -> Self {
+        Self::new_with_base_models_for_provider(
+            codex_home,
+            DEFAULT_PROVIDER_CACHE_ID.to_string(),
+            endpoint_client,
+            auth_manager,
+            base_models,
+        )
+    }
+
+    /// Construct an OpenAI-compatible model manager with provider-local models
+    /// and a disk cache scoped to the configured provider identity.
+    pub fn new_with_base_models_for_provider(
+        codex_home: PathBuf,
+        provider_id: String,
+        endpoint_client: Arc<dyn ModelsEndpointClient>,
+        auth_manager: Option<Arc<AuthManager>>,
+        base_models: Vec<ModelInfo>,
+    ) -> Self {
         let cache_path = codex_home.join(MODEL_CACHE_FILE);
         Self::new_with_cache_manager(
-            Some(ModelsCacheManager::new(cache_path, DEFAULT_MODEL_CACHE_TTL)),
+            Some(ModelsCacheManager::new(
+                cache_path,
+                DEFAULT_MODEL_CACHE_TTL,
+                provider_id,
+            )),
             endpoint_client,
             auth_manager,
             base_models,
@@ -381,7 +426,9 @@ impl OpenAiModelsManager {
         let current_etag = self.get_etag().await;
         if current_etag.clone().is_some() && current_etag.as_deref() == Some(etag.as_str()) {
             if let Some(cache_manager) = self.cache_manager.as_ref()
-                && let Err(err) = cache_manager.renew_cache_ttl().await
+                && let Err(err) = cache_manager
+                    .renew_cache_ttl(&crate::client_version_to_whole())
+                    .await
             {
                 error!("failed to renew cache TTL: {err}");
             }
@@ -511,8 +558,6 @@ impl OpenAiModelsManager {
             codex_otel::start_global_timer("codex.remote_models.load_cache.duration_ms", &[]);
         let client_version = crate::client_version_to_whole();
         info!(client_version, "models cache: evaluating cache eligibility");
-        // TODO(celia-oai): Include provider identity in cache eligibility so switching
-        // providers does not reuse a fresh models_cache.json entry from another provider.
         let cache = match cache_manager.load_fresh(&client_version).await {
             Some(cache) => cache,
             None => {
