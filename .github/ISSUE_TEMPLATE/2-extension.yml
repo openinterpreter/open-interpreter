@@ -1,13 +1,15 @@
 name: 🧑‍💻 Integration Bug
 description: Report an issue with an Open Interpreter integration
 labels:
-  - extension
+  - Extension
 body:
   - type: markdown
     attributes:
       value: |
         Before submitting a new issue, please search for existing issues to see if your issue has already been reported.
         If it has, please add a 👍 reaction (no need to leave a comment) to the existing issue instead of creating a new one.
+
+        This repository tracks integrations for the current Rust Open Interpreter built on Codex. For the classic Python product, use the [community-maintained classic fork](https://github.com/endolith/open-interpreter). Bugs inherited unchanged from Codex belong in [openai/codex](https://github.com/openai/codex/issues).
 
   - type: input
     id: version
@@ -18,7 +20,38 @@ body:
   - type: input
     id: plan
     attributes:
-      label: What subscription do you have?
+      label: What subscription or API-key provider are you using?
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Which provider ID are you using?
+      description: Use the configured provider ID, or write `unknown`.
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Which model ID are you using?
+    validations:
+      required: true
+  - type: dropdown
+    id: wire_api
+    attributes:
+      label: Which wire API is configured?
+      options:
+        - Responses
+        - Chat Completions
+        - Anthropic Messages
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: harness
+    attributes:
+      label: Which harness is selected?
+      description: Use the configured harness; the default is `codex`.
     validations:
       required: true
   - type: input
@@ -35,6 +68,8 @@ body:
       description: |
         For macOS and Linux: copy the output of `uname -mprs`
         For Windows: copy the output of `"$([Environment]::OSVersion | ForEach-Object VersionString) $(if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" })"` in the PowerShell console
+    validations:
+      required: true
   - type: textarea
     id: actual
     attributes:

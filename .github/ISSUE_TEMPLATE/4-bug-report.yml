@@ -1,7 +1,7 @@
 name: 🪲 Other Bug
-description: Report an issue in Open Interpreter integrations or other components
+description: Report an issue in another current Open Interpreter component
 labels:
-  - bug
+  - Bug
 body:
   - type: markdown
     attributes:
@@ -9,8 +9,61 @@ body:
         Before submitting a new issue, please search for existing issues to see if your issue has already been reported.
         If it has, please add a 👍 reaction (no need to leave a comment) to the existing issue instead of creating a new one.
 
+        This repository tracks the current Rust Open Interpreter built on Codex. For the classic Python product, use the [community-maintained classic fork](https://github.com/endolith/open-interpreter). Bugs inherited unchanged from Codex belong in [openai/codex](https://github.com/openai/codex/issues).
+
         If you need help or support using Open Interpreter and are not reporting a bug, please start a discussion in this repository instead of opening a bug.
 
+  - type: input
+    id: version
+    attributes:
+      label: What Open Interpreter version are you using?
+    validations:
+      required: true
+  - type: input
+    id: component
+    attributes:
+      label: Which component is affected?
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Which OS and architecture are you using?
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Which provider ID are you using, if relevant?
+      description: Write `not applicable` when this is not a model/provider issue.
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Which model ID are you using, if relevant?
+      description: Write `not applicable` when this is not a model/provider issue.
+    validations:
+      required: true
+  - type: dropdown
+    id: wire_api
+    attributes:
+      label: Which wire API is configured, if relevant?
+      options:
+        - Responses
+        - Chat Completions
+        - Anthropic Messages
+        - Not sure
+        - Not applicable
+    validations:
+      required: true
+  - type: input
+    id: harness
+    attributes:
+      label: Which harness is selected, if relevant?
+      description: Use the configured harness, or write `not applicable`.
+    validations:
+      required: true
   - type: textarea
     id: actual
     attributes:

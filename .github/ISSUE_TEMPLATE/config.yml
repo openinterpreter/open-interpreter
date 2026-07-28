@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Classic Python Open Interpreter
+    url: https://github.com/endolith/open-interpreter/issues
+    about: Report issues for the community-maintained classic Python product.
+  - name: Upstream Codex
+    url: https://github.com/openai/codex/issues
+    about: Report behavior that also occurs in unmodified Codex.
+  - name: Questions and support
+    url: https://github.com/openinterpreter/openinterpreter/discussions
+    about: Ask usage questions or get help without filing a bug.
+  - name: Security vulnerability
+    url: https://github.com/openinterpreter/openinterpreter/security/policy
+    about: Follow the private reporting instructions; do not open a public issue.

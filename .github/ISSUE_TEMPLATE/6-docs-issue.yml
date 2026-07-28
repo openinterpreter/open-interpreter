@@ -1,11 +1,12 @@
 name: 📗 Documentation Issue
 description: Tell us if there is missing or incorrect documentation
-labels: [documentation]
+labels: [Documentation]
 body:
   - type: markdown
     attributes:
       value: |
         Thank you for submitting a documentation request. It helps make Open Interpreter better.
+        This repository documents the current Rust Open Interpreter. Classic Python documentation is maintained in the [community fork](https://github.com/endolith/open-interpreter).
   - type: dropdown
     attributes:
       label: What is the type of issue?

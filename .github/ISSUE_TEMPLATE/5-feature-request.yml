@@ -1,7 +1,7 @@
 name: 🎁 Feature Request
 description: Propose a new feature for Open Interpreter
 labels:
-  - enhancement
+  - Enhancement
 body:
   - type: markdown
     attributes:
@@ -11,6 +11,7 @@ body:
         Before you submit a feature:
         1. Search existing issues for similar features. If you find one, 👍 it rather than opening a new one.
         2. The Open Interpreter team will try to balance the varying needs of the community when prioritizing or rejecting new features. Not all features will be accepted. See [Contributing](../../docs/contributing.md) for more details.
+        3. Changes to general Codex behavior should be proposed to [openai/codex](https://github.com/openai/codex). Classic Python requests belong in the [community-maintained classic fork](https://github.com/endolith/open-interpreter).
 
   - type: input
     id: variant
