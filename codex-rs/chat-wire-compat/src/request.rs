@@ -120,6 +120,11 @@ pub(crate) fn convert_request(
     let mut pending_reasoning_content: Option<String> = None;
     let mut pending_assistant_content: Option<Value> = None;
     let mut pending_tool_calls: Vec<ChatToolCall> = Vec::new();
+    // Responses histories can contain local context updates while tools are running. Chat
+    // Completions requires every result for an assistant tool-call group to appear before the
+    // next user message, so retain those context updates until the whole group is complete.
+    let mut pending_tool_call_ids: Vec<String> = Vec::new();
+    let mut deferred_messages: Vec<ChatMessage> = Vec::new();
     for item in &request.input {
         match item {
             ResponseItem::Message { role, content, .. } => {
@@ -135,19 +140,24 @@ pub(crate) fn convert_request(
                     );
                     continue;
                 }
-                flush_pending_assistant(
-                    &mut messages,
-                    &mut pending_reasoning_content,
-                    &mut pending_assistant_content,
-                    &mut pending_tool_calls,
-                );
-                messages.push(ChatMessage {
+                let message = ChatMessage {
                     role: chat_message_role(role).to_string(),
                     content: converted_content,
                     reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: None,
-                });
+                };
+                if pending_tool_call_ids.is_empty() {
+                    flush_pending_assistant(
+                        &mut messages,
+                        &mut pending_reasoning_content,
+                        &mut pending_assistant_content,
+                        &mut pending_tool_calls,
+                    );
+                    messages.push(message);
+                } else {
+                    deferred_messages.push(message);
+                }
             }
             ResponseItem::FunctionCall {
                 name,
@@ -156,6 +166,7 @@ pub(crate) fn convert_request(
                 call_id,
                 ..
             } => {
+                pending_tool_call_ids.push(call_id.clone());
                 pending_tool_calls.push(ChatToolCall {
                     id: call_id.clone(),
                     type_: "function".to_string(),
@@ -175,6 +186,7 @@ pub(crate) fn convert_request(
                 input,
                 ..
             } => {
+                pending_tool_call_ids.push(call_id.clone());
                 pending_tool_calls.push(ChatToolCall {
                     id: call_id.clone(),
                     type_: "function".to_string(),
@@ -204,6 +216,7 @@ pub(crate) fn convert_request(
                     })
                     .to_string(),
                 };
+                pending_tool_call_ids.push(call_id.clone());
                 pending_tool_calls.push(ChatToolCall {
                     id: call_id,
                     type_: "function".to_string(),
@@ -219,8 +232,10 @@ pub(crate) fn convert_request(
                 arguments,
                 ..
             } => {
+                let call_id = call_id.clone().unwrap_or_else(|| "tool_search".to_string());
+                pending_tool_call_ids.push(call_id.clone());
                 pending_tool_calls.push(ChatToolCall {
-                    id: call_id.clone().unwrap_or_else(|| "tool_search".to_string()),
+                    id: call_id,
                     type_: "function".to_string(),
                     function: ChatFunctionCall {
                         name: "tool_search".to_string(),
@@ -241,13 +256,13 @@ pub(crate) fn convert_request(
                     &mut pending_assistant_content,
                     &mut pending_tool_calls,
                 );
-                messages.push(ChatMessage {
-                    role: "tool".to_string(),
-                    content: Some(json!(tool_output_text(output))),
-                    reasoning_content: None,
-                    tool_calls: None,
-                    tool_call_id: Some(call_id.clone()),
-                });
+                push_tool_output(
+                    &mut messages,
+                    &mut deferred_messages,
+                    &mut pending_tool_call_ids,
+                    call_id,
+                    tool_output_text(output),
+                );
             }
             ResponseItem::CustomToolCallOutput {
                 call_id, output, ..
@@ -258,13 +273,13 @@ pub(crate) fn convert_request(
                     &mut pending_assistant_content,
                     &mut pending_tool_calls,
                 );
-                messages.push(ChatMessage {
-                    role: "tool".to_string(),
-                    content: Some(json!(tool_output_text(output))),
-                    reasoning_content: None,
-                    tool_calls: None,
-                    tool_call_id: Some(call_id.clone()),
-                });
+                push_tool_output(
+                    &mut messages,
+                    &mut deferred_messages,
+                    &mut pending_tool_call_ids,
+                    call_id,
+                    tool_output_text(output),
+                );
             }
             ResponseItem::ToolSearchOutput {
                 call_id,
@@ -279,15 +294,14 @@ pub(crate) fn convert_request(
                     &mut pending_assistant_content,
                     &mut pending_tool_calls,
                 );
-                messages.push(ChatMessage {
-                    role: "tool".to_string(),
-                    content: Some(json!(tool_search_output_text(status, execution, tools))),
-                    reasoning_content: None,
-                    tool_calls: None,
-                    tool_call_id: Some(
-                        call_id.clone().unwrap_or_else(|| "tool_search".to_string()),
-                    ),
-                });
+                let call_id = call_id.clone().unwrap_or_else(|| "tool_search".to_string());
+                push_tool_output(
+                    &mut messages,
+                    &mut deferred_messages,
+                    &mut pending_tool_call_ids,
+                    &call_id,
+                    tool_search_output_text(status, execution, tools),
+                );
             }
             ResponseItem::Reasoning { content, .. } => {
                 if let Some(text) = reasoning_content_text(content.as_deref()) {
@@ -313,6 +327,16 @@ pub(crate) fn convert_request(
         &mut pending_assistant_content,
         &mut pending_tool_calls,
     );
+    for call_id in pending_tool_call_ids {
+        messages.push(ChatMessage {
+            role: "tool".to_string(),
+            content: Some(json!("aborted")),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: Some(call_id),
+        });
+    }
+    messages.append(&mut deferred_messages);
     if let Some(reasoning_content) = pending_reasoning_content.take() {
         messages.push(ChatMessage {
             role: "assistant".to_string(),
@@ -344,6 +368,26 @@ pub(crate) fn convert_request(
     };
 
     Ok((chat_request, tool_kinds))
+}
+
+fn push_tool_output(
+    messages: &mut Vec<ChatMessage>,
+    deferred_messages: &mut Vec<ChatMessage>,
+    pending_tool_call_ids: &mut Vec<String>,
+    call_id: &str,
+    output: String,
+) {
+    messages.push(ChatMessage {
+        role: "tool".to_string(),
+        content: Some(json!(output)),
+        reasoning_content: None,
+        tool_calls: None,
+        tool_call_id: Some(call_id.to_string()),
+    });
+    pending_tool_call_ids.retain(|pending_call_id| pending_call_id != call_id);
+    if pending_tool_call_ids.is_empty() {
+        messages.append(deferred_messages);
+    }
 }
 
 fn flush_pending_assistant(
@@ -827,6 +871,10 @@ fn verbosity_to_string(verbosity: OpenAiVerbosity) -> String {
 }
 
 #[cfg(test)]
+#[path = "request_adjacency_tests.rs"]
+mod request_adjacency_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use codex_api::TextFormatType;
@@ -1175,13 +1223,16 @@ mod tests {
 
         let (chat, _) = convert_request(&request).expect("request should convert");
 
-        assert_eq!(chat.messages.len(), 1);
+        assert_eq!(chat.messages.len(), 2);
         assert_eq!(chat.messages[0].role, "assistant");
         assert_eq!(
             chat.messages[0].reasoning_content.as_deref(),
             Some("Need to inspect files.")
         );
         assert!(chat.messages[0].tool_calls.is_some());
+        assert_eq!(chat.messages[1].role, "tool");
+        assert_eq!(chat.messages[1].content, Some(json!("aborted")));
+        assert_eq!(chat.messages[1].tool_call_id.as_deref(), Some("call-1"));
     }
 
     #[test]
