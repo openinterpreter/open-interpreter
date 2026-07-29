@@ -3,7 +3,15 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/build-interpreter-release.sh [--target <rust-target>] [--install-dir <dir>] [--home <dir>]
+Usage: scripts/build-interpreter-release.sh [options]
+
+Options:
+  --target <target>        Rust target triple (defaults to host platform)
+  --install-dir <dir>      Visible bin directory for shims
+  --home <dir>             Open Interpreter home directory
+  --cargo-profile <prof>   Cargo profile to build (default: release)
+  -j, --jobs <N>           Number of parallel Cargo build jobs (default: auto)
+  -h, --help               Show this help message
 
 Builds a local Open Interpreter standalone package using the same package
 layout as the public installer, stages it under INTERPRETER_HOME, and
@@ -16,20 +24,49 @@ codex_rs_dir="$repo_root/codex-rs"
 target=""
 install_dir="${OPEN_INTERPRETER_INSTALL_DIR:-${CODEX_INSTALL_DIR:-$HOME/.local/bin}}"
 interpreter_home="${INTERPRETER_HOME:-$HOME/.openinterpreter}"
-build_jobs="${CARGO_BUILD_JOBS:-1}"
+cargo_profile="release"
+build_jobs="${CARGO_BUILD_JOBS:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --target=*)
+      target="${1#*=}"
+      shift
+      ;;
     --target)
       target="${2:?--target requires a value}"
       shift 2
+      ;;
+    --install-dir=*)
+      install_dir="${1#*=}"
+      shift
       ;;
     --install-dir)
       install_dir="${2:?--install-dir requires a value}"
       shift 2
       ;;
+    --home=*)
+      interpreter_home="${1#*=}"
+      shift
+      ;;
     --home)
       interpreter_home="${2:?--home requires a value}"
+      shift 2
+      ;;
+    --cargo-profile=*|--profile=*)
+      cargo_profile="${1#*=}"
+      shift
+      ;;
+    --cargo-profile|--profile)
+      cargo_profile="${2:?--cargo-profile requires a value}"
+      shift 2
+      ;;
+    --jobs=*|-j=*)
+      build_jobs="${1#*=}"
+      shift
+      ;;
+    --jobs|-j)
+      build_jobs="${2:?--jobs requires a value}"
       shift 2
       ;;
     -h|--help)
@@ -44,13 +81,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Resolve paths to absolute locations so relative CLI arguments work safely.
+mkdir -p "$install_dir" "$interpreter_home"
+install_dir="$(cd "$install_dir" && pwd -P)"
+interpreter_home="$(cd "$interpreter_home" && pwd -P)"
+
 package_root="$interpreter_home/packages/standalone"
 releases_dir="$package_root/releases"
 current_link="$package_root/current"
-target_args=()
 target_label="host"
 if [[ -n "$target" ]]; then
-  target_args=(--target "$target")
   target_label="$target"
 fi
 
@@ -59,7 +99,7 @@ staging_dir="$releases_dir/.staging.local-$target_label.$$"
 cleanup_staging=true
 
 cleanup() {
-  if [[ "$cleanup_staging" == "true" ]]; then
+  if [[ "${cleanup_staging:-false}" == "true" && -n "${staging_dir:-}" ]]; then
     rm -rf "$staging_dir"
   fi
 }
@@ -75,6 +115,7 @@ replace_symlink() {
     exit 1
   fi
 
+  mkdir -p "$(dirname -- "$link_path")"
   rm -f "$tmp_link"
   ln -s "$target_path" "$tmp_link"
   rm -f "$link_path"
@@ -85,7 +126,12 @@ echo "Building local Open Interpreter standalone package..."
 echo "Workspace: $codex_rs_dir"
 echo "Open Interpreter home: $interpreter_home"
 echo "Visible bin directory: $install_dir"
-echo "Cargo build jobs: $build_jobs"
+echo "Cargo profile: $cargo_profile"
+if [[ -n "$build_jobs" ]]; then
+  echo "Cargo build jobs: $build_jobs"
+else
+  echo "Cargo build jobs: auto"
+fi
 
 mkdir -p "$releases_dir" "$install_dir"
 rm -rf "$staging_dir"
@@ -94,14 +140,17 @@ rm -rf "$staging_dir"
   cd "$repo_root"
   package_args=(
     --variant open-interpreter
-    --cargo-profile release
+    --cargo-profile "$cargo_profile"
     --package-dir "$staging_dir"
     --force
   )
   if [[ -n "$target" ]]; then
     package_args=(--target "$target" "${package_args[@]}")
   fi
-  CARGO_BUILD_JOBS="$build_jobs" python3 scripts/build_codex_package.py "${package_args[@]}"
+  if [[ -n "$build_jobs" ]]; then
+    export CARGO_BUILD_JOBS="$build_jobs"
+  fi
+  python3 scripts/build_codex_package.py "${package_args[@]}"
 )
 
 if [[ -e "$package_dir" || -L "$package_dir" ]]; then
@@ -122,4 +171,10 @@ echo "Installed shims:"
 echo "  $install_dir/interpreter -> $current_link/bin/interpreter"
 echo "  $install_dir/i -> $current_link/bin/interpreter"
 echo
-"$install_dir/interpreter" --version
+
+if [[ -x "$install_dir/interpreter" ]]; then
+  "$install_dir/interpreter" --version
+else
+  echo "Error: Installed binary at $install_dir/interpreter is not executable" >&2
+  exit 1
+fi
