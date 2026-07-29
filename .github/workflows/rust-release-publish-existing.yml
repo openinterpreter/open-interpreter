@@ -74,13 +74,23 @@ jobs:
           sha256sum open-interpreter-package-*.tar.gz open-interpreter-package-*.tar.zst \
             > codex-package_SHA256SUMS
 
+      - name: Determine prerelease status
+        id: prerelease
+        shell: bash
+        run: |
+          if [[ "${{ inputs.version }}" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish release
         uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.5.0
         with:
           tag_name: ${{ inputs.tag }}
           name: Open Interpreter ${{ inputs.version }}
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.prerelease.outputs.prerelease }}
           files: |
             dist/open-interpreter-package-*.tar.gz
             dist/open-interpreter-package-*.tar.zst

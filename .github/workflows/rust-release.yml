@@ -19,6 +19,7 @@ on:
   push:
     tags:
       - "rust-v*.*.*"
+      - "rust-v*.*.*-*"
   workflow_dispatch:
     inputs:
       version:
@@ -54,6 +55,7 @@ jobs:
       publish: ${{ steps.matrix.outputs.publish }}
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
@@ -66,8 +68,8 @@ jobs:
           set -euo pipefail
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             tag="${GITHUB_REF_NAME}"
-            [[ "${tag}" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-              || { echo "❌  Tag ${tag} does not match rust-vX.Y.Z"; exit 1; }
+            [[ "${tag}" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]] \
+              || { echo "❌  Tag ${tag} does not match rust-vX.Y.Z[-suffix]"; exit 1; }
             version="${tag#rust-v}"
             cargo_version="$(grep -m1 '^version = ' codex-rs/Cargo.toml | cut -d'"' -f2)"
             [[ "${version}" == "${cargo_version}" ]] \
@@ -76,8 +78,14 @@ jobs:
             version="${{ inputs.version }}"
             tag="rust-v${version}"
           fi
+          if [[ "${version}" == *-* ]]; then
+            prerelease="true"
+          else
+            prerelease="false"
+          fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
 
       - name: Select targets
         id: matrix
@@ -307,7 +315,7 @@ jobs:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: Open Interpreter ${{ needs.prepare.outputs.version }}
           draft: false
-          prerelease: false
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
           files: |
             dist/open-interpreter-package-*.tar.gz
             dist/open-interpreter-package-*.tar.zst
