@@ -9,8 +9,7 @@ Options:
   --target <target>        Rust target triple (defaults to host platform)
   --install-dir <dir>      Visible bin directory for shims
   --home <dir>             Open Interpreter home directory
-  --cargo-profile <prof>   Cargo profile to build (default: release)
-  -j, --jobs <N>           Number of parallel Cargo build jobs (default: auto)
+  -j, --jobs <N>           Number of parallel Cargo build jobs (default: 1)
   -h, --help               Show this help message
 
 Builds a local Open Interpreter standalone package using the same package
@@ -24,8 +23,7 @@ codex_rs_dir="$repo_root/codex-rs"
 target=""
 install_dir="${OPEN_INTERPRETER_INSTALL_DIR:-${CODEX_INSTALL_DIR:-$HOME/.local/bin}}"
 interpreter_home="${INTERPRETER_HOME:-$HOME/.openinterpreter}"
-cargo_profile="release"
-build_jobs="${CARGO_BUILD_JOBS:-}"
+build_jobs="${CARGO_BUILD_JOBS:-1}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,14 +51,6 @@ while [[ $# -gt 0 ]]; do
       interpreter_home="${2:?--home requires a value}"
       shift 2
       ;;
-    --cargo-profile=*|--profile=*)
-      cargo_profile="${1#*=}"
-      shift
-      ;;
-    --cargo-profile|--profile)
-      cargo_profile="${2:?--cargo-profile requires a value}"
-      shift 2
-      ;;
     --jobs=*|-j=*)
       build_jobs="${1#*=}"
       shift
@@ -80,6 +70,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ ! "$build_jobs" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Cargo build jobs must be a positive integer: $build_jobs" >&2
+  exit 1
+fi
 
 # Resolve paths to absolute locations so relative CLI arguments work safely.
 mkdir -p "$install_dir" "$interpreter_home"
@@ -126,12 +121,7 @@ echo "Building local Open Interpreter standalone package..."
 echo "Workspace: $codex_rs_dir"
 echo "Open Interpreter home: $interpreter_home"
 echo "Visible bin directory: $install_dir"
-echo "Cargo profile: $cargo_profile"
-if [[ -n "$build_jobs" ]]; then
-  echo "Cargo build jobs: $build_jobs"
-else
-  echo "Cargo build jobs: auto"
-fi
+echo "Cargo build jobs: $build_jobs"
 
 mkdir -p "$releases_dir" "$install_dir"
 rm -rf "$staging_dir"
@@ -140,17 +130,14 @@ rm -rf "$staging_dir"
   cd "$repo_root"
   package_args=(
     --variant open-interpreter
-    --cargo-profile "$cargo_profile"
+    --cargo-profile release
     --package-dir "$staging_dir"
     --force
   )
   if [[ -n "$target" ]]; then
     package_args=(--target "$target" "${package_args[@]}")
   fi
-  if [[ -n "$build_jobs" ]]; then
-    export CARGO_BUILD_JOBS="$build_jobs"
-  fi
-  python3 scripts/build_codex_package.py "${package_args[@]}"
+  CARGO_BUILD_JOBS="$build_jobs" python3 scripts/build_codex_package.py "${package_args[@]}"
 )
 
 if [[ -e "$package_dir" || -L "$package_dir" ]]; then
