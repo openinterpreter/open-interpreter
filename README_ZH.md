@@ -24,7 +24,7 @@
 
 <p align="center">
   <a href="https://www.openinterpreter.com/blog/open-interpreter?utm_source=github&amp;utm_medium=referral&amp;utm_campaign=readme&amp;utm_content=hero_image">
-    <img alt="在终端中运行的 Open Interpreter" src="https://openinterpreter.com/blog/open-interpreter/blog-hero-1.jpg" width="100%" />
+    <img alt="在终端中运行的 Open Interpreter" src="docs-site/assets/open-interpreter-terminal-hero.png" width="100%" />
   </a>
 </p>
 

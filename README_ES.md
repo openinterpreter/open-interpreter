@@ -24,7 +24,7 @@
 
 <p align="center">
   <a href="https://www.openinterpreter.com/blog/open-interpreter?utm_source=github&amp;utm_medium=referral&amp;utm_campaign=readme&amp;utm_content=hero_image">
-    <img alt="Open Interpreter ejecutándose en una terminal" src="https://openinterpreter.com/blog/open-interpreter/blog-hero-1.jpg" width="100%" />
+    <img alt="Open Interpreter ejecutándose en una terminal" src="docs-site/assets/open-interpreter-terminal-hero.png" width="100%" />
   </a>
 </p>
 
