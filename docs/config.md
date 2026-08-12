@@ -149,7 +149,7 @@ wire_api = "chat"
 
 Set `APPNZ_API_KEY` to your app.nz API key.
 
-> **Note:** The same OpenAI-compatible `base_url` pattern works with multi-model gateways when you are not self-hosting — for example [DaoXE](https://daoxe.com/?utm_source=github&utm_medium=organic&utm_campaign=open-interpreter&utm_content=openai_base_url) at `https://api.daoxe.com/v1`.
+> **Note:** The same OpenAI-compatible `base_url` pattern works with multi-model gateways when you are not self-hosting — for example [DaoXE](https://daoxe.com/) at `https://api.daoxe.com/v1`.
 
 ## Harness
 
