@@ -64,6 +64,12 @@ jobs:
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: x86_64-unknown-linux-gnu
+      # rust-cache can restore v8's Cargo fingerprint without preserving the
+      # large native archive in its build-script output directory. Force only
+      # that package to rerun its build script so it unpacks the verified
+      # RUSTY_V8_ARCHIVE downloaded above into this runner's target directory.
+      - name: Invalidate cached rusty_v8 build output
+        run: cargo clean -p v8
       - name: cargo fmt --check
         run: cargo fmt -- --config imports_granularity=Item --check
       # Hard gate: build the whole workspace including all test code (catches
