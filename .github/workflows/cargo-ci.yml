@@ -69,7 +69,10 @@ jobs:
       # that package to rerun its build script so it unpacks the verified
       # RUSTY_V8_ARCHIVE downloaded above into this runner's target directory.
       - name: Invalidate cached rusty_v8 build output
-        run: cargo clean -p v8
+        run: |
+          find target -type d \
+            \( -path '*/build/v8-*' -o -path '*/.fingerprint/v8-*' \) \
+            -prune -exec rm -rf {} +
       - name: cargo fmt --check
         run: cargo fmt -- --config imports_granularity=Item --check
       # Hard gate: build the whole workspace including all test code (catches
