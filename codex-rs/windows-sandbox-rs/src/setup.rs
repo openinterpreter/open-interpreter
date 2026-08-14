@@ -231,7 +231,7 @@ fn run_setup_refresh_inner(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let cwd = std::env::current_dir().unwrap_or_else(|_| codex_home.to_path_buf());
+    let cwd = std::env::current_dir().unwrap_or_else(|_| request.codex_home.to_path_buf());
     log_note(
         &format!(
             "setup refresh: spawning {} (cwd={}, payload_len={})",
