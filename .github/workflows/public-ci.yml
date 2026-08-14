@@ -106,3 +106,17 @@ jobs:
       - name: Test with PowerShell
         shell: pwsh
         run: scripts/install/test_install_ps1.ps1
+
+      # This is intentionally a native Windows compile, not a manifest or
+      # installer-only check. Windows-only Rust modules are excluded on Linux
+      # and macOS, so ownership/name-resolution failures otherwise surface only
+      # after a release tag has started the full packaging matrix.
+      - uses: dtolnay/rust-toolchain@a0b273b48ed29de4470960879e8381ff45632f26 # 1.93.0
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: codex-rs
+
+      - name: Compile the native Windows sandbox
+        working-directory: codex-rs
+        run: cargo check -p codex-windows-sandbox --locked

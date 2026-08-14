@@ -227,7 +227,7 @@ fn run_setup_refresh_inner(
     };
     // Refresh should never request elevation; ensure verb isn't set and we don't trigger UAC.
     let mut cmd = Command::new(&exe);
-    cmd.arg(b64)
+    cmd.arg(&b64)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
