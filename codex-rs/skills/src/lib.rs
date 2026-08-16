@@ -185,7 +185,45 @@ impl SystemSkillsError {
 #[cfg(test)]
 mod tests {
     use super::SYSTEM_SKILLS_DIR;
+    use super::SYSTEM_SKILLS_MARKER_FILENAME;
     use super::collect_fingerprint_items;
+    use super::embedded_system_skills_fingerprint;
+    use super::install_system_skills;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+    use std::fs;
+    use std::path::Path;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
+    static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            loop {
+                let id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir()
+                    .join(format!("codex-skills-test-{}-{id}", std::process::id()));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Self(path),
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(err) => panic!("create test directory: {err}"),
+                }
+            }
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn fingerprint_traverses_nested_entries() {
@@ -203,6 +241,61 @@ mod tests {
             paths
                 .binary_search_by(|probe| probe.as_str().cmp("skill-creator/scripts/init_skill.py"))
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn refreshes_only_the_oix_owned_system_skills_namespace() {
+        let home = TestDir::new();
+        let interpreter_home = AbsolutePathBuf::from_absolute_path(home.path())
+            .expect("tempdir path should be absolute");
+        let host_skill = home.path().join("skills/workstation-managed/SKILL.md");
+        fs::create_dir_all(
+            host_skill
+                .parent()
+                .expect("host skill should have a parent"),
+        )
+        .expect("create host-managed skill directory");
+        fs::write(&host_skill, "host-managed\n").expect("write host-managed skill");
+
+        install_system_skills(&interpreter_home).expect("install embedded system skills");
+
+        let system_root = home.path().join("skills/.system");
+        let qa_skill = system_root.join("qa-testing/SKILL.md");
+        fs::write(&qa_skill, "stale OIX skill\n").expect("replace cached QA skill");
+        let retired_skill = system_root.join("retired-skill/SKILL.md");
+        fs::create_dir_all(
+            retired_skill
+                .parent()
+                .expect("retired skill should have a parent"),
+        )
+        .expect("create retired skill directory");
+        fs::write(&retired_skill, "retired\n").expect("write retired skill");
+        fs::write(
+            system_root.join(SYSTEM_SKILLS_MARKER_FILENAME),
+            "previous-release-fingerprint\n",
+        )
+        .expect("write stale system skill marker");
+
+        install_system_skills(&interpreter_home).expect("refresh embedded system skills");
+
+        let embedded_qa_skill = SYSTEM_SKILLS_DIR
+            .get_file("qa-testing/SKILL.md")
+            .expect("QA skill should be embedded");
+        assert_eq!(
+            fs::read(&qa_skill).expect("read refreshed QA skill"),
+            embedded_qa_skill.contents()
+        );
+        assert!(!retired_skill.exists());
+        assert_eq!(
+            fs::read_to_string(&host_skill).expect("read host-managed skill"),
+            "host-managed\n"
+        );
+        assert_eq!(
+            fs::read_to_string(system_root.join(SYSTEM_SKILLS_MARKER_FILENAME))
+                .expect("read refreshed system skill marker")
+                .trim(),
+            embedded_system_skills_fingerprint()
         );
     }
 }

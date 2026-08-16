@@ -57,6 +57,21 @@ user-authored skills. Bundled internal skills may still be cached under the
 Open Interpreter home because they are product assets rather than portable
 user data.
 
+### Bundled Skill Updates
+
+Open Interpreter owns the bundled skill cache at
+`$INTERPRETER_HOME/skills/.system/` (normally
+`~/.openinterpreter/skills/.system/`). The runtime fingerprints the complete
+embedded bundle and refreshes that directory when a newly installed Open
+Interpreter version ships changed or retired skills. This happens when the
+updated runtime starts a session, including interactive, `exec`, and app-server
+sessions.
+
+Treat `.system/` as read-only: an Open Interpreter update can replace changes
+inside it. User skills, host-application skills, and other sibling directories
+under `skills/` are outside Open Interpreter's managed namespace and are not
+changed by this refresh.
+
 ## What to Put in a Skill
 
 Use skills for repeatable procedures:

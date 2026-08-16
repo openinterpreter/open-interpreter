@@ -45,6 +45,16 @@ description: 通过测试、更新变更日志并打标签来准备发布。
 
 当名称冲突时，本地技能的优先级高于个人和内置技能。
 
+新的用户技能应放在 `.agents/skills` 目录中。这是一个工具无关的共享目录，因此其他兼容的智能体也可以直接使用同一个技能，无需为 Open Interpreter 导入或复制。
+
+Open Interpreter 还会读取 `~/.openinterpreter/skills/`，以保持向后兼容。新的用户自定义技能不应放在这个产品专用目录中。内置技能仍可能缓存在 Open Interpreter 主目录下，因为它们属于产品资源，而不是可移植的用户数据。
+
+### 内置技能更新
+
+Open Interpreter 管理 `$INTERPRETER_HOME/skills/.system/`（通常为 `~/.openinterpreter/skills/.system/`）中的内置技能缓存。运行时会为完整的内置技能包生成指纹；新安装的 Open Interpreter 版本如果包含已更改或已移除的技能，就会刷新该目录。更新后的运行时在启动交互式、`exec` 或 app-server 会话时都会执行此检查。
+
+请将 `.system/` 视为只读目录：Open Interpreter 更新可能会替换其中的改动。用户技能、宿主应用技能以及 `skills/` 下的其他同级目录不属于 Open Interpreter 的托管命名空间，因此不会被这次刷新修改。
+
 ## 技能应包含的内容
 
 - 发布检查清单

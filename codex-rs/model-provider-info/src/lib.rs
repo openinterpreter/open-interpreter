@@ -583,9 +583,12 @@ fn provider_from_bundled_catalog_entry(entry: &BundledProviderCatalogEntry) -> M
 
 /// Merge configured providers into the built-in provider catalog.
 ///
-/// Configured providers extend the built-in set. Built-in providers are not
-/// generally overridable, but the built-in Amazon Bedrock provider allows the
-/// user to customize its endpoint, authentication, headers, and AWS settings.
+/// Configured providers extend the built-in set and take precedence over
+/// bundled catalog entries with the same id, so an explicit
+/// `model_providers.<id>` configuration can redirect a catalog provider (for
+/// example to a local proxy). The built-in Amazon Bedrock provider only
+/// allows customizing its endpoint, authentication, headers, and AWS
+/// settings.
 pub fn merge_configured_model_providers(
     mut model_providers: HashMap<String, ModelProviderInfo>,
     configured_model_providers: HashMap<String, ModelProviderInfo>,
@@ -618,7 +621,7 @@ provider fields are not supported"
                 }
             }
         } else {
-            model_providers.entry(key).or_insert(provider);
+            model_providers.insert(key, provider);
         }
     }
 

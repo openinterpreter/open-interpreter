@@ -398,6 +398,39 @@ fn test_merge_configured_model_providers_adds_custom_provider() {
 }
 
 #[test]
+fn test_merge_configured_model_providers_configured_provider_overrides_catalog_entry() {
+    let catalog_provider = built_in_model_providers(/*openai_base_url*/ None)
+        .get("moonshotai")
+        .expect("moonshotai should be in the bundled catalog")
+        .clone();
+    assert_eq!(
+        catalog_provider.base_url.as_deref(),
+        Some("https://api.moonshot.ai/v1")
+    );
+
+    let configured_provider = ModelProviderInfo {
+        name: "Moonshot AI".to_string(),
+        base_url: Some("http://127.0.0.1:9999".to_string()),
+        env_key: Some("MOONSHOT_API_KEY".to_string()),
+        wire_api: WireApi::Chat,
+        ..ModelProviderInfo::default()
+    };
+    let configured_model_providers =
+        std::collections::HashMap::from([("moonshotai".to_string(), configured_provider.clone())]);
+
+    let mut expected = built_in_model_providers(/*openai_base_url*/ None);
+    expected.insert("moonshotai".to_string(), configured_provider);
+
+    assert_eq!(
+        merge_configured_model_providers(
+            built_in_model_providers(/*openai_base_url*/ None),
+            configured_model_providers,
+        ),
+        Ok(expected)
+    );
+}
+
+#[test]
 fn test_merge_configured_model_providers_applies_amazon_bedrock_profile_override() {
     let configured_model_providers = std::collections::HashMap::from([(
         AMAZON_BEDROCK_PROVIDER_ID.to_string(),
