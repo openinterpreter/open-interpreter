@@ -463,6 +463,35 @@ async fn injected_cache_hit_avoids_remote_fetch() {
 }
 
 #[tokio::test]
+async fn cache_first_picker_models_do_not_require_auth_resolution() {
+    let cached_models = vec![remote_model("cached", "Cached", /*priority*/ 0)];
+    let cache = TestModelsCache::with_entry(ModelsCacheEntry {
+        fetched_at: Utc::now(),
+        etag: None,
+        client_version: Some(crate::client_version_to_whole()),
+        models: cached_models.clone(),
+    });
+    let endpoint = TestModelsEndpoint::new(vec![vec![remote_model(
+        "remote", "Remote", /*priority*/ 0,
+    )]]);
+    let manager = OpenAiModelsManager::new_with_cache(
+        cache,
+        endpoint.clone(),
+        Some(AuthManager::from_auth_for_testing(
+            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        )),
+    );
+
+    let models = manager
+        .list_models_from_cache_if_present()
+        .await
+        .expect("fresh cache should provide picker models");
+
+    assert_eq!(models[0].model, "cached");
+    assert_eq!(endpoint.fetch_count(), 0);
+}
+
+#[tokio::test]
 async fn injected_cache_read_error_falls_back_and_persists_remote_models() {
     let remote_models = vec![remote_model("remote", "Remote", /*priority*/ 0)];
     let cache = TestModelsCache::failing(/*load_error*/ true, /*store_error*/ false);

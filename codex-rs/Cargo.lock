@@ -2165,6 +2165,7 @@ dependencies = [
  "codex-models-manager",
  "codex-otel",
  "codex-plugin",
+ "codex-product-info",
  "codex-protocol",
  "codex-rmcp-client",
  "codex-rollout",

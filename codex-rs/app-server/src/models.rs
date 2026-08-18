@@ -41,6 +41,11 @@ pub async fn supported_models_for_provider(
     provider_config.model_provider = provider;
     provider_config.codex_home = config.codex_home.join("models-cache").join(provider_id);
     let models_manager = build_models_manager(&provider_config, auth_manager);
+    if codex_product_info::Product::current() == codex_product_info::Product::OpenInterpreter
+        && let Some(models) = models_manager.list_models_from_cache_if_present().await
+    {
+        return models_from_presets(models, include_hidden);
+    }
     models_from_presets(
         models_manager
             .list_models(RefreshStrategy::OnlineIfUncached, http_client_factory)

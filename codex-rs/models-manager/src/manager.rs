@@ -114,6 +114,16 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
         http_client_factory: HttpClientFactory,
     ) -> ModelsManagerFuture<'_, ModelsResponse>;
 
+    /// Return picker-ready models when a fresh cache entry is available, without resolving auth.
+    ///
+    /// Product integrations may use this fast path before invoking the normal refresh flow when
+    /// loading stored authentication is not required to display an already-cached catalog.
+    fn list_models_from_cache_if_present(
+        &self,
+    ) -> ModelsManagerFuture<'_, Option<Vec<ModelPreset>>> {
+        Box::pin(async { None })
+    }
+
     /// Return the current in-memory remote model catalog without refreshing or loading cache state.
     fn get_remote_models(&self) -> ModelsManagerFuture<'_, Vec<ModelInfo>>;
 
@@ -397,6 +407,17 @@ impl ModelsManager for OpenAiModelsManager {
 
     fn get_remote_models(&self) -> ModelsManagerFuture<'_, Vec<ModelInfo>> {
         Box::pin(async move { self.remote_models.read().await.clone() })
+    }
+
+    fn list_models_from_cache_if_present(
+        &self,
+    ) -> ModelsManagerFuture<'_, Option<Vec<ModelPreset>>> {
+        Box::pin(async move {
+            if !self.try_load_cache().await {
+                return None;
+            }
+            Some(self.build_available_models(self.get_remote_models().await))
+        })
     }
 
     fn try_get_remote_models(&self) -> Result<Vec<ModelInfo>, TryLockError> {
