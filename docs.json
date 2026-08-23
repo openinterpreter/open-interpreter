@@ -87,6 +87,7 @@
             "group": "Extensions",
             "pages": [
               "docs/mcp",
+              "docs/gbr",
               "docs/plugins",
               "docs/hooks"
             ]
