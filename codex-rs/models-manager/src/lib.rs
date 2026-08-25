@@ -38,7 +38,7 @@ mod tests {
     fn open_interpreter_advertises_embedded_codex_compatibility_version() {
         assert_eq!(
             client_version_to_whole_for_product(codex_product_info::Product::OpenInterpreter),
-            "0.147.0"
+            "0.148.0"
         );
     }
 }
