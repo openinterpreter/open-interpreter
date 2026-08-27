@@ -75,6 +75,7 @@ use codex_otel::SessionTelemetry;
 use codex_otel::current_span_w3c_trace_context;
 use codex_protocol::auth::AuthMode;
 
+use codex_chat_wire_compat::ToolKinds;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Verbosity as VerbosityConfig;
@@ -88,6 +89,7 @@ use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
+use codex_tools::Harness;
 use codex_tools::create_tools_json_for_responses_api;
 use codex_tools::create_tools_json_for_responses_lite;
 use codex_tools::create_tools_raw_json_for_responses_api;
@@ -116,9 +118,17 @@ use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::feedback_tags;
+use crate::harness::request::ChatHarnessRequest;
+use crate::harness::request::ChatHarnessTurn;
+use crate::harness::request::apply_chat_harness_postprocess;
+use crate::harness::request::build_chat_harness_request;
+use crate::harness::routing::ChatHarnessRoute;
+use crate::harness::routing::StreamTransportRoute;
+use crate::harness::routing::resolve_stream_transport_route;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
 use crate::util::emit_feedback_auth_recovery_tags;
+use codex_chat_wire_compat::ChatCompletionsCompatClient;
 use codex_feedback::FeedbackRequestTags;
 use codex_feedback::emit_feedback_request_tags_with_auth_env;
 use codex_login::auth::AgentIdentityAuthPolicy;
@@ -131,7 +141,6 @@ use codex_model_provider::create_model_provider;
 #[cfg(test)]
 use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
 use codex_model_provider_info::ModelProviderInfo;
-use codex_model_provider_info::WireApi;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_response_debug_context::extract_response_debug_context;
@@ -160,6 +169,7 @@ const X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER: &str =
 const REALTIME_CALLS_ENDPOINT: &str = "/realtime/calls";
 const RESPONSES_ENDPOINT: &str = "/responses";
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
+const CHAT_COMPLETIONS_ENDPOINT: &str = "/chat/completions";
 // `/responses/compact` is unary, so the timeout covers the full response rather than one idle
 // period between stream events.
 const COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER: u32 = 4;
@@ -256,6 +266,8 @@ pub struct ModelClient {
     agent_identity_policy: AgentIdentityAuthPolicy,
     prompt_cache_key_override: Option<String>,
     http_client_factory: HttpClientFactory,
+    harness: Harness,
+    harness_guidance: bool,
 }
 
 /// A turn-scoped streaming session created from a [`ModelClient`].
@@ -470,7 +482,15 @@ impl ModelClient {
             agent_identity_policy,
             prompt_cache_key_override: None,
             http_client_factory,
+            harness: Harness::Native,
+            harness_guidance: true,
         }
+    }
+
+    pub(crate) fn with_harness(mut self, harness: Harness, harness_guidance: bool) -> Self {
+        self.harness = harness;
+        self.harness_guidance = harness_guidance;
+        self
     }
 
     pub(crate) fn with_prompt_cache_key_override(
@@ -1027,6 +1047,10 @@ impl ModelClient {
 
     pub(crate) async fn prewarm_auth(&self) -> Result<()> {
         self.current_client_setup().await.map(|_| ())
+    }
+
+    fn stream_transport_route(&self) -> Result<StreamTransportRoute> {
+        resolve_stream_transport_route(self.state.provider.info().wire_api, &self.harness)
     }
 
     /// Opens a websocket connection using the same header and telemetry wiring as normal turns.
@@ -1859,9 +1883,8 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
-        let wire_api = self.client.state.provider.info().wire_api;
-        match wire_api {
-            WireApi::Responses => {
+        match self.client.stream_transport_route()? {
+            StreamTransportRoute::ResponsesApi => {
                 if self.client.responses_websocket_enabled() {
                     let request_trace = current_span_w3c_trace_context();
                     match self
@@ -1898,9 +1921,286 @@ impl ModelClientSession {
                 )
                 .await
             }
-            WireApi::Chat | WireApi::Messages => Err(CodexErr::UnsupportedOperation(
+            StreamTransportRoute::ChatCompletionsCompat => {
+                self.stream_chat_completions_compat(
+                    prompt,
+                    model_info,
+                    session_telemetry,
+                    effort,
+                    summary,
+                    service_tier,
+                    responses_metadata,
+                    inference_trace,
+                )
+                .await
+            }
+            StreamTransportRoute::ChatHarness(route) => {
+                Box::pin(self.stream_chat_harness_api(
+                    route,
+                    prompt,
+                    model_info,
+                    session_telemetry,
+                    effort,
+                ))
+                .await
+            }
+            StreamTransportRoute::MessagesHarness(_)
+            | StreamTransportRoute::ClaudeCodeResponses(_)
+            | StreamTransportRoute::ClaudeCodeChat(_) => Err(CodexErr::UnsupportedOperation(
                 "non-Responses wire APIs require the compatibility transport".to_string(),
             )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(
+        name = "model_client.stream_chat_completions_compat",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.info().wire_api,
+            transport = "chat_completions_http",
+            http.method = "POST",
+            api.path = "chat/completions"
+        )
+    )]
+    async fn stream_chat_completions_compat(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        let auth_manager = self.client.state.provider.auth_manager();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(AuthManager::unauthorized_recovery);
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            let transport = self
+                .client
+                .build_api_transport(&client_setup.api_provider, CHAT_COMPLETIONS_ENDPOINT)?;
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                client_setup.agent_identity_telemetry.clone(),
+                pending_retry,
+            );
+            let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
+                session_telemetry,
+                request_auth_context,
+                RequestRouteTelemetry::for_endpoint(CHAT_COMPLETIONS_ENDPOINT),
+                self.client.state.auth_env_telemetry.clone(),
+            );
+            let compression = self.responses_request_compression(client_setup.auth.as_ref());
+            let mut options = self
+                .build_responses_options(
+                    responses_metadata,
+                    compression,
+                    model_info.use_responses_lite,
+                )
+                .await;
+
+            let mut request = self.client.build_responses_request(
+                prompt,
+                model_info,
+                effort.clone(),
+                summary,
+                service_tier.clone(),
+                responses_metadata,
+            )?;
+            self.client
+                .prepare_response_items_for_request(&mut request.input);
+            let request_session_telemetry =
+                session_telemetry_for_request(session_telemetry, &request);
+            let inference_trace_attempt = inference_trace.start_attempt();
+            inference_trace_attempt.add_request_headers(&mut options.extra_headers);
+            inference_trace_attempt.record_started(&request);
+            let client = ChatCompletionsCompatClient::new(
+                transport,
+                client_setup.api_provider,
+                client_setup.api_auth,
+            )
+            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            let stream_result = client.stream_request(request, options).await;
+
+            match stream_result {
+                Ok(stream) => {
+                    let (stream, _) = map_response_stream(
+                        stream,
+                        request_session_telemetry,
+                        inference_trace_attempt,
+                        Arc::clone(&self.client.state.provider),
+                    );
+                    return Ok(stream);
+                }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    let response_debug_context =
+                        extract_response_debug_context(&unauthorized_transport);
+                    inference_trace_attempt.record_failed(
+                        &unauthorized_transport,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            session_telemetry,
+                            &self.client.state.provider,
+                        )
+                        .await?,
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    let response_debug_context =
+                        extract_response_debug_context_from_api_error(&err);
+                    let err = self.client.state.provider.map_api_error(err);
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    async fn stream_chat_harness_api(
+        &self,
+        route: ChatHarnessRoute,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+    ) -> Result<ResponseStream> {
+        let auth_manager = self.client.state.provider.auth_manager();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(AuthManager::unauthorized_recovery);
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            let transport = self
+                .client
+                .build_api_transport(&client_setup.api_provider, CHAT_COMPLETIONS_ENDPOINT)?;
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                client_setup.agent_identity_telemetry.clone(),
+                pending_retry,
+            );
+            let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
+                session_telemetry,
+                request_auth_context,
+                RequestRouteTelemetry::for_endpoint(CHAT_COMPLETIONS_ENDPOINT),
+                self.client.state.auth_env_telemetry.clone(),
+            );
+            let thread_id = self.client.state.thread_id.to_string();
+            let ChatHarnessRequest {
+                request_body,
+                tool_kinds,
+                title_request,
+                postprocess,
+            } = build_chat_harness_request(
+                route,
+                ChatHarnessTurn {
+                    prompt,
+                    harness: &self.client.harness,
+                    harness_guidance: self.client.harness_guidance,
+                    model_info,
+                    effort: effort.clone(),
+                    thread_id: &thread_id,
+                    session_source: Some(&self.client.state.session_source),
+                },
+            )?;
+            let client = ChatCompletionsCompatClient::new(
+                transport,
+                client_setup.api_provider,
+                client_setup.api_auth,
+            )
+            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            if let Some(title_request) = title_request {
+                match client
+                    .stream_chat_request_value(
+                        title_request,
+                        ToolKinds::new(),
+                        self.chat_harness_options(),
+                    )
+                    .await
+                {
+                    Ok(mut title_stream) => {
+                        while let Some(event) = title_stream.next().await {
+                            event.map_err(|err| self.client.state.provider.map_api_error(err))?;
+                        }
+                    }
+                    Err(ApiError::Transport(
+                        unauthorized_transport @ TransportError::Http { status, .. },
+                    )) if status == StatusCode::UNAUTHORIZED => {
+                        pending_retry = PendingUnauthorizedRetry::from_recovery(
+                            handle_unauthorized(
+                                unauthorized_transport,
+                                &mut auth_recovery,
+                                session_telemetry,
+                                &self.client.state.provider,
+                            )
+                            .await?,
+                        );
+                        continue;
+                    }
+                    Err(err) => return Err(self.client.state.provider.map_api_error(err)),
+                }
+            }
+            match client
+                .stream_chat_request_value(request_body, tool_kinds, self.chat_harness_options())
+                .await
+            {
+                Ok(stream) => {
+                    let (stream, _) = map_response_stream(
+                        stream,
+                        session_telemetry.clone(),
+                        InferenceTraceAttempt::disabled(),
+                        Arc::clone(&self.client.state.provider),
+                    );
+                    return Ok(apply_chat_harness_postprocess(stream, postprocess));
+                }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            session_telemetry,
+                            &self.client.state.provider,
+                        )
+                        .await?,
+                    );
+                }
+                Err(err) => return Err(self.client.state.provider.map_api_error(err)),
+            }
+        }
+    }
+
+    fn chat_harness_options(&self) -> ApiResponsesOptions {
+        let thread_id = self.client.state.thread_id.to_string();
+        ApiResponsesOptions {
+            session_id: Some(thread_id.clone()),
+            thread_id: Some(thread_id),
+            session_source: Some(self.client.state.session_source.clone()),
+            extra_headers: ApiHeaderMap::new(),
+            compression: Compression::None,
+            turn_state: None,
         }
     }
 
@@ -2498,3 +2798,7 @@ impl WebsocketTelemetry for ApiTelemetry {
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "client_chat_transport_tests.rs"]
+mod client_chat_transport_tests;

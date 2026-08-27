@@ -26,6 +26,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_skills::SkillError;
+use codex_tools::Harness;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
 
@@ -1298,6 +1299,10 @@ impl Session {
                         .enabled(Feature::ConcurrentReasoningSummaries),
                     attestation_provider,
                     config.http_client_factory(),
+                )
+                .with_harness(
+                    Harness::from_config_name(config.harness.as_deref()),
+                    config.harness_guidance,
                 )
                 .with_prompt_cache_key_override(
                     crate::guardian::prompt_cache_key_override_for_review_session(
