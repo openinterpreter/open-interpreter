@@ -32,6 +32,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_skills::SkillError;
+use codex_tools::Harness;
 use codex_utils_git_discovery::GitRootDiscovery;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
@@ -1477,6 +1478,10 @@ impl Session {
                     config.http_client_factory(),
                 )
                 .with_free_guardian_enabled(config.free_guardian_enabled())
+                .with_harness(
+                    Harness::from_config_name(config.harness.as_deref()),
+                    config.harness_guidance,
+                )
                 .with_session_context(
                     crate::guardian::prompt_cache_key_override_for_review_session(
                         &session_configuration.session_source,
