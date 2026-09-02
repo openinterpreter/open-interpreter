@@ -295,6 +295,20 @@ impl FeatureConfig for MultiAgentV2ConfigToml {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ContextManagementConfigToml {
+    /// Enables experimental context management.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub experimental_mode: Option<bool>,
+}
+
+impl FeatureConfig for ContextManagementConfigToml {
+    fn enabled(&self) -> Option<bool> {
+        self.experimental_mode
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TokenBudgetConfigToml {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,

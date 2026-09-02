@@ -670,7 +670,11 @@ async fn load_config_resolves_token_budget_config() -> std::io::Result<()> {
     for (config_toml, expected) in [
         (
             "[features]\ntoken_budget = true\n",
-            TokenBudgetConfig::default(),
+            Some(TokenBudgetConfig::default()),
+        ),
+        (
+            "features.context_management.experimental_mode = true\n",
+            None,
         ),
         (
             r#"
@@ -683,14 +687,14 @@ guidance_message = "Preserve important state before compaction."
 auto_compact_fallback_prompt = "  Write notes immediately.  "
 auto_compact_fallback_buffer_tokens = 8000
 "#,
-            TokenBudgetConfig {
+            Some(TokenBudgetConfig {
                 use_history_notes_extension: true,
                 reminder_threshold_tokens: Some(16_000),
                 reminder_message_template: "Custom reminder: {n_remaining} tokens.".to_string(),
                 guidance_message: Some("Preserve important state before compaction.".to_string()),
                 auto_compact_fallback_prompt: Some("Write notes immediately.".to_string()),
                 auto_compact_fallback_buffer_tokens: Some(8_000),
-            },
+            }),
         ),
     ] {
         let codex_home = tempdir()?;
@@ -702,8 +706,14 @@ auto_compact_fallback_buffer_tokens = 8000
         )
         .await?;
 
-        assert!(config.features.enabled(Feature::TokenBudget));
-        assert_eq!(config.token_budget, Some(expected));
+        assert_eq!(
+            config.features.enabled(Feature::TokenBudget),
+            expected.is_some()
+        );
+        if expected.is_none() {
+            assert!(config.features.enabled(Feature::ContextManagement));
+        }
+        assert_eq!(config.token_budget, expected);
     }
     Ok(())
 }

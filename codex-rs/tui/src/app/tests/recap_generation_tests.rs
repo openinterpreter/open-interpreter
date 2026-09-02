@@ -407,7 +407,7 @@ async fn temporary_recap_threads_disable_memories_and_remote_mcp_servers() -> Re
     let codex_home = tempdir()?;
     std::fs::write(
         codex_home.path().join("config.toml"),
-        "[mcp_servers.filesystem]\ncommand = 'true'\n",
+        "features.context_management.experimental_mode = true\n[mcp_servers.filesystem]\ncommand = 'true'\n",
     )?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
@@ -433,6 +433,7 @@ async fn temporary_recap_threads_disable_memories_and_remote_mcp_servers() -> Re
     let starts = recorded_params(&requests, "thread/start");
     assert_eq!(starts.len(), 1);
     assert_eq!(starts[0]["config"]["features.memories"], false);
+    assert_eq!(starts[0]["config"]["features.context_management"], false);
     assert!(starts[0]["config"].get("features.memory_tool").is_none());
     assert_eq!(
         starts[0]["config"]["mcp_servers"]["filesystem"]["enabled"],

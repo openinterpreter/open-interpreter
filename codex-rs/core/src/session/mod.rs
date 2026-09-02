@@ -682,6 +682,8 @@ impl Session {
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
+        let auth = auth_manager.auth_cached();
+        token_budget::apply_experimental_context(Arc::make_mut(&mut config), auth.as_ref())?;
         // Intentionally resolve `enabled` and `use_history_notes_extension` only at
         // thread startup. Both activation flags stay fixed for this thread runtime,
         // even if the selected model changes later.

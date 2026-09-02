@@ -2,9 +2,58 @@ use super::session::Session;
 use super::turn_context::TurnContext;
 use crate::config::Config;
 use crate::config::TokenBudgetConfig;
+use crate::config::resolve_token_budget_config;
 use crate::context::ContextualUserFragment;
 use codex_features::Feature;
+use codex_login::CodexAuth;
+use codex_protocol::account::PlanType;
+use codex_protocol::auth::AuthMode;
 use codex_protocol::openai_models::ModelInfo;
+
+fn experimental_context_is_eligible(auth_mode: AuthMode, plan_type: Option<PlanType>) -> bool {
+    auth_mode == AuthMode::Chatgpt
+        && matches!(
+            plan_type,
+            Some(PlanType::Plus | PlanType::Pro | PlanType::ProLite)
+        )
+}
+
+pub(super) fn apply_experimental_context(
+    config: &mut Config,
+    auth: Option<&CodexAuth>,
+) -> std::io::Result<()> {
+    let provider = &config.model_provider;
+    if !config.features.enabled(Feature::ContextManagement)
+        || !provider.supports_codex_backend_routes()
+        || !provider.requires_openai_auth
+        || provider.env_key.is_some()
+        || provider.experimental_bearer_token.is_some()
+        || provider.auth.is_some()
+        || provider.aws.is_some()
+        || !auth.is_some_and(|auth| {
+            experimental_context_is_eligible(auth.auth_mode(), auth.account_plan_type())
+        })
+        || config.features.enable(Feature::TokenBudget).is_err()
+        || !config.features.enabled(Feature::TokenBudget)
+    {
+        return Ok(());
+    }
+
+    if config.token_budget.is_none() {
+        let config_toml = config
+            .config_layer_stack
+            .effective_config()
+            .try_into()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        config.token_budget = resolve_token_budget_config(&config_toml, &config.features)?;
+    }
+
+    config
+        .token_budget
+        .get_or_insert_default()
+        .use_history_notes_extension = true;
+    Ok(())
+}
 
 /// Detects explicit preferences before model defaults are applied to the turn config.
 pub(super) fn has_explicit_settings(config: &Config) -> bool {
@@ -162,4 +211,28 @@ pub(super) async fn maybe_record(
         ContextualUserFragment::into(crate::context::AutoCompactFallbackPrompt::new(prompt));
     sess.record_conversation_items(turn_context, std::slice::from_ref(&response_item))
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::experimental_context_is_eligible;
+    use codex_protocol::account::PlanType;
+    use codex_protocol::auth::AuthMode;
+
+    #[test]
+    fn experimental_context_requires_eligible_chatgpt_subscription() {
+        for (auth_mode, plan_type, expected) in [
+            (AuthMode::Chatgpt, PlanType::Plus, true),
+            (AuthMode::Chatgpt, PlanType::Pro, true),
+            (AuthMode::Chatgpt, PlanType::ProLite, true),
+            (AuthMode::Chatgpt, PlanType::Free, false),
+            (AuthMode::Chatgpt, PlanType::Enterprise, false),
+            (AuthMode::ApiKey, PlanType::Pro, false),
+        ] {
+            assert_eq!(
+                experimental_context_is_eligible(auth_mode, Some(plan_type)),
+                expected
+            );
+        }
+    }
 }
