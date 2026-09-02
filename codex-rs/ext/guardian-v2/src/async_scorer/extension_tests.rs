@@ -34,6 +34,7 @@ use codex_login::ExternalAuthRefreshContext;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -115,7 +116,10 @@ async fn installed_extension_warms_connections_without_blocking_thread_start() -
     skip_if_no_network!(Ok(()));
 
     let thread_server = responses::start_mock_server().await;
-    let test = test_codex().build_with_auto_env(&thread_server).await?;
+    let test = test_codex()
+        .with_config(|config| config.approvals_reviewer = ApprovalsReviewer::AutoReview)
+        .build_with_auto_env(&thread_server)
+        .await?;
     let mut connections = vec![
         WebSocketConnectionConfig {
             requests: Vec::new(),
@@ -172,7 +176,10 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let thread_server = responses::start_mock_server().await;
-    let test = test_codex().build_with_auto_env(&thread_server).await?;
+    let test = test_codex()
+        .with_config(|config| config.approvals_reviewer = ApprovalsReviewer::AutoReview)
+        .build_with_auto_env(&thread_server)
+        .await?;
     let events = vec![
         ev_assistant_message("sample", "low"),
         ev_completed("response-1"),
@@ -903,7 +910,10 @@ async fn sample_configured_conversation_history_with_source(
                 .policy = Some(TEST_CATALOG_GUARDIAN_POLICY.to_owned());
         })
         .with_model("gpt-5.5")
-        .with_config(move |config| config.guardian_policy_config = guardian_policy)
+        .with_config(move |config| {
+            config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+            config.guardian_policy_config = guardian_policy;
+        })
         .with_pre_build_hook(move |home| {
             std::fs::write(home.join("config.toml"), guardian_config)
                 .expect("Guardian v2 configuration should be written");
@@ -2171,6 +2181,7 @@ async fn contributor_skips_required_models_in_standard_scope() -> Result<()> {
     let test = test_codex()
         .with_home(Arc::clone(&initial.home))
         .with_config(move |config| {
+            config.approvals_reviewer = ApprovalsReviewer::AutoReview;
             config.config_layer_stack = config_layer_stack;
             config
                 .features
@@ -2806,6 +2817,7 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
 
     let thread_server = responses::start_mock_server().await;
     let test = test_codex()
+        .with_config(|config| config.approvals_reviewer = ApprovalsReviewer::AutoReview)
         .with_pre_build_hook(|home| {
             std::fs::write(
                 home.join("config.toml"),

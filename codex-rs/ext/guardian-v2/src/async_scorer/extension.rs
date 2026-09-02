@@ -40,6 +40,7 @@ use codex_login::AgentIdentityAuthPolicy;
 use codex_login::AuthManager;
 use codex_model_provider::create_model_provider;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::mcp::is_node_repl_backed_server;
 use codex_protocol::mcp::is_node_repl_backed_tool;
 use codex_protocol::openai_models::ModelInfo;
@@ -214,16 +215,18 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
                 .insert(TrustedSkillRoots::from_config(input.config));
             input.thread_store.insert(guardian_v2_enabled);
 
-            // Keep the sampler available if a later turn leaves Full Access, but do
-            // not open Guardian connections while Full Access is selected.
-            if !has_full_access(
-                input.config.permissions.approval_policy.value(),
-                &input.config.permissions.effective_permission_profile(),
-                input
-                    .environments
-                    .iter()
-                    .map(|environment| &environment.config),
-            ) {
+            // Keep the sampler available for later automatic review, but do not
+            // prewarm while User approval mode or Full Access is selected.
+            if input.config.approvals_reviewer == ApprovalsReviewer::AutoReview
+                && !has_full_access(
+                    input.config.permissions.approval_policy.value(),
+                    &input.config.permissions.effective_permission_profile(),
+                    input
+                        .environments
+                        .iter()
+                        .map(|environment| &environment.config),
+                )
+            {
                 tokio::spawn(async move {
                     sampler.prewarm().await;
                 });
@@ -493,10 +496,11 @@ impl GuardianV2Extension {
                 return;
             }
         };
-        // Read current permissions, not the startup config: existing threads can
-        // enter Full Access after the sampler has already been initialized.
+        // Use the live reviewer, not the startup config or per-app reviewer overrides.
         let snapshot = thread.config_snapshot().await;
-        if snapshot.full_access {
+        if snapshot.full_access
+            || thread.approvals_reviewer_for_turn(input.turn_id).await == ApprovalsReviewer::User
+        {
             // A skipped call invalidates older scores, including ones still in flight.
             score_progress
                 .latest_failed_tool_call

@@ -1369,7 +1369,10 @@ impl ServerHandler for ToolAppsMcpServer {
                 // Match the execution approval emitted by the real Node REPL server.
                 approval_meta["connector_id"] = json!("node_repl");
             }
-            if let Some(sensitive_action) = self.sensitive_action {
+            if let Some(sensitive_action) = self
+                .sensitive_action
+                .or((message == "sensitive").then_some(true))
+            {
                 approval_meta["codex_sensitive_action"] = json!(sensitive_action);
             }
             let result = context

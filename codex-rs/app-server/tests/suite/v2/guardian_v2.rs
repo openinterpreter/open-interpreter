@@ -23,8 +23,10 @@ use axum::routing::get;
 use axum::routing::post;
 use codex_app_server_protocol::ApprovalsReviewer;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemGuardianApprovalReviewStartedNotification;
+use codex_app_server_protocol::McpServerElicitationRequest;
 use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::ServerRequest;
@@ -39,6 +41,9 @@ use codex_app_server_protocol::ThreadRollbackParams;
 use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::TurnCompletedNotification;
+use codex_app_server_protocol::TurnSettingsUpdateParams;
+use codex_app_server_protocol::TurnSettingsUpdateResponse;
+use codex_app_server_protocol::TurnSettingsUpdateStatus;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
@@ -161,6 +166,7 @@ struct MockResponsesState {
     transcript_content: TranscriptContent,
     mcp_server_name: Option<&'static str>,
     mcp_tool_sequence: Option<&'static [&'static str]>,
+    mcp_messages: Mutex<Vec<&'static str>>,
     root_worker: bool,
     root_user_restriction: bool,
     root_user_input_restriction: bool,
@@ -448,7 +454,13 @@ async fn parent_response(
             || (state.root_worker || state.root_user_restriction) && request_number == 3
         {
             let call_id = format!("guardian-action-{request_number}");
-            let mut message = format!("guardian-{request_number}");
+            let mut message = state
+                .mcp_messages
+                .lock()
+                .expect("MCP messages lock")
+                .get(request_number)
+                .map(|message| (*message).to_string())
+                .unwrap_or_else(|| format!("guardian-{request_number}"));
             if request_number == 0 && matches!(state.review_outcome, ReviewOutcome::Deny) {
                 message.push_str(&"x".repeat(2_000));
             }
@@ -1817,11 +1829,11 @@ async fn first_cua_review_does_not_wait_for_initial_score(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn full_access_skips_guardian_until_review_is_enabled() -> Result<()> {
+async fn user_approval_skips_async_guardian_without_changing_other_modes() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let state = Arc::new(MockResponsesState {
         mcp_server_name: Some("node_repl"),
-        mcp_tool_sequence: Some(&["js", "js"]),
+        mcp_tool_sequence: Some(&["js", "js", "js"]),
         ..Default::default()
     });
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -1832,15 +1844,15 @@ async fn full_access_skips_guardian_until_review_is_enabled() -> Result<()> {
     let responses_server = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
-    // Exercise strict, sensitive CUA confirmations using the existing MCP server.
+    // Mix ordinary execution, a user-input form, and a sensitive check.
     let (mcp_url, mcp_server) =
-        start_mcp_server_with_tools(&["js"], /*sensitive_action*/ Some(true)).await?;
+        start_mcp_server_with_tools(&["js"], /*sensitive_action*/ None).await?;
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&responses_url)
         .with_model(MODEL)
         .with_provider_config("supports_websockets = false")
-        .with_approval_policy("never")
-        .with_root_config("approvals_reviewer = \"auto_review\"")
+        .with_approval_policy("on-request")
+        .with_root_config("approvals_reviewer = \"user\"")
         .with_extra_config(&format!(
             "[mcp_servers.node_repl]\nurl = \"{mcp_url}/mcp\"\ndefault_tools_approval_mode = \"auto\"\n\n[features.guardianv2]\nenabled = true"
         ))
@@ -1856,7 +1868,8 @@ async fn full_access_skips_guardian_until_review_is_enabled() -> Result<()> {
         .await?;
     let thread = app_server
         .start_thread(ThreadStartParams {
-            approval_policy: Some(AskForApproval::Never),
+            approval_policy: Some(AskForApproval::OnRequest),
+            approvals_reviewer: Some(ApprovalsReviewer::User),
             sandbox: Some(SandboxMode::DangerFullAccess),
             ..Default::default()
         })
@@ -1865,26 +1878,82 @@ async fn full_access_skips_guardian_until_review_is_enabled() -> Result<()> {
 
     // Leave async scoring pending so reviewed mode must use synchronous Guardian.
     state.allow_guardian_review.notify_one();
-    for approval_policy in [AskForApproval::Never, AskForApproval::OnRequest] {
+    use ApprovalsReviewer::AutoReview;
+    use ApprovalsReviewer::User;
+    use AskForApproval::Never;
+    use AskForApproval::OnRequest;
+    for (approval_policy, reviewer, live_reviewer, expected_reviews) in [
+        (OnRequest, User, None, 1),
+        (Never, User, None, 0),
+        (Never, AutoReview, None, 0),
+        (OnRequest, User, Some(AutoReview), 2),
+        (OnRequest, AutoReview, Some(User), 2),
+        (OnRequest, AutoReview, None, 3),
+        (OnRequest, User, None, 1),
+    ] {
+        let reviews_before = state.guardian_reviews.load(Ordering::SeqCst);
+        *state.mcp_messages.lock().expect("MCP messages lock") = vec![
+            if approval_policy == OnRequest {
+                "confirm"
+            } else {
+                "guardian-0"
+            },
+            "guardian-1",
+            "sensitive",
+        ];
         state.parent_requests.store(0, Ordering::SeqCst);
         app_server.clear_message_buffer();
-        let completed = timeout(
-            TIMEOUT,
-            app_server.start_turn_and_wait_for_completion(TurnStartParams {
+        let request_id = app_server
+            .send_turn_start_request(TurnStartParams {
                 thread_id: thread.id.clone(),
                 input: vec![UserInput::Text {
                     text: USER_CONTEXT.to_owned(),
                     text_elements: Vec::new(),
                 }],
                 approval_policy: Some(approval_policy),
+                approvals_reviewer: Some(reviewer),
                 ..Default::default()
-            }),
-        )
-        .await??;
+            })
+            .await?;
+        let started: TurnStartResponse =
+            timeout(TIMEOUT, app_server.read_response(request_id)).await??;
+        if approval_policy == OnRequest {
+            let request =
+                timeout(TIMEOUT, app_server.read_stream_until_request_message()).await??;
+            let ServerRequest::McpServerElicitationRequest { request_id, params } = request else {
+                panic!("expected user input, got {request:?}");
+            };
+            assert!(
+                matches!(params.request, McpServerElicitationRequest::Form { message, .. }
+                if message == "Allow this request?")
+            );
+            if let Some(reviewer) = live_reviewer {
+                let updated: TurnSettingsUpdateResponse = app_server
+                    .request(|request_id| ClientRequest::TurnSettingsUpdate {
+                        request_id,
+                        params: TurnSettingsUpdateParams {
+                            thread_id: thread.id.clone(),
+                            turn_id: started.turn.id.clone(),
+                            approvals_reviewer: Some(reviewer),
+                            ..Default::default()
+                        },
+                    })
+                    .await?;
+                assert_eq!(updated.status, TurnSettingsUpdateStatus::Applied);
+            }
+            app_server
+                .send_response(
+                    request_id,
+                    json!({ "action": "accept", "content": { "confirmed": true } }),
+                )
+                .await?;
+        }
+        let completed: TurnCompletedNotification =
+            timeout(TIMEOUT, app_server.read_notification("turn/completed")).await??;
         assert_eq!(completed.turn.status, TurnStatus::Completed);
 
         let mut tool_results = Vec::new();
-        while tool_results.len() < 2 {
+        while tool_results.len() < 3 {
             let completed: ItemCompletedNotification =
                 timeout(TIMEOUT, app_server.read_notification("item/completed")).await??;
             if let ThreadItem::McpToolCall {
@@ -1899,22 +1968,28 @@ async fn full_access_skips_guardian_until_review_is_enabled() -> Result<()> {
         }
         assert_eq!(
             tool_results,
-            (0..2)
+            (0..3)
                 .map(|index| (
                     McpToolCallStatus::Completed,
-                    Some(vec![
-                        json!({ "type": "text", "text": format!("echo: guardian-{index}") })
-                    ]),
+                    Some(vec![json!({ "type": "text", "text": match index {
+                            0 if approval_policy == OnRequest => "accepted".to_string(),
+                            2 => "echo: sensitive".to_string(),
+                            _ => format!("echo: guardian-{index}"),
+                        } })]),
                     None,
                 ))
                 .collect::<Vec<_>>()
         );
-        if approval_policy == AskForApproval::Never {
-            assert_eq!(state.guardian_reviews.load(Ordering::SeqCst), 0);
-            assert_eq!(state.luna_connections.load(Ordering::SeqCst), 0);
-        } else {
+        assert_eq!(
+            state.guardian_reviews.load(Ordering::SeqCst),
+            reviews_before + expected_reviews
+        );
+        if approval_policy == OnRequest
+            && (reviewer == AutoReview || live_reviewer == Some(AutoReview))
+        {
             wait_for_luna_request(&state, /*index*/ 0).await?;
-            assert_eq!(state.guardian_reviews.load(Ordering::SeqCst), 2);
+        } else if reviews_before <= 1 {
+            assert_eq!(state.luna_connections.load(Ordering::SeqCst), 0);
         }
     }
     app_server.shutdown_gracefully().await?;

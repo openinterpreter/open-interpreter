@@ -1923,6 +1923,11 @@ persisted rollout errors, so unavailable details after a restart remain a termin
 
 ## Approvals
 
+In User approval mode (`approvalsReviewer: "user"`), async Guardian scoring and
+prewarming are skipped, and ordinary `node_repl.js` execution confirmations are
+accepted automatically. Separate sensitive-action checks and requests for user
+input keep their existing behavior. Approve for me and Full Access are unchanged.
+
 Full Access (`approvalPolicy: "never"` with unrestricted selected environments)
 skips Guardian, including background scoring. Confirmation-only MCP approvals,
 including strict or sensitive CUA requests, are accepted. Strict responses retain
