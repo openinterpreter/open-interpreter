@@ -1391,6 +1391,12 @@ impl ServerHandler for ToolAppsMcpServer {
                 .map_err(|err| {
                     rmcp::ErrorData::internal_error(err.to_string(), /*data*/ None)
                 })?;
+            if matches!(result.action, ElicitationAction::Decline) {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "Tool execution was declined by Guardian.",
+                )])
+                .into());
+            }
             assert_eq!(
                 serde_json::to_value(result).expect("elicitation response"),
                 json!({

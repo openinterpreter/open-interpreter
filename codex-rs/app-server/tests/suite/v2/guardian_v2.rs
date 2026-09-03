@@ -77,6 +77,9 @@ use super::mcp_tool::start_mcp_server_with_tools;
 #[path = "guardian_v2_history_tests.rs"]
 mod history;
 
+#[path = "guardian_v2_model_tests.rs"]
+mod model_tests;
+
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL: &str = "mock-model";
 const REQUIRED_MODEL: &str = "protected-model";
@@ -591,7 +594,8 @@ async fn guardian_v2_routes_scoped_tool_approvals(
             codex_protocol::mcp::is_node_repl_backed_server(server_name)
         }
     };
-    let node_repl_review_required = matches!(requirement, ModelReviewRequirement::Required)
+    let node_repl_review_required = (matches!(requirement, ModelReviewRequirement::Required)
+        || matches!(scope, GuardianToolScope::ComputerUseOnly { .. }))
         && codex_protocol::mcp::is_node_repl_backed_server(server_name);
     let late_root_restriction = matches!(
         lifecycle,

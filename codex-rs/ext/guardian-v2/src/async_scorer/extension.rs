@@ -280,6 +280,9 @@ impl ApprovalReviewContributor for GuardianV2Extension {
                         .get("server")
                         .and_then(serde_json::Value::as_str)
                         .is_some_and(is_node_repl_backed_server)
+                    || !thread_store
+                        .get::<ModelInfo>()
+                        .is_some_and(|model| model.node_repl_auto_review_required)
                 {
                     record_fast_decision(extension_metrics.as_deref(), "deferred", "out_of_scope");
                     return None;
@@ -498,16 +501,21 @@ impl GuardianV2Extension {
         };
         // Use the live reviewer, not the startup config or per-app reviewer overrides.
         let snapshot = thread.config_snapshot().await;
+        let parent_model = input.thread_store.get::<ModelInfo>();
         if snapshot.full_access
             || thread.approvals_reviewer_for_turn(input.turn_id).await == ApprovalsReviewer::User
+            || (guardian_config.review_scope == GuardianV2ReviewScope::ComputerUseOnly
+                && !parent_model
+                    .as_ref()
+                    .is_some_and(|model| model.node_repl_auto_review_required))
         {
-            // A skipped call invalidates older scores, including ones still in flight.
+            // A skipped call invalidates older scores, including ones still in flight
+            // when switching to a model that does not require REPL review.
             score_progress
                 .latest_failed_tool_call
                 .fetch_max(tool_call_index, Ordering::Release);
             return;
         }
-        let parent_model = input.thread_store.get::<ModelInfo>();
         // Computer-use-only scores cannot approve other tools for required models.
         if guardian_config.review_scope != GuardianV2ReviewScope::ComputerUseOnly
             && parent_model.as_ref().is_some_and(|model| {

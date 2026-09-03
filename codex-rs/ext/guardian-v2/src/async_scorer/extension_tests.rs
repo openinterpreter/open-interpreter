@@ -47,6 +47,7 @@ use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
 use codex_protocol::openai_models::GuardianV2TranscriptModelConfig;
+use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -229,6 +230,13 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
     let progress = thread_store
         .get::<GuardianV2ScoreProgress>()
         .expect("Guardian v2 should initialize");
+    let mut model = test
+        .thread_manager
+        .get_models_manager()
+        .get_model_info("gpt-5.5", &config.to_models_manager_config())
+        .await;
+    model.node_repl_auto_review_required = true;
+    thread_store.insert(model);
     let turn_store = ExtensionData::new("turn-1");
     let tool_name = ToolName::namespaced("mcp__node_repl__", "js");
     let payload = ToolPayload::Function {
@@ -550,6 +558,14 @@ async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
 
     let fixture = GuardianFailureFixture::new().await?;
     let thread_store = fixture.test.codex.thread_extension_data();
+    let mut model = fixture
+        .test
+        .thread_manager
+        .get_models_manager()
+        .get_model_info("gpt-5.5", &fixture.test.config.to_models_manager_config())
+        .await;
+    model.node_repl_auto_review_required = true;
+    thread_store.insert(model);
     let mut config = thread_store
         .get::<crate::async_scorer::config::GuardianV2Config>()
         .expect("Guardian v2 should have initialized")
@@ -686,6 +702,41 @@ async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
             fast_decision_metric("deferred", "missing_score"),
         ]
     );
+
+    let mut model = thread_store.get::<ModelInfo>().unwrap().as_ref().clone();
+    model.node_repl_auto_review_required = false;
+    thread_store.insert(model.clone());
+    fixture
+        .score_tool(ToolName::namespaced("mcp__node_repl__", "js"))
+        .await;
+    assert!(
+        progress.latest_failed_tool_call.load(Ordering::Acquire)
+            > progress.latest_scored_tool_call.load(Ordering::Acquire)
+    );
+    for required in [false, true] {
+        model.node_repl_auto_review_required = required;
+        thread_store.insert(model.clone());
+        // Also reject a low score published by an older, in-flight classifier.
+        thread_store.insert(SecurityRiskScore {
+            scores: BTreeMap::from([("action_risk".to_owned(), 0.0)]),
+            call_id: None,
+            action: None,
+            sampled_at: None,
+        });
+        assert_eq!(
+            fixture
+                .registry
+                .fast_approval_decision(
+                    &fixture.session_store,
+                    thread_store,
+                    r#"{"tool":"mcp_tool_call","server":"node_repl","tool_name":"js"}"#,
+                    /*extension_metrics*/ None,
+                )
+                .await,
+            None,
+            "switching back to a reviewed model must not revive a skipped score"
+        );
+    }
 
     Ok(())
 }
