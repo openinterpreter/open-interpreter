@@ -847,6 +847,17 @@ impl App {
                     .any(|event| matches!(event, ThreadBufferedEvent::Request(_))))
     }
 
+    /// Wait until visible and queued startup decisions cannot consume a delayed OSC response.
+    #[cfg(any(windows, test))]
+    pub(super) fn ready_for_terminal_color_probe(&self, has_pending_app_events: bool) -> bool {
+        !has_pending_app_events
+            && !self.chat_widget.has_active_view()
+            && !self.windows_sandbox.startup_world_writable_scan_pending
+            && !self.startup_pending_protected_request
+            && !self.has_queued_startup_protected_request()
+            && !self.chat_widget.has_pending_protected_request()
+    }
+
     pub fn chatwidget_init_for_forked_or_resumed_thread(
         &self,
         tui: &mut tui::Tui,
@@ -1276,6 +1287,14 @@ See the keymap documentation for supported actions and examples."
             }
         }
 
+        #[cfg(windows)]
+        let mut terminal_color_probe_pending = true;
+        #[cfg(windows)]
+        if app.ready_for_terminal_color_probe(!app_event_rx.is_empty()) {
+            tui.probe_default_colors_after_protected_startup();
+            terminal_color_probe_pending = false;
+        }
+
         let event_stream_started_at = Instant::now();
         let tui_events = tui.event_stream();
         tokio::pin!(tui_events);
@@ -1387,7 +1406,15 @@ See the keymap documentation for supported actions and examples."
                     waiting_for_initial_session_configured = false;
                 }
                 match control {
-                    AppRunControl::Continue => {}
+                    AppRunControl::Continue => {
+                        #[cfg(windows)]
+                        if terminal_color_probe_pending
+                            && app.ready_for_terminal_color_probe(!app_event_rx.is_empty())
+                        {
+                            tui.probe_default_colors_after_protected_startup();
+                            terminal_color_probe_pending = false;
+                        }
+                    }
                     AppRunControl::Exit(reason) => break Ok(reason),
                 }
             }
