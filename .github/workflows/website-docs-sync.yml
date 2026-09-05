@@ -8,8 +8,7 @@ on:
       - docs.json
       - docs.zh.json
       - docs-site/**
-      - scripts/check-doc-locales.mjs
-      - codex-rs/core/config.schema.json
+      - scripts/sync-docs-site.mjs
   workflow_dispatch:
 
 permissions:
@@ -17,22 +16,10 @@ permissions:
 
 jobs:
   dispatch:
-    if: github.actor == 'KillianLucas'
     runs-on: ubuntu-latest
-    env:
-      WEBSITE_DOCS_SYNC_TOKEN: ${{ secrets.WEBSITE_DOCS_SYNC_TOKEN }}
     steps:
-      - name: Dispatch the exact public revision to the private website
-        if: env.WEBSITE_DOCS_SYNC_TOKEN != ''
+      - name: Dispatch website sync
         env:
-          GH_TOKEN: ${{ env.WEBSITE_DOCS_SYNC_TOKEN }}
+          GH_TOKEN: ${{ secrets.WEBSITE_DOCS_SYNC_TOKEN }}
         run: |
-          gh api repos/openinterpreter/website/dispatches \
-            --method POST \
-            --field event_type=open_interpreter_docs_changed \
-            --field "client_payload[sha]=$GITHUB_SHA"
-
-      - name: Report missing instant-sync credentials
-        if: env.WEBSITE_DOCS_SYNC_TOKEN == ''
-        run: |
-          echo "WEBSITE_DOCS_SYNC_TOKEN is not configured; the website's scheduled sync remains active."
+          gh api repos/openinterpreter/website/dispatches --method POST --field event_type=open_interpreter_docs_changed
