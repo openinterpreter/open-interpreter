@@ -102,9 +102,10 @@ impl EventProcessorWithHumanOutput {
     fn render_item_completed(&mut self, item: ThreadItem) {
         match item {
             ThreadItem::AgentMessage { text, .. } => {
+                let command_name = Product::current().command_name();
                 eprintln!(
                     "{}\n{}",
-                    "codex".style(self.italic).style(self.magenta),
+                    command_name.style(self.italic).style(self.magenta),
                     text
                 );
                 self.final_message = Some(text);
@@ -419,9 +420,10 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             std::io::stderr().is_terminal(),
         ) && let Some(message) = self.final_message.as_deref()
         {
+            let command_name = Product::current().command_name();
             eprintln!(
                 "{}\n{}",
-                "codex".style(self.italic).style(self.magenta),
+                command_name.style(self.italic).style(self.magenta),
                 message
             );
         }
