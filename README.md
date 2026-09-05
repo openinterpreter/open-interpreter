@@ -127,7 +127,7 @@ Open Interpreter ships with a QA skill that lets any model operate and test inte
   - [Z.AI, GLM, and ZCode](https://www.openinterpreter.com/docs/terminal/zai-glm?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=zai_glm_docs)
 - [Agent Client Protocol](https://www.openinterpreter.com/docs/terminal/acp)
 - [Codex SDK](https://www.openinterpreter.com/docs/terminal/sdk)
-- [Portability](https://www.openinterpreter.com/docs/terminal/portability)
+- [Portability](https://github.com/openinterpreter/openinterpreter/blob/main/docs/portability.md)
 - [Sandbox & approvals](https://www.openinterpreter.com/docs/terminal/sandbox?utm_source=github&utm_medium=referral&utm_campaign=readme&utm_content=sandbox_approvals)
 - [Branding a distribution fork](FORK_BRANDING.md)
 
