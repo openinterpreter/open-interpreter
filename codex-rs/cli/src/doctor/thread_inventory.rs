@@ -185,6 +185,10 @@ fn missing_state_db_check(scan: RolloutScan, details: Vec<String>) -> DoctorChec
         DoctorCheck::new(CHECK_ID, CHECK_CATEGORY, CheckStatus::Warning, summary).details(details);
 
     if !scan.files.is_empty() {
+        let product = codex_product_info::Product::current().short_display_name();
+        let remediation = format!(
+            "Start {product} with no state DB present so startup backfill can create it from rollout files."
+        );
         check = check
             .issue(
                 DoctorIssue::new(
@@ -193,11 +197,9 @@ fn missing_state_db_check(scan: RolloutScan, details: Vec<String>) -> DoctorChec
                 )
                 .measured(format!("{} rollout files", scan.files.len()))
                 .expected("state DB contains matching thread rows")
-                .remedy("Start Codex with no state DB present so startup backfill can create it from rollout files."),
-        )
-            .remediation(
-                "Start Codex with no state DB present so startup backfill can create it from rollout files.",
-            );
+                .remedy(remediation.clone()),
+            )
+            .remediation(remediation);
     }
     if !scan.scan_errors.is_empty() || !scan.malformed_names.is_empty() || scan.reached_scan_cap {
         check = check.issue(
@@ -674,6 +676,7 @@ fn source_category(source: &str) -> &'static str {
         SessionSource::Internal(InternalSessionSource::MemoryConsolidation) => {
             "internal:memory_consolidation"
         }
+        SessionSource::Internal(InternalSessionSource::Guardian) => "internal:guardian",
         SessionSource::SubAgent(SubAgentSource::Review) => "subagent:review",
         SessionSource::SubAgent(SubAgentSource::Compact) => "subagent:compact",
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }) => "subagent:thread_spawn",

@@ -15,6 +15,37 @@ use super::super::LocalThreadStore;
 use super::super::test_support::test_config;
 use super::RolloutLineageSegment;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn rejects_reference_lineage_escaping_symlinked_sessions_root() {
+    let home = TempDir::new().expect("temp dir");
+    let external = TempDir::new().expect("external temp dir");
+    let external_sessions = external.path().join("sessions");
+    fs::create_dir_all(external_sessions.as_path()).expect("create external sessions");
+    std::os::unix::fs::symlink(external_sessions.as_path(), home.path().join("sessions"))
+        .expect("symlink sessions");
+    let escaped = TempDir::new().expect("escaped temp dir");
+    let escaped_rollouts = escaped.path().join("rollouts");
+    fs::create_dir_all(escaped_rollouts.as_path()).expect("create escaped rollouts");
+    std::os::unix::fs::symlink(escaped_rollouts.as_path(), external_sessions.join("2026"))
+        .expect("symlink nested sessions directory");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let thread_id = ThreadId::default();
+    write_rollout(
+        home.path(),
+        thread_id,
+        /*history_base*/ None,
+        /*next_ordinal*/ 3,
+    );
+
+    let error = store
+        .resolve_rollout_lineage_for_reference(thread_id)
+        .await
+        .expect_err("escaping reference lineage should be rejected");
+
+    assert!(error.to_string().contains("must be in Codex home"));
+}
+
 #[tokio::test]
 async fn resolves_nested_lineage_with_empty_intermediate_segments() {
     let home = TempDir::new().expect("temp dir");

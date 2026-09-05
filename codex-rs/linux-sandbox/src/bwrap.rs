@@ -24,6 +24,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::linux_run_main::synthetic_mount_registry_root;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::permissions::is_protected_metadata_name;
@@ -282,6 +283,7 @@ fn create_bwrap_flags_full_filesystem(command: Vec<String>, options: BwrapOption
         // not need ambient CAP_SYS_ADMIN to create the remaining namespaces.
         "--unshare-user".to_string(),
         "--unshare-pid".to_string(),
+        "--unshare-ipc".to_string(),
     ];
     if options.network_mode.should_unshare_network() {
         args.push("--unshare-net".to_string());
@@ -290,6 +292,8 @@ fn create_bwrap_flags_full_filesystem(command: Vec<String>, options: BwrapOption
         args.push("--proc".to_string());
         args.push("/proc".to_string());
     }
+    args.push("--cap-drop".to_string());
+    args.push("ALL".to_string());
     args.push("--".to_string());
     args.extend(command);
     BwrapArgs {
@@ -329,6 +333,7 @@ fn create_bwrap_flags(
     // auto-enable behavior, which is skipped when the caller runs as uid 0.
     args.push("--unshare-user".to_string());
     args.push("--unshare-pid".to_string());
+    args.push("--unshare-ipc".to_string());
     if options.network_mode.should_unshare_network() {
         args.push("--unshare-net".to_string());
     }
@@ -345,6 +350,8 @@ fn create_bwrap_flags(
         args.push("--chdir".to_string());
         args.push(path_to_string(normalized_command_cwd.as_path()));
     }
+    args.push("--cap-drop".to_string());
+    args.push("ALL".to_string());
     args.push("--".to_string());
     args.extend(command);
     Ok(BwrapArgs {
@@ -586,7 +593,6 @@ fn create_filesystem_args(
         append_metadata_path_masks_for_writable_root(
             &mut read_only_subpaths,
             root,
-            mount_root,
             &protected_metadata_names,
         );
         if let Some(target) = &symlink_target {
@@ -602,6 +608,23 @@ fn create_filesystem_args(
         read_only_subpaths.sort_by_key(|path| path_depth(path));
         for subpath in read_only_subpaths {
             append_read_only_subpath_args(&mut bwrap_args, &subpath, &allowed_write_paths)?;
+        }
+        // Protect the registry only where a writable bind exposes it. Apply
+        // this before deny masks so a denied parent stays hidden, rather than
+        // trying to recreate the registry beneath an already read-only tmpfs.
+        let registry_root = synthetic_mount_registry_root();
+        let registry_mount = if registry_root.starts_with(mount_root) {
+            Some(registry_root.as_path())
+        } else if mount_root.starts_with(&registry_root) {
+            Some(mount_root)
+        } else {
+            None
+        };
+        if let Some(registry_mount) = registry_mount {
+            fs::create_dir_all(&registry_root)?;
+            bwrap_args.args.push("--ro-bind".to_string());
+            bwrap_args.args.push(path_to_string(registry_mount));
+            bwrap_args.args.push(path_to_string(registry_mount));
         }
         let mut nested_unreadable_roots: Vec<PathBuf> = unreadable_roots
             .iter()
@@ -662,46 +685,14 @@ fn append_protected_create_targets_for_writable_root(
 fn append_metadata_path_masks_for_writable_root(
     read_only_subpaths: &mut Vec<PathBuf>,
     root: &Path,
-    mount_root: &Path,
     protected_metadata_names: &[String],
 ) {
     for name in protected_metadata_names {
         let path = root.join(name);
-        if should_leave_missing_git_for_parent_repo_discovery(mount_root, name) {
-            continue;
-        }
         if !read_only_subpaths.iter().any(|subpath| subpath == &path) {
             read_only_subpaths.push(path);
         }
     }
-}
-
-fn should_leave_missing_git_for_parent_repo_discovery(mount_root: &Path, name: &str) -> bool {
-    let path = mount_root.join(name);
-    name == ".git"
-        && matches!(
-            path.symlink_metadata(),
-            Err(err) if err.kind() == io::ErrorKind::NotFound
-        )
-        && mount_root
-            .ancestors()
-            .skip(1)
-            .any(ancestor_has_git_metadata)
-}
-
-fn ancestor_has_git_metadata(ancestor: &Path) -> bool {
-    let git_path = ancestor.join(".git");
-    let Ok(metadata) = git_path.symlink_metadata() else {
-        return false;
-    };
-    if metadata.is_dir() {
-        return git_path.join("HEAD").symlink_metadata().is_ok();
-    }
-    if metadata.is_file() {
-        return fs::read_to_string(git_path)
-            .is_ok_and(|contents| contents.trim_start().starts_with("gitdir:"));
-    }
-    false
 }
 
 fn expand_unreadable_globs_with_ripgrep(
@@ -1418,9 +1409,12 @@ mod tests {
                 "/dev/shm".to_string(),
                 "--unshare-user".to_string(),
                 "--unshare-pid".to_string(),
+                "--unshare-ipc".to_string(),
                 "--unshare-net".to_string(),
                 "--proc".to_string(),
                 "/proc".to_string(),
+                "--cap-drop".to_string(),
+                "ALL".to_string(),
                 "--".to_string(),
                 "/bin/true".to_string(),
             ]
@@ -1712,6 +1706,46 @@ mod tests {
     }
 
     #[test]
+    fn registry_protection_precedes_denied_parent_mask() {
+        let registry_root = synthetic_mount_registry_root();
+        let temp_root = registry_root.parent().expect("registry parent");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
+            },
+            FileSystemSandboxEntry {
+                path: AbsolutePathBuf::try_from(temp_root)
+                    .expect("absolute temp root")
+                    .into(),
+                access: FileSystemAccessMode::Deny,
+                missing_path_behavior: None,
+            },
+        ]);
+
+        let args =
+            create_filesystem_args(&policy, Path::new("/"), NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
+                .expect("filesystem args");
+        let registry_path = path_to_string(&registry_root);
+        let temp_path = path_to_string(temp_root);
+        let registry_bind = args
+            .args
+            .windows(3)
+            .position(|args| args == ["--ro-bind", registry_path.as_str(), registry_path.as_str()]);
+        let temp_mask = args
+            .args
+            .windows(2)
+            .position(|args| args == ["--tmpfs", temp_path.as_str()]);
+        assert!(
+            registry_bind.expect("registry read-only bind") < temp_mask.expect("temp deny mask"),
+            "registry protection must not reopen denied temp paths"
+        );
+    }
+
+    #[test]
     fn missing_read_only_subpath_uses_empty_file_bind_data() {
         let temp_dir = TempDir::new().expect("temp dir");
         let workspace = temp_dir.path().join("workspace");
@@ -1805,7 +1839,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_child_git_under_parent_repo_uses_protected_create_target() {
+    fn missing_child_git_under_parent_repo_is_mounted_read_only() {
         let temp_dir = TempDir::new().expect("temp dir");
         let repo = temp_dir.path().join("repo");
         let workspace = repo.join("workspace");
@@ -1824,30 +1858,22 @@ mod tests {
 
         let args = create_filesystem_args(&policy, &workspace, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
             .expect("filesystem args");
+        assert_empty_directory_mounted_read_only(&args.args, &dot_git);
         assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".agents"));
         assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".codex"));
-        let dot_git_str = path_to_string(&dot_git);
-        assert!(
-            !args
-                .args
-                .windows(4)
-                .any(|window| window == ["--perms", "555", "--tmpfs", dot_git_str.as_str()]),
-            "missing child .git should not shadow parent repo discovery",
-        );
-        assert!(
-            !synthetic_mount_target_paths(&args).contains(&dot_git),
-            "missing child .git should not be a transient mount target",
-        );
         assert_eq!(
-            protected_create_target_paths(&args),
-            vec![dot_git],
-            "missing child .git should fail through protected create cleanup",
+            synthetic_mount_target_paths(&args),
+            vec![workspace.join(".codex"), dot_git, workspace.join(".agents")],
+        );
+        assert!(
+            protected_create_target_paths(&args).is_empty(),
+            "missing child .git should be mount protected before command execution",
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn symlinked_missing_child_git_under_parent_repo_uses_effective_mount_root() {
+    fn symlinked_missing_child_git_under_parent_repo_mounts_effective_path_read_only() {
         let temp_dir = TempDir::new().expect("temp dir");
         let repo = temp_dir.path().join("repo");
         let workspace = repo.join("workspace");
@@ -1870,24 +1896,16 @@ mod tests {
         let args =
             create_filesystem_args(&policy, &link_workspace, NO_UNREADABLE_GLOB_SCAN_MAX_DEPTH)
                 .expect("filesystem args");
+        assert_empty_directory_mounted_read_only(&args.args, &dot_git);
         assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".agents"));
         assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".codex"));
-        let dot_git_str = path_to_string(&dot_git);
-        assert!(
-            !args
-                .args
-                .windows(4)
-                .any(|window| window == ["--perms", "555", "--tmpfs", dot_git_str.as_str()]),
-            "symlinked missing child .git should not shadow parent repo discovery",
-        );
-        assert!(
-            !synthetic_mount_target_paths(&args).contains(&dot_git),
-            "symlinked missing child .git should not be a transient mount target",
-        );
         assert_eq!(
-            protected_create_target_paths(&args),
-            vec![dot_git],
-            "symlinked missing child .git should fail through protected create cleanup",
+            synthetic_mount_target_paths(&args),
+            vec![workspace.join(".codex"), dot_git, workspace.join(".agents")],
+        );
+        assert!(
+            protected_create_target_paths(&args).is_empty(),
+            "symlinked missing child .git should be mount protected before command execution",
         );
     }
 
@@ -2093,6 +2111,9 @@ mod tests {
                 "/.codex".to_string(),
                 "--remount-ro".to_string(),
                 "/.codex".to_string(),
+                "--ro-bind".to_string(),
+                path_to_string(&synthetic_mount_registry_root()),
+                path_to_string(&synthetic_mount_registry_root()),
                 // Rebind /dev after the root bind so device nodes remain
                 // writable/usable inside the writable root.
                 "--bind".to_string(),

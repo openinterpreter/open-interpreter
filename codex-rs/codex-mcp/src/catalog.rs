@@ -4,6 +4,12 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use codex_config::McpServerConfig;
+use codex_config::McpServerDisabledReason;
+use codex_config::RequirementSource;
+use codex_protocol::mcp_policy::EnvironmentMcpPolicy;
+use codex_utils_path_uri::PathUri;
+
+use crate::CODEX_APPS_MCP_SERVER_NAME;
 
 /// Plugin identity retained with an MCP registration for tool attribution.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11,6 +17,7 @@ pub struct McpPluginAttribution {
     plugin_id: String,
     display_name: String,
     agent_plugin: bool,
+    host_root: Option<PathUri>,
 }
 
 impl McpPluginAttribution {
@@ -19,6 +26,7 @@ impl McpPluginAttribution {
             plugin_id,
             display_name,
             agent_plugin: false,
+            host_root: None,
         }
     }
 
@@ -27,7 +35,14 @@ impl McpPluginAttribution {
             plugin_id,
             display_name,
             agent_plugin: true,
+            host_root: None,
         }
+    }
+
+    /// Records the exact host-discovered plugin root.
+    pub fn with_host_root(mut self, host_root: PathUri) -> Self {
+        self.host_root = Some(host_root);
+        self
     }
 
     pub fn plugin_id(&self) -> &str {
@@ -40,6 +55,11 @@ impl McpPluginAttribution {
 
     pub fn is_agent_plugin(&self) -> bool {
         self.agent_plugin
+    }
+
+    /// Returns the host-discovered root captured with this server registration.
+    pub fn host_root(&self) -> Option<&PathUri> {
+        self.host_root.as_ref()
     }
 }
 
@@ -56,6 +76,7 @@ pub enum McpServerSource {
     },
     Extension {
         id: String,
+        host_owned_apps: bool,
     },
 }
 
@@ -67,6 +88,19 @@ impl McpServerSource {
             }
             Self::Config | Self::Compatibility { .. } | Self::Extension { .. } => false,
         }
+    }
+
+    pub(crate) fn is_host_owned_apps(&self, name: &str, config: &McpServerConfig) -> bool {
+        name == CODEX_APPS_MCP_SERVER_NAME
+            && config.is_local_environment()
+            && matches!(
+                self,
+                Self::Compatibility { .. }
+                    | Self::Extension {
+                        host_owned_apps: true,
+                        ..
+                    }
+            )
     }
 
     fn disabled_registration_is_name_veto(&self) -> bool {
@@ -166,7 +200,28 @@ impl McpServerRegistration {
     ) -> Self {
         Self::new(
             name,
-            McpServerSource::Extension { id: id.into() },
+            McpServerSource::Extension {
+                id: id.into(),
+                host_owned_apps: false,
+            },
+            config,
+            RegistrationPrecedence::Extension(contribution_order),
+        )
+    }
+
+    /// Registers the controller-owned Apps server contributed by a host extension.
+    pub fn from_hosted_apps(
+        id: impl Into<String>,
+        contribution_order: usize,
+        config: McpServerConfig,
+    ) -> Self {
+        let host_owned_apps = config.is_local_environment();
+        Self::new(
+            CODEX_APPS_MCP_SERVER_NAME.to_string(),
+            McpServerSource::Extension {
+                id: id.into(),
+                host_owned_apps,
+            },
             config,
             RegistrationPrecedence::Extension(contribution_order),
         )
@@ -185,6 +240,19 @@ impl McpServerRegistration {
             precedence,
         }
     }
+}
+
+/// The authority available for MCP servers running in one environment.
+#[derive(Clone, Copy, Debug)]
+pub enum McpEnvironmentAuthority<'a> {
+    /// The selected environment adds no restrictions to the controller policy.
+    Unrestricted,
+    /// The owner supplied the final restrictions for this environment.
+    Restricted(&'a EnvironmentMcpPolicy),
+    /// An explicitly selected plugin can use its executor without attaching that executor.
+    SelectedPluginsOnly,
+    /// The attachment is pending or failed, so its owner policy is not available.
+    Unavailable,
 }
 
 /// One side of an MCP server conflict, including whether it registers or
@@ -272,9 +340,83 @@ impl McpCatalogBuilder {
     ) {
         self.actions.push(CatalogAction::Remove {
             name,
-            source: McpServerSource::Extension { id: id.into() },
+            source: McpServerSource::Extension {
+                id: id.into(),
+                host_owned_apps: false,
+            },
             precedence: RegistrationPrecedence::Extension(contribution_order),
         });
+    }
+
+    /// Applies environment authority before resolving immutable server registrations.
+    pub fn build_with_environment_authority<'a>(
+        mut self,
+        mut authority_for_environment: impl FnMut(&str) -> McpEnvironmentAuthority<'a>,
+    ) -> ResolvedMcpCatalog {
+        for action in &mut self.actions {
+            let CatalogAction::Register(registration) = action else {
+                continue;
+            };
+            // Controller-owned Apps and existing managed denials are not attachment-owned.
+            if !registration.config.enabled
+                || registration
+                    .source
+                    .is_host_owned_apps(&registration.name, &registration.config)
+            {
+                continue;
+            }
+
+            let allowed = match authority_for_environment(&registration.config.environment_id) {
+                McpEnvironmentAuthority::Unrestricted => true,
+                McpEnvironmentAuthority::SelectedPluginsOnly => {
+                    matches!(&registration.source, McpServerSource::SelectedPlugin(_))
+                }
+                McpEnvironmentAuthority::Unavailable => false,
+                McpEnvironmentAuthority::Restricted(policy) => match &registration.source {
+                    McpServerSource::Config
+                    | McpServerSource::Compatibility { .. }
+                    | McpServerSource::Extension { .. } => {
+                        policy.servers.as_ref().is_none_or(|requirements| {
+                            requirements
+                                .get(&registration.name)
+                                .is_some_and(|requirement| {
+                                    registration.config.matches_requirement(requirement)
+                                })
+                        })
+                    }
+                    McpServerSource::Plugin(attribution)
+                    | McpServerSource::SelectedPlugin(attribution) => {
+                        // Empty server policy denies every plugin; otherwise use package policy.
+                        !policy.servers.as_ref().is_some_and(BTreeMap::is_empty)
+                            && policy
+                                .plugins
+                                .as_ref()
+                                .filter(|plugins| {
+                                    plugins.values().any(|plugin| plugin.mcp_servers.is_some())
+                                })
+                                .is_none_or(|plugins| {
+                                    plugins
+                                        .get(attribution.plugin_id())
+                                        .and_then(|plugin| plugin.mcp_servers.as_ref())
+                                        .and_then(|requirements| {
+                                            requirements.get(&registration.name)
+                                        })
+                                        .is_some_and(|requirement| {
+                                            registration.config.matches_requirement(requirement)
+                                        })
+                                })
+                    }
+                },
+            };
+
+            if !allowed {
+                registration.config.enabled = false;
+                registration.config.disabled_reason = Some(McpServerDisabledReason::Requirements {
+                    source: RequirementSource::Unknown,
+                });
+            }
+        }
+        self.build()
     }
 
     pub fn build(mut self) -> ResolvedMcpCatalog {

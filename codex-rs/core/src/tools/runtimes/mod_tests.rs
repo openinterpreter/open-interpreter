@@ -63,10 +63,20 @@ fn shell_with_snapshot(
 }
 
 async fn test_network_proxy() -> anyhow::Result<NetworkProxy> {
-    let state = codex_network_proxy::build_config_state(
-        NetworkProxyConfig::default(),
-        NetworkProxyConstraints::default(),
-    )?;
+    test_network_proxy_with_config(NetworkProxyConfig::default()).await
+}
+
+pub(super) async fn test_credential_broker_network_proxy() -> anyhow::Result<NetworkProxy> {
+    let mut config = NetworkProxyConfig::default();
+    config.set_credential_broker_enabled(/*enabled*/ true);
+    test_network_proxy_with_config(config).await
+}
+
+async fn test_network_proxy_with_config(
+    config: NetworkProxyConfig,
+) -> anyhow::Result<NetworkProxy> {
+    let state =
+        codex_network_proxy::build_config_state(config, NetworkProxyConstraints::default())?;
     NetworkProxy::builder()
         .state(Arc::new(NetworkProxyState::with_reloader(
             state,
@@ -88,14 +98,14 @@ async fn explicit_escalation_prepares_exec_without_managed_network() -> anyhow::
     let mut env = HashMap::from([("CUSTOM_ENV".to_string(), "kept".to_string())]);
     proxy.apply_to_env(&mut env);
 
-    let command = vec!["/bin/echo".to_string(), "ok".to_string()];
-    let command = build_sandbox_command(
-        &command,
-        &command_cwd,
-        &exec_env_for_sandbox_permissions(&env, SandboxPermissions::RequireEscalated),
-        /*additional_permissions*/ None,
-    )
-    .expect("build sandbox command");
+    let command = codex_sandboxing::SandboxCommand {
+        program: "/bin/echo".into(),
+        args: vec!["ok".to_string()],
+        cwd: PathUri::from_abs_path(&command_cwd),
+        env: exec_env_for_sandbox_permissions(&env, SandboxPermissions::RequireEscalated),
+        managed_network: None,
+        additional_permissions: None,
+    };
     assert_eq!(command.cwd, PathUri::from_abs_path(&command_cwd));
     let sandbox_policy_cwd = PathUri::from_abs_path(&native_sandbox_policy_cwd);
     let options = ExecOptions {
@@ -233,24 +243,6 @@ fn runtime_path_prepends_ignores_empty_path_entry() {
         runtime_path_prepends,
         RuntimePathPrepends::default(),
         "empty runtime PATH prepend should not be recorded for snapshot replay"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn prepend_zsh_fork_bin_to_path_ignores_empty_parent() {
-    let mut env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
-
-    let result = prepend_zsh_fork_bin_to_path(&mut env, PathBuf::from("zsh").as_path());
-
-    assert_eq!(
-        result, None,
-        "zsh fork helper should not report a PATH update for an empty parent"
-    );
-    assert_eq!(
-        env.get("PATH").map(String::as_str),
-        Some("/usr/bin:/bin"),
-        "zsh fork helper should leave PATH unchanged when the parent is empty"
     );
 }
 
@@ -753,6 +745,54 @@ fn maybe_wrap_shell_lc_with_snapshot_restores_proxy_env_from_process_env() {
          http://127.0.0.1:4321\n\
          ssh -o ProxyCommand=stale"
     );
+}
+
+#[tokio::test]
+async fn snapshot_wrapper_replays_dummy_and_preserves_unbrokered_credentials() -> anyhow::Result<()>
+{
+    let proxy = test_credential_broker_network_proxy().await?;
+    let dir = tempdir()?;
+    let snapshot = dir.path().join("snapshot.sh");
+    std::fs::write(
+        &snapshot,
+        "# Snapshot file\nexport OPENAI_API_KEY='stale'\nexport GITHUB_TOKEN='ghp_snapshot_only'\nexport GH_HOST='github.example.com'\n",
+    )?;
+    let (shell, snapshot) = shell_with_snapshot(ShellType::Bash, "/bin/bash", snapshot.abs());
+    let mut env = HashMap::from([
+        (
+            "OPENAI_API_KEY".to_string(),
+            "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_".to_string(),
+        ),
+        ("GITHUB_TOKEN".to_string(), String::new()),
+    ]);
+    proxy.apply_to_env(&mut env);
+    let dummy = env["OPENAI_API_KEY"].clone();
+    let command = vec![
+        "/bin/bash".to_string(),
+        "-lc".to_string(),
+        "printf '%s\\n%s\\n%s' \"$OPENAI_API_KEY\" \"${GITHUB_TOKEN-unset}\" \"$GH_HOST\""
+            .to_string(),
+    ];
+    let rewritten = maybe_wrap_shell_lc_with_snapshot(
+        &command,
+        &shell,
+        Some(&snapshot),
+        &HashMap::new(),
+        &env,
+        &RuntimePathPrepends::default(),
+    );
+    let output = Command::new(&rewritten[0])
+        .args(&rewritten[1..])
+        .env_clear()
+        .envs(env)
+        .output()?;
+
+    assert!(output.status.success(), "command failed: {output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{dummy}\nghp_snapshot_only\ngithub.example.com")
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

@@ -1,8 +1,12 @@
+use super::CredentialBrokerProjectState;
+use super::apply_credential_broker_requirements;
+use super::credential_broker_trusted_config;
 use super::discover_project_layers;
 use super::layer_io;
 use super::load_config_toml_for_required_layer_raw;
 use super::load_requirements_toml;
 use super::load_root_checkout_project_config;
+use super::project_discovery;
 use super::project_root_markers_from_config;
 use super::project_trust_context;
 use super::requirements_layers_from_legacy_scheme;
@@ -13,6 +17,7 @@ use crate::ConfigLayerSource;
 use crate::LoaderOverrides;
 use crate::RequirementSource;
 use crate::RequirementsLayerEntry;
+use crate::compose_requirements;
 use crate::default_project_root_markers;
 use crate::merge_toml_values;
 use codex_file_system::ExecutorFileSystem;
@@ -86,8 +91,8 @@ pub struct LocalTomlLayer<S> {
 /// config reads.
 ///
 /// Cloud, selected profiles, session flags, and thread-provided layers are not
-/// included. Project discovery uses only the executor's system and base-user
-/// configuration.
+/// included. Project discovery uses the executor's system, base-user, and
+/// legacy managed configuration.
 pub async fn load_local_config_layers(
     fs: &dyn ExecutorFileSystem,
     codex_home: &Path,
@@ -121,17 +126,45 @@ pub(super) async fn load_local_config_layers_with_overrides(
     let mut discovery_config = TomlValue::Table(toml::map::Map::new());
     merge_toml_values(&mut discovery_config, &system.toml);
     merge_toml_values(&mut discovery_config, &user.toml);
+    // Managed file and MDM values also govern the project boundary and trust.
+    // Only this snapshot is resolved; the returned local layers stay raw.
+    project_discovery::merge_managed_config_for_discovery(
+        &mut discovery_config,
+        &loaded_managed,
+        codex_home.as_path(),
+    )?;
     let project_root_markers = project_root_markers_from_config(&discovery_config)?
         .unwrap_or_else(default_project_root_markers);
-    let trust_context = project_trust_context(
+    let requirements =
+        local_requirements_layers(fs, codex_home.as_path(), overrides, loaded_managed.clone())
+            .await?;
+    let mut trust_context = project_trust_context(
         fs,
         &discovery_config,
+        &credential_broker_trusted_config(&discovery_config, &[], &loaded_managed),
         cwd,
         &project_root_markers,
         codex_home.as_path(),
         &user_file,
     )
     .await?;
+    if trust_context.credential_broker != CredentialBrokerProjectState::Unconfigured {
+        let broker_requirements = requirements.clone().project(&[
+            vec!["features".to_string(), "network_proxy".to_string()],
+            vec![
+                "feature_requirements".to_string(),
+                "network_proxy".to_string(),
+            ],
+            vec!["experimental_network".to_string(), "enabled".to_string()],
+        ]);
+        let effective_requirements =
+            compose_requirements(broker_requirements.layers.into_iter().map(|layer| {
+                RequirementsLayerEntry::from_toml_value(layer.source, layer.toml)
+                    .with_base_dir(layer.base_dir)
+            }))?
+            .unwrap_or_default();
+        apply_credential_broker_requirements(&mut trust_context, &effective_requirements);
+    }
     let project_layers = discover_project_layers(
         fs,
         cwd,
@@ -159,9 +192,6 @@ pub(super) async fn load_local_config_layers_with_overrides(
     ];
     append_project_layers(fs, &mut config_layers, project_layers.layers).await?;
 
-    let requirements =
-        local_requirements_layers(fs, codex_home.as_path(), overrides, loaded_managed.clone())
-            .await?;
     append_legacy_config_layers(&mut config_layers, loaded_managed, &codex_home)?;
 
     Ok(LocalConfigLayers {

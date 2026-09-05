@@ -37,6 +37,10 @@ fn retryability_preserves_error_details_distinctions() {
     let errors = [
         (CodexErr::ServerOverloaded, false),
         (
+            CodexErr::new(CodexErrorDetails::RateLimitExceeded("retry later".into())),
+            true,
+        ),
+        (
             CodexErr::RetryLimit(RetryLimitReachedError {
                 status: StatusCode::TOO_MANY_REQUESTS,
                 request_id: None,
@@ -406,17 +410,24 @@ fn usage_limit_reached_error_formats_enterprise_cbp_usage_based_plan() {
 
 #[test]
 fn usage_limit_reached_error_formats_default_for_other_plans() {
-    let err = UsageLimitReachedError {
-        plan_type: Some(PlanType::Known(KnownPlan::Enterprise)),
-        resets_at: None,
-        rate_limits: Some(Box::new(rate_limit_snapshot())),
-        promo_message: None,
-        rate_limit_reached_type: None,
-    };
-    assert_eq!(
-        err.to_string(),
-        "You've hit your usage limit. Try again later."
-    );
+    for plan in [
+        KnownPlan::Enterprise,
+        KnownPlan::Edu,
+        KnownPlan::EduPlus,
+        KnownPlan::EduPro,
+    ] {
+        let err = UsageLimitReachedError {
+            plan_type: Some(PlanType::Known(plan)),
+            resets_at: None,
+            rate_limits: Some(Box::new(rate_limit_snapshot())),
+            promo_message: None,
+            rate_limit_reached_type: None,
+        };
+        assert_eq!(
+            err.to_string(),
+            "You've hit your usage limit. Try again later."
+        );
+    }
 }
 
 #[test]

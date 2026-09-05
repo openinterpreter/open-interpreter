@@ -34,6 +34,7 @@ use tokio::time::timeout;
 pub(crate) const CLOUD_CONFIG_BUNDLE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOUD_CONFIG_BUNDLE_MAX_ATTEMPTS: usize = 5;
 const CLOUD_CONFIG_BUNDLE_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const CLOUD_CONFIG_BUNDLE_TIMEOUT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const CLOUD_CONFIG_BUNDLE_LOAD_FAILED_MESSAGE: &str =
     "Failed to load cloud config bundle (workspace-managed policies).";
 const CLOUD_CONFIG_BUNDLE_AUTH_RECOVERY_FAILED_MESSAGE: &str = concat!(
@@ -51,7 +52,8 @@ fn cloud_config_eligible_auth(auth: &CodexAuth) -> bool {
     };
     auth.uses_codex_backend()
         && (plan_type.is_business_like()
-            || matches!(plan_type, PlanType::Enterprise | PlanType::Edu))
+            || plan_type.is_education_like()
+            || plan_type == PlanType::Enterprise)
 }
 
 fn optional_bundle(bundle: CloudConfigBundle) -> Option<CloudConfigBundle> {
@@ -458,7 +460,18 @@ where
 
     pub(crate) async fn refresh_cache_in_background(&self) {
         loop {
-            sleep(CLOUD_CONFIG_BUNDLE_CACHE_REFRESH_INTERVAL).await;
+            let mut refresh_interval = CLOUD_CONFIG_BUNDLE_CACHE_REFRESH_INTERVAL;
+            if let Some(latest_bundle) = self.latest_bundle.get()
+                && matches!(
+                    &*latest_bundle.lock().await,
+                    Err(error) if error.code() == CloudConfigBundleLoadErrorCode::Timeout
+                )
+            {
+                // Recover startup timeouts through this worker without making
+                // readers fetch concurrently or extending the startup deadline.
+                refresh_interval = CLOUD_CONFIG_BUNDLE_TIMEOUT_RETRY_INTERVAL;
+            }
+            sleep(refresh_interval).await;
             match timeout(self.timeout, self.refresh_cache_once()).await {
                 Ok(true) => {}
                 Ok(false) => break,

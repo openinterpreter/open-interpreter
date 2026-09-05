@@ -3,6 +3,7 @@ use codex_config::Constrained;
 use codex_core::EnvironmentConfig;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
+use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::McpServerContribution;
@@ -17,6 +18,7 @@ use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::McpResourceClient;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::protocol::AskForApproval;
@@ -49,6 +51,7 @@ use core_test_support::skip_if_no_network;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
+use rmcp::model::ReadResourceRequestParams;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
@@ -153,12 +156,19 @@ impl McpServerContributor<Config> for AppsMcpServerContributor {
             {
                 root_resolved.add_permits(1);
             }
-            let config = serde_json::from_value(json!({ "url": self.url }))
-                .expect("test Apps MCP server config should be valid");
-            vec![McpServerContribution::Set {
-                name: CODEX_APPS_MCP_SERVER_NAME.to_string(),
-                config: Box::new(config),
-            }]
+            let config = Box::new(
+                serde_json::from_value(json!({ "url": self.url }))
+                    .expect("test Apps MCP server config should be valid"),
+            );
+            let contribution = if self.id == "hosted_plugin_runtime" {
+                McpServerContribution::HostedApps { config }
+            } else {
+                McpServerContribution::Set {
+                    name: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+                    config,
+                }
+            };
+            vec![contribution]
         })
     }
 }
@@ -201,6 +211,7 @@ fn format_labeled_requests_snapshot(
 }
 
 fn enable_deferred_tool_world_state_without_agents(config: &mut Config) {
+    config.update_plan_enabled = true;
     config.agents_enabled = false;
     config
         .features
@@ -479,9 +490,20 @@ async fn root_reconciliation_reuses_pending_apps_startup() -> Result<()> {
             &selection,
             EnvironmentConfig {
                 allow_login_shell: false,
+                workspace_roots: selection.workspace_roots.clone(),
                 permission_profile: PermissionProfileSnapshot::legacy(
                     test.config.permissions.permission_profile().clone(),
                 ),
+                shell_environment_policy: Default::default(),
+                windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
+                windows_sandbox_private_desktop: test
+                    .config
+                    .permissions
+                    .windows_sandbox_private_desktop,
+                use_legacy_landlock: test.config.features.use_legacy_landlock(),
+                exec_policy: None,
+                mcp_policy: None,
+                network_policy: None,
                 selected_capability_roots: vec![SelectedCapabilityRoot {
                     id: "calendar-root".to_string(),
                     location: CapabilityRootLocation::Environment {
@@ -547,6 +569,98 @@ async fn root_reconciliation_reuses_pending_apps_startup() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timeout_refresh_replaces_pending_startup_and_reuses_ready_connection() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let pending_mock = responses::start_mock_server().await;
+    let (pending_server, pending_startup) =
+        AppsTestServer::mount_with_startup_control(&pending_mock).await?;
+    let release_startup = pending_startup.hold_next_successful_initialize();
+    let ready_mock = responses::start_mock_server().await;
+    let (ready_server, ready_startup) =
+        AppsTestServer::mount_with_startup_control(&ready_mock).await?;
+    let test = core_test_support::test_codex::test_codex()
+        .with_config(move |config| {
+            config
+                .mcp_servers
+                .set(
+                    [("pending", pending_server), ("ready", ready_server)]
+                        .into_iter()
+                        .map(|(name, server)| {
+                            (
+                                name.to_string(),
+                                serde_json::from_value(json!({
+                                    "url": format!("{}/api/codex/ps/mcp", server.chatgpt_base_url),
+                                    "startup_timeout_sec": 60,
+                                }))
+                                .expect("valid MCP config"),
+                            )
+                        })
+                        .collect(),
+                )
+                .expect("test config should allow MCP servers");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while pending_startup.initialize_attempts() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("pending startup should begin before refresh");
+    let ready_result = test
+        .codex
+        .call_mcp_tool(
+            "ready",
+            "calendar_list_events",
+            /*arguments*/ None,
+            /*meta*/ None,
+        )
+        .await?;
+
+    let mut refresh_config = test.config.clone();
+    let mut servers = refresh_config.mcp_servers.get().clone();
+    for config in servers.values_mut() {
+        config.startup_timeout_sec = None;
+    }
+    refresh_config.mcp_servers.set(servers)?;
+    test.codex.refresh_mcp_config(refresh_config).await;
+    // Publish without waiting for the held initialize to finish.
+    let error = test
+        .codex
+        .read_mcp_resource("unknown", ReadResourceRequestParams::new("test://resource"))
+        .await
+        .expect_err("the unknown server should not exist");
+    assert_eq!(error.to_string(), "unknown MCP server 'unknown'");
+    release_startup
+        .send(())
+        .expect("the mock initialize should remain held until publication");
+
+    for name in ["pending", "ready"] {
+        let result = test
+            .codex
+            .call_mcp_tool(
+                name,
+                "calendar_list_events",
+                /*arguments*/ None,
+                /*meta*/ None,
+            )
+            .await?;
+        assert_eq!(result, ready_result);
+    }
+    assert_eq!(
+        (
+            pending_startup.initialize_attempts(),
+            ready_startup.initialize_attempts(),
+        ),
+        (2, 1)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn out_of_band_resource_read_reconciles_the_published_mcp_runtime() -> Result<()> {
     let server = responses::start_mock_server().await;
 
@@ -594,7 +708,10 @@ startup_timeout_sec = 0.1
 
     let _ = test
         .codex
-        .read_mcp_resource("refreshed", "test://resource")
+        .read_mcp_resource(
+            "refreshed",
+            ReadResourceRequestParams::new("test://resource"),
+        )
         .await;
     assert!(resource_client.has_server("refreshed").await);
     Ok(())
@@ -1032,6 +1149,7 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
     let mut builder = search_capable_apps_builder(apps_server.chatgpt_base_url.clone())
         .with_extensions(Arc::new(extensions.build()))
         .with_config(|config| {
+            config.update_plan_enabled = true;
             config
                 .features
                 .enable(Feature::DefaultModeRequestUserInput)

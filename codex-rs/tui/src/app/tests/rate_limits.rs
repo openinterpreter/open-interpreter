@@ -40,6 +40,8 @@ fn rate_limit_snapshot(
 
 fn account_rate_limits_response(snapshot: RateLimitSnapshot) -> GetAccountRateLimitsResponse {
     GetAccountRateLimitsResponse {
+        account_id: None,
+        rate_limit_upsell: None,
         rate_limits: snapshot,
         rate_limits_by_limit_id: None,
         rate_limit_reset_credits: Some(RateLimitResetCreditsSummary {
@@ -88,6 +90,7 @@ fn deliver_usage_limit_error(app: &mut App) {
     app.chat_widget.handle_server_notification(
         ServerNotification::Error(ErrorNotification {
             error: AppServerTurnError {
+                misalignment: None,
                 message: "Usage limit reached.".to_string(),
                 codex_error_info: Some(CodexErrorInfo::UsageLimitExceeded),
                 additional_details: None,
@@ -98,6 +101,50 @@ fn deliver_usage_limit_error(app: &mut App) {
         }),
         /*replay_kind*/ None,
     );
+}
+
+#[tokio::test]
+async fn backend_banner_state_survives_widget_replacement() -> Result<()> {
+    for dismiss in [false, true] {
+        let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+        set_chatgpt_auth(&mut app.chat_widget);
+        let mut response = account_rate_limits_response(rate_limit_snapshot(
+            /*used_percent*/ 100, /*rate_limit_reached_type*/ None,
+            /*spend_control_reached*/ None,
+        ));
+        response.rate_limit_upsell = Some(serde_json::json!({
+            "banner_type": "plus_rate_limit_reached", "title": "Usage limit reached",
+            "presentation": "dismissible",
+            "description": "Choose how to continue.",
+            "ctas": [{"action": "view_usage", "label": "View usage"}]
+        }));
+        app.chat_widget.update_backend_banner(&response);
+        assert!(render_bottom_popup(&app.chat_widget, /*width*/ 90).contains("View usage"));
+        if dismiss {
+            app.chat_widget
+                .handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        }
+        let before = render_bottom_popup(&app.chat_widget, /*width*/ 90);
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        let init = app.chatwidget_init_for_forked_or_resumed_thread(
+            &mut tui,
+            app.config.clone(),
+            /*initial_user_message*/ None,
+        );
+        app.replace_chat_widget(ChatWidget::new_with_app_event(init));
+        set_active_cell(
+            &mut app.chat_widget,
+            Box::new(PlainHistoryCell::new(Vec::new())),
+        );
+        app.chat_widget.pre_draw_tick();
+        assert_eq!(render_bottom_popup(&app.chat_widget, /*width*/ 90), before);
+        app.chat_widget.update_backend_banner(&response);
+        assert_eq!(render_bottom_popup(&app.chat_widget, /*width*/ 90), before);
+        response.rate_limit_upsell = None;
+        app.chat_widget.update_backend_banner(&response);
+        assert!(!render_bottom_popup(&app.chat_widget, /*width*/ 90).contains("View usage"));
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -233,6 +280,7 @@ async fn stale_rate_limit_reads_preserve_newer_workspace_hard_stop_for_every_ori
             &mut tui,
             &mut app_server,
             AppEvent::RateLimitsLoaded {
+                request_id: 0,
                 origin,
                 hard_stop_generation: read_generation,
                 result: Ok(account_rate_limits_response(rate_limit_snapshot(
@@ -312,6 +360,7 @@ async fn stale_rate_limit_read_does_not_dismiss_visible_workspace_advisory() -> 
         &mut tui,
         &mut app_server,
         AppEvent::RateLimitsLoaded {
+            request_id: 0,
             origin: RateLimitRefreshOrigin::StatusCommand { request_id },
             hard_stop_generation: read_generation,
             result: Ok(account_rate_limits_response(rate_limit_snapshot(
@@ -358,6 +407,7 @@ async fn post_hard_stop_rate_limit_read_clears_recovered_workspace_limit() -> Re
         &mut tui,
         &mut app_server,
         AppEvent::RateLimitsLoaded {
+            request_id: 0,
             origin: RateLimitRefreshOrigin::StatusCommand { request_id },
             hard_stop_generation: read_generation,
             result: Ok(account_rate_limits_response(rate_limit_snapshot(
@@ -383,5 +433,115 @@ async fn post_hard_stop_rate_limit_read_clears_recovered_workspace_limit() -> Re
     );
 
     app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_rate_limit_read_preserves_visible_backend_banner() -> Result<()> {
+    let (mut app, _events, _ops) = make_test_app_with_channels().await;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
+        app.chat_widget.config_ref(),
+    ))
+    .await?;
+    let mut response = account_rate_limits_response(rate_limit_snapshot(
+        /*used_percent*/ 25,
+        /*rate_limit_reached_type*/ None,
+        Some(false),
+    ));
+    response.account_id = Some("workspace-a".into());
+    response.rate_limit_upsell = Some(serde_json::json!({
+        "banner_type": "workspace_recovery", "presentation": "inline",
+        "title": "Workspace needs credits", "description": "Ask your owner for credits.",
+        "ctas": []
+    }));
+    app.chat_widget.update_backend_banner(&response);
+    let before = render_bottom_popup(&app.chat_widget, /*width*/ 90);
+    assert!(before.contains("Workspace needs credits"));
+    let request_id = 7;
+    app.chat_widget
+        .add_status_output(/*refreshing_rate_limits*/ true, Some(request_id));
+    let generation = app.rate_limit_hard_stop_generation;
+    app.handle_event(
+        &mut tui,
+        &mut app_server,
+        AppEvent::RateLimitsLoaded {
+            request_id: 0,
+            origin: RateLimitRefreshOrigin::StatusCommand { request_id },
+            hard_stop_generation: generation,
+            result: Err("transient test failure".into()),
+        },
+    )
+    .await?;
+    assert_eq!(render_bottom_popup(&app.chat_widget, /*width*/ 90), before);
+    app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn backend_banner_reads_ignore_older_completions() -> Result<()> {
+    let (mut app, _events, _ops) = make_test_app_with_channels().await;
+    let mut session = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.chat_widget.set_model("test-model-a");
+    let mut current = account_rate_limits_response(rate_limit_snapshot(
+        /*used_percent*/ 100, /*rate_limit_reached_type*/ None,
+        /*spend_control_reached*/ None,
+    ));
+    current.rate_limit_upsell = Some(serde_json::json!({
+        "banner_type":"selected_model_limit", "model_slug":"test-model-a", "presentation":"inline",
+        "title":"Selected model usage exhausted", "description":"Contact your owner.", "ctas":[]
+    }));
+    for request_id in 1..=5 {
+        app.rate_limit_refresh_state
+            .start(
+                RateLimitRefreshOrigin::StatusCommand { request_id },
+                &mut app.rate_limit_hard_stop_generation,
+            )
+            .unwrap();
+    }
+    for (id, generation, result, expect_visible) in [
+        (2, 0, Ok(current.clone()), true),
+        (
+            1,
+            0,
+            Ok({
+                let mut absent = current.clone();
+                absent.rate_limit_upsell = None;
+                absent
+            }),
+            true,
+        ),
+        (4, 0, Err("transient failure".into()), true),
+        (
+            3,
+            0,
+            Ok({
+                let mut absent = current.clone();
+                absent.rate_limit_upsell = None;
+                absent
+            }),
+            false,
+        ),
+        (5, 0, Ok(current.clone()), true),
+    ] {
+        app.handle_event(
+            &mut tui,
+            &mut session,
+            AppEvent::RateLimitsLoaded {
+                request_id: id,
+                origin: RateLimitRefreshOrigin::StatusCommand { request_id: id },
+                hard_stop_generation: generation,
+                result,
+            },
+        )
+        .await?;
+        assert_eq!(
+            render_bottom_popup(&app.chat_widget, /*width*/ 90)
+                .contains("Selected model usage exhausted"),
+            expect_visible
+        );
+    }
+    session.shutdown().await?;
     Ok(())
 }

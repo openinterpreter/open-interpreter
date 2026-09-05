@@ -27,7 +27,12 @@ def main() -> "Never":
     ensure_source_prerequisites(env)
     set_default_lint_env(env)
 
-    command = ["cargo", "dylint", "--path", str(root / "tools" / "argument-comment-lint")]
+    command = [
+        "cargo",
+        "dylint",
+        "--path",
+        str(root / "tools" / "argument-comment-lint"),
+    ]
     if not parsed.has_library_selection:
         command.append("--all")
     command.extend(final_args)

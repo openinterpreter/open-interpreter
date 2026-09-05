@@ -137,6 +137,7 @@ async fn cyber_policy_response_emits_typed_error_notification_v2() -> Result<()>
         error,
         ErrorNotification {
             error: codex_app_server_protocol::TurnError {
+                misalignment: None,
                 message: CYBER_POLICY_MESSAGE.to_string(),
                 codex_error_info: Some(CodexErrorInfo::CyberPolicy),
                 additional_details: None,

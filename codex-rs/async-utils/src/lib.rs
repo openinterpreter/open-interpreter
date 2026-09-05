@@ -1,6 +1,9 @@
 use std::future::Future;
 use tokio_util::sync::CancellationToken;
 
+/// Stack budget for threads that poll Codex async work.
+pub const THREAD_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum CancelErr {
     Cancelled,

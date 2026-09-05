@@ -64,6 +64,8 @@
   (sysctl-name "kern.osvariant_status")
   (sysctl-name "kern.osversion")
   (sysctl-name "kern.secure_kernel")
+  ; Python's ProcessPoolExecutor queries this through sysconf(_SC_SEM_NSEMS_MAX).
+  (sysctl-name "kern.sysv.semmns")
   (sysctl-name "kern.usrstack64")
   (sysctl-name "kern.version")
   (sysctl-name "sysctl.proc_cputype")
@@ -112,11 +114,3 @@
 ; PTYs created before entering seatbelt may lack the extension; allow ioctl
 ; on those slave ttys so interactive shells detect a TTY and remain functional.
 (allow file-ioctl (regex #"^/dev/ttys[0-9]+"))
-
-; allow readonly user preferences
-(allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
-(allow mach-lookup
-  (global-name "com.apple.cfprefsd.daemon")
-  (global-name "com.apple.cfprefsd.agent")
-  (local-name "com.apple.cfprefsd.agent"))
-(allow user-preference-read)

@@ -4,6 +4,7 @@ use app_test_support::TestAppServer;
 use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::routing::post;
 use codex_app_server_protocol::CapabilityRootLocation;
@@ -21,9 +22,13 @@ use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
+use codex_features::Feature;
+use codex_http_client::HttpClientBuilder;
 use codex_utils_path_uri::PathUri;
 use core_test_support::responses;
 use core_test_support::stdio_server_bin;
+use futures::SinkExt;
+use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::CallToolRequestParams;
@@ -39,15 +44,26 @@ use rmcp::service::RoleServer;
 use rmcp::transport::StreamableHttpServerConfig;
 use rmcp::transport::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use serde_json::Value;
 use serde_json::json;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tempfile::TempDir;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::BufReader;
 use tokio::net::TcpListener;
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+use tokio_tungstenite::accept_async;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
+use url::Url;
 
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(20);
 const EXECUTOR_HTTP_MCP_URL: &str = "http://executor-only.invalid/mcp";
@@ -60,12 +76,456 @@ const HOST_OAUTH_ACCESS_TOKEN: &str = "host-access-token";
 const EXECUTOR_OAUTH_ACCESS_TOKEN: &str = "executor-access-token";
 const EXECUTOR_ENV_NAME: &str = "MCP_EXECUTOR_MARKER";
 const EXECUTOR_ENV_VALUE: &str = "executor-only";
+const EXECUTOR_HTTP_AUTH_ENV_NAME: &str = "NODE_REPL_AUTH_TOKEN";
+const EXECUTOR_HTTP_AUTH_ENV_VALUE: &str = "executor-only-http-token";
 const EXECUTOR_ID: &str = "executor-1";
+const EXECUTOR_DISABLED_PLUGIN_SERVER_NAME: &str = "executor_disabled_plugin";
+const PROJECT_MCP_SERVER_NAME: &str = "node_repl";
+const PROJECT_MCP_BEARER_TOKEN: &str = "executor-browser-token";
+const PROJECT_MCP_BEARER_ENV_NAME: &str = "NODE_REPL_AUTH_TOKEN";
 const REFRESH_PROBE_SERVER_NAME: &str = "refresh_probe";
 const TOOL_CALL_ID: &str = "executor-mcp-call";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selected_executor_discovers_browser_mcp_with_executor_only_bearer_token() -> Result<()> {
+    assert!(std::env::var_os(PROJECT_MCP_BEARER_ENV_NAME).is_none());
+    let responses_server = responses::start_mock_server().await;
+    let http_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let http_addr = http_listener.local_addr()?;
+    let http_mcp_service = StreamableHttpService::new(
+        || Ok(ExecutorHttpMcpServer),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default().with_allowed_hosts(["executor-only.invalid"]),
+    );
+    let browser_starting = Arc::new(AtomicBool::new(true));
+    let http_router =
+        Router::new()
+            .nest_service("/mcp", http_mcp_service)
+            .layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let browser_starting = Arc::clone(&browser_starting);
+                    async move {
+                        if browser_starting.swap(false, Ordering::Relaxed) {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                        let authorized = request
+                            .headers()
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .is_some_and(|value| value == "Bearer executor-browser-token");
+                        if !authorized {
+                            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                        }
+                        next.run(request).await
+                    }
+                },
+            ));
+    let http_server_handle = tokio::spawn(async move {
+        let _ = axum::serve(http_listener, http_router).await;
+    });
+    let codex_home = TempDir::new()?;
+    let executor_home = TempDir::new()?;
+    MockResponsesConfig::new(&responses_server.uri())
+        .with_sandbox_mode("danger-full-access")
+        .write(codex_home.path())?;
+    std::fs::write(
+        codex_home.path().join("requirements.toml"),
+        format!(
+            "[mcp_servers.{PROJECT_MCP_SERVER_NAME}.identity]\nurl = \"{EXECUTOR_HTTP_MCP_URL}\"\n"
+        ),
+    )?;
+    std::fs::write(
+        executor_home.path().join("config.toml"),
+        format!(
+            "[mcp_servers.{PROJECT_MCP_SERVER_NAME}]\nurl = \"{EXECUTOR_HTTP_MCP_URL}\"\nbearer_token_env_var = \"{PROJECT_MCP_BEARER_ENV_NAME}\"\nrequired = true\nstartup_timeout_sec = 10\n\n[mcp_servers.ignored_stdio]\ncommand = \"executor-local-command\"\nenv_vars = [\"EXECUTOR_ONLY_TOKEN\"]\ncwd = \"./server\"\n\n[mcp_servers.policy_unlisted]\nurl = \"{EXECUTOR_HTTP_MCP_URL}\"\n"
+        ),
+    )?;
+    // Browser auth tokens are not inherited by spawned executors, so use the production
+    // WebSocket connection and put the token directly in the executor's environment.
+    let mut executor = Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
+        .args(["exec-server", "--listen", "ws://127.0.0.1:0"])
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .env("CODEX_HOME", executor_home.path())
+        .env(PROJECT_MCP_BEARER_ENV_NAME, PROJECT_MCP_BEARER_TOKEN)
+        .env("HTTP_PROXY", format!("http://{http_addr}"))
+        .spawn()?;
+    let stdout = executor.stdout.take().expect("executor stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let executor_url = timeout(DEFAULT_READ_TIMEOUT, lines.next_line())
+        .await??
+        .expect("executor emits its websocket URL");
+    std::fs::write(
+        codex_home.path().join("environments.toml"),
+        format!(
+            "default = \"{EXECUTOR_ID}\"\ninclude_local = false\n\n[[environments]]\nid = \"{EXECUTOR_ID}\"\nurl = \"{executor_url}\"\n"
+        ),
+    )?;
+
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+    let thread_id = start_thread(&mut app_server, /*selected_capability_roots*/ None).await?;
+
+    let namespace = format!("mcp__{PROJECT_MCP_SERVER_NAME}");
+    let response_mock = responses::mount_sse_sequence(
+        &responses_server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("resp-browser-mcp-call"),
+                responses::ev_function_call_with_namespace(
+                    "browser-mcp-call",
+                    &namespace,
+                    "echo",
+                    &json!({"message": "browser use works"}).to_string(),
+                ),
+                responses::ev_completed("resp-browser-mcp-call"),
+            ]),
+            responses::sse(vec![
+                responses::ev_response_created("resp-browser-mcp-done"),
+                responses::ev_assistant_message("msg-browser-mcp-done", "Done"),
+                responses::ev_completed("resp-browser-mcp-done"),
+            ]),
+        ],
+    )
+    .await;
+    let request_id = app_server
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread_id.clone(),
+            input: vec![UserInput::Text {
+                text: "Use the executor browser".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let _: TurnStartResponse =
+        timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request_id)).await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        app_server.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].tool_by_name(&namespace, "echo").is_some());
+    let output = requests[1].function_call_output("browser-mcp-call");
+    assert!(
+        output
+            .get("output")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|output| output.contains("ECHOING: browser use works"))
+    );
+
+    let servers = mcp_server_statuses(&mut app_server, thread_id).await?;
+    assert!(
+        servers
+            .iter()
+            .any(|server| { server.name == PROJECT_MCP_SERVER_NAME && server.plugin_id.is_none() })
+    );
+    assert!(servers.iter().all(|server| server.name != "ignored_stdio"));
+    assert!(
+        servers
+            .iter()
+            .any(|server| server.name == "policy_unlisted" && server.tools.is_empty())
+    );
+
+    http_server_handle.abort();
+    let _ = http_server_handle.await;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_executor_skips_required_browser_and_keeps_host_owned_mcp() -> Result<()> {
+    let responses_server = responses::start_mock_server().await;
+    let codex_home = TempDir::new()?;
+    let executor_home = TempDir::new()?;
+
+    let http_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let mcp_url = format!("http://{}/mcp", http_listener.local_addr()?);
+    let expected_authorization = "Bearer host-only-token";
+    let service = StreamableHttpService::new(
+        || Ok(ExecutorHttpMcpServer),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
+    let router = Router::new()
+        .nest_service("/mcp", service)
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                let authorized = request
+                    .headers()
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value == expected_authorization);
+                if !authorized {
+                    return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                }
+                next.run(request).await
+            },
+        ));
+    let http_server = tokio::spawn(async move {
+        let _ = axum::serve(http_listener, router).await;
+    });
+
+    let root_config = format!(
+        "[mcp_servers.host_remote]\nurl = \"{mcp_url}\"\nenvironment_id = \"{EXECUTOR_ID}\"\nbearer_token_env_var = \"HOST_MCP_TEST_TOKEN\"\nrequired = true\n"
+    );
+    MockResponsesConfig::new(&responses_server.uri())
+        .with_sandbox_mode("danger-full-access")
+        .with_extra_config(&root_config)
+        .write(codex_home.path())?;
+    std::fs::write(
+        executor_home.path().join("config.toml"),
+        format!(
+            "[mcp_servers.node_repl]\nurl = \"http://127.0.0.1:9/mcp\"\nbearer_token_env_var = \"NODE_REPL_AUTH_TOKEN\"\nrequired = true\nstartup_timeout_sec = 1\n\n[mcp_servers.executor_public]\nurl = \"{mcp_url}\"\nhttp_headers = {{ Authorization = \"Bearer host-only-token\" }}\nrequired = true\n"
+        ),
+    )?;
+
+    let mut executor = Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
+        .args(["exec-server", "--listen", "ws://127.0.0.1:0"])
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .env("CODEX_HOME", executor_home.path())
+        .spawn()?;
+    let stdout = executor.stdout.take().expect("executor stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let upstream_url = timeout(DEFAULT_READ_TIMEOUT, lines.next_line())
+        .await??
+        .expect("executor emits its websocket URL");
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let proxy_url = format!("ws://{}", proxy_listener.local_addr()?);
+    let legacy_executor = tokio::spawn(async move {
+        let (stream, _) = proxy_listener.accept().await?;
+        let downstream = accept_async(stream).await?;
+        let (upstream, _) = connect_async(upstream_url).await?;
+        let (mut downstream_tx, mut downstream_rx) = downstream.split();
+        let (mut upstream_tx, mut upstream_rx) = upstream.split();
+
+        let requests = async {
+            while let Some(message) = downstream_rx.next().await {
+                let mut message = message?;
+                if let Message::Text(text) = &message {
+                    let mut request: Value = serde_json::from_str(text)?;
+                    if request["method"] == "http/request"
+                        && let Some(headers) = request["params"]["headers"].as_array_mut()
+                    {
+                        for header in headers {
+                            if let Some(header) = header.as_object_mut() {
+                                header.remove("valueEnvVar");
+                            }
+                        }
+                        message = Message::Text(request.to_string().into());
+                    }
+                }
+                upstream_tx.send(message).await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+
+        let responses = async {
+            while let Some(message) = upstream_rx.next().await {
+                let mut message = message?;
+                if let Message::Text(text) = &message {
+                    let mut response: Value = serde_json::from_str(text)?;
+                    if let Some(result) = response.get_mut("result").and_then(Value::as_object_mut)
+                    {
+                        result.remove("environmentInfo");
+                        message = Message::Text(response.to_string().into());
+                    }
+                    if let Some(capabilities) = response
+                        .pointer_mut("/result/capabilities")
+                        .and_then(Value::as_object_mut)
+                    {
+                        capabilities.remove("httpHeaderEnvVars");
+                        message = Message::Text(response.to_string().into());
+                    }
+                }
+                downstream_tx.send(message).await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+
+        tokio::select! {
+            result = requests => result,
+            result = responses => result,
+        }
+    });
+    std::fs::write(
+        codex_home.path().join("environments.toml"),
+        format!(
+            "default = \"{EXECUTOR_ID}\"\ninclude_local = false\n\n[[environments]]\nid = \"{EXECUTOR_ID}\"\nurl = \"{proxy_url}\"\n"
+        ),
+    )?;
+
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .with_env_overrides(&[("HOST_MCP_TEST_TOKEN", Some("host-only-token"))])
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+    let thread_id = start_thread(&mut app_server, /*selected_capability_roots*/ None).await?;
+    let servers = mcp_server_statuses(&mut app_server, thread_id.clone()).await?;
+    assert!(servers.iter().any(|server| server.name == "host_remote"));
+    assert!(
+        servers
+            .iter()
+            .any(|server| server.name == "executor_public")
+    );
+    assert!(servers.iter().all(|server| server.name != "node_repl"));
+
+    let response = responses::mount_sse_once(
+        &responses_server,
+        responses::sse(vec![
+            responses::ev_response_created("legacy-executor-turn"),
+            responses::ev_assistant_message("legacy-executor-message", "Still works"),
+            responses::ev_completed("legacy-executor-turn"),
+        ]),
+    )
+    .await;
+    let request_id = app_server
+        .send_turn_start_request(TurnStartParams {
+            thread_id,
+            input: vec![UserInput::Text {
+                text: "Check legacy executor compatibility".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let _: TurnStartResponse =
+        timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request_id)).await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        app_server.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    assert!(
+        response
+            .single_request()
+            .tool_by_name("mcp__host_remote", "echo")
+            .is_some()
+    );
+
+    legacy_executor.abort();
+    http_server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guardian_review_does_not_discover_executor_mcp() -> Result<()> {
+    let responses_server = responses::start_mock_server().await;
+    let codex_home = TempDir::new()?;
+    let executor_home = TempDir::new()?;
+    MockResponsesConfig::new(&responses_server.uri())
+        .with_approval_policy("on-request")
+        .with_root_config("approvals_reviewer = \"auto_review\"")
+        .enable_feature(Feature::GuardianApproval)
+        .write(codex_home.path())?;
+    std::fs::write(executor_home.path().join("config.toml"), "")?;
+    let codex_bin = toml::Value::String(
+        codex_utils_cargo_bin::cargo_bin("codex")?
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let executor_home_value =
+        toml::Value::String(executor_home.path().to_string_lossy().into_owned());
+    std::fs::write(
+        codex_home.path().join("environments.toml"),
+        format!(
+            "default = \"{EXECUTOR_ID}\"\ninclude_local = false\n\n[[environments]]\nid = \"{EXECUTOR_ID}\"\nprogram = {codex_bin}\nargs = [\"exec-server\", \"--listen\", \"stdio\"]\n[environments.env]\nCODEX_HOME = {executor_home_value}\n"
+        ),
+    )?;
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+    let thread_id = start_thread(&mut app_server, /*selected_capability_roots*/ None).await?;
+
+    std::fs::write(
+        executor_home.path().join("config.toml"),
+        "[mcp_servers.unavailable_browser]\nurl = \"http://127.0.0.1:9/mcp\"\nrequired = true\nstartup_timeout_sec = 1\n",
+    )?;
+    let response_mock = responses::mount_sse_sequence(
+        &responses_server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("resp-guardian-command"),
+                responses::ev_function_call(
+                    "guardian-shell-call",
+                    "exec_command",
+                    &json!({
+                        "cmd": "echo guardian",
+                        "sandbox_permissions": "require_escalated",
+                        "justification": "Test Guardian isolation.",
+                    })
+                    .to_string(),
+                ),
+                responses::ev_completed("resp-guardian-command"),
+            ]),
+            responses::sse(vec![
+                responses::ev_response_created("resp-guardian-review"),
+                responses::ev_assistant_message(
+                    "guardian-review",
+                    &json!({
+                        "outcome": "deny",
+                        "rationale": "Guardian can review without the browser.",
+                    })
+                    .to_string(),
+                ),
+                responses::ev_completed("resp-guardian-review"),
+            ]),
+            responses::sse(vec![
+                responses::ev_response_created("resp-guardian-done"),
+                responses::ev_assistant_message("guardian-done", "Done"),
+                responses::ev_completed("resp-guardian-done"),
+            ]),
+        ],
+    )
+    .await;
+    let request_id = app_server
+        .send_turn_start_request(TurnStartParams {
+            thread_id,
+            input: vec![UserInput::Text {
+                text: "Review a command without starting the browser".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let _: TurnStartResponse =
+        timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request_id)).await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        app_server.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[1].body_json()["client_metadata"]["x-openai-subagent"],
+        "guardian"
+    );
+    let output = requests[2].function_call_output("guardian-shell-call");
+    assert!(
+        output
+            .get("output")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|output| output.contains("Guardian can review without the browser."))
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selected_executor_plugin_exposes_its_mcps_only_to_that_thread() -> Result<()> {
+    assert!(std::env::var_os(EXECUTOR_HTTP_AUTH_ENV_NAME).is_none());
     let responses_server = responses::start_mock_server().await;
     let http_listener = TcpListener::bind("127.0.0.1:0").await?;
     let http_addr = http_listener.local_addr()?;
@@ -81,6 +541,24 @@ async fn selected_executor_plugin_exposes_its_mcps_only_to_that_thread() -> Resu
         Arc::new(LocalSessionManager::default()),
         http_server_config,
     );
+    let http_mcp_router =
+        Router::new()
+            .nest_service("/mcp", http_mcp_service)
+            .layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let authorized = request
+                        .headers()
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| {
+                            value == format!("Bearer {EXECUTOR_HTTP_AUTH_ENV_VALUE}")
+                        });
+                    if !authorized {
+                        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                    }
+                    next.run(request).await
+                },
+            ));
     let (oauth_authorization_tx, mut oauth_authorization_rx) = mpsc::unbounded_channel();
     let oauth_mcp_router = Router::new()
         .nest_service("/oauth-mcp", oauth_mcp_service)
@@ -102,9 +580,11 @@ async fn selected_executor_plugin_exposes_its_mcps_only_to_that_thread() -> Resu
     let (registration_request_tx, mut registration_request_rx) = mpsc::unbounded_channel();
     let (token_request_tx, mut token_request_rx) = mpsc::unbounded_channel();
     let oauth_metadata = json!({
+        "issuer": EXECUTOR_OAUTH_MCP_URL,
         "authorization_endpoint": "https://oauth-only.invalid/authorize",
         "token_endpoint": "http://oauth-only.invalid/token",
         "registration_endpoint": "http://oauth-only.invalid/register",
+        "authorization_response_iss_parameter_supported": true,
         "scopes_supported": ["read", "write"],
         "response_types_supported": ["code"],
         "code_challenge_methods_supported": ["S256"],
@@ -145,7 +625,7 @@ async fn selected_executor_plugin_exposes_its_mcps_only_to_that_thread() -> Resu
                 }
             }),
         )
-        .nest_service("/mcp", http_mcp_service)
+        .merge(http_mcp_router)
         .merge(oauth_mcp_router);
     let http_server_handle = tokio::spawn(async move {
         let _ = axum::serve(http_listener, http_router).await;
@@ -156,6 +636,13 @@ async fn selected_executor_plugin_exposes_its_mcps_only_to_that_thread() -> Resu
     let global_callback_port = global_callback_listener.local_addr()?.port();
     drop(plugin_callback_listener);
     let codex_home = TempDir::new()?;
+    let executor_home = TempDir::new()?;
+    std::fs::write(
+        executor_home.path().join("config.toml"),
+        format!(
+            "[mcp_servers.{EXECUTOR_DISABLED_PLUGIN_SERVER_NAME}]\nurl = \"{EXECUTOR_HTTP_MCP_URL}\"\nenabled = false\n"
+        ),
+    )?;
     let root_config = format!(
         "compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 1024\nmcp_oauth_credentials_store = \"file\"\nmcp_oauth_callback_port = {global_callback_port}"
     );
@@ -181,12 +668,20 @@ async fn selected_executor_plugin_exposes_its_mcps_only_to_that_thread() -> Resu
         &oauth_credentials_path,
         serde_json::to_vec(&json!({"host": host_oauth_credential.clone()}))?,
     )?;
-    let codex_bin = toml::Value::String(
-        codex_utils_cargo_bin::cargo_bin("codex")?
-            .to_string_lossy()
-            .into_owned(),
-    );
-    let http_proxy = toml::Value::String(format!("http://{http_addr}"));
+    let mut executor = Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
+        .args(["exec-server", "--listen", "ws://127.0.0.1:0"])
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .env("CODEX_HOME", executor_home.path())
+        .env(EXECUTOR_ENV_NAME, EXECUTOR_ENV_VALUE)
+        .env(EXECUTOR_HTTP_AUTH_ENV_NAME, EXECUTOR_HTTP_AUTH_ENV_VALUE)
+        .env("HTTP_PROXY", format!("http://{http_addr}"))
+        .spawn()?;
+    let stdout = executor.stdout.take().expect("executor stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let executor_url = timeout(DEFAULT_READ_TIMEOUT, lines.next_line())
+        .await??
+        .expect("executor emits its websocket URL");
     std::fs::write(
         codex_home.path().join("environments.toml"),
         format!(
@@ -195,11 +690,7 @@ include_local = true
 
 [[environments]]
 id = "{EXECUTOR_ID}"
-program = {codex_bin}
-args = ["exec-server", "--listen", "stdio"]
-[environments.env]
-{EXECUTOR_ENV_NAME} = "{EXECUTOR_ENV_VALUE}"
-HTTP_PROXY = {http_proxy}
+url = "{executor_url}"
 "#
         ),
     )?;
@@ -220,6 +711,12 @@ HTTP_PROXY = {http_proxy}
                     "startup_timeout_sec": 10,
                 },
                 (HTTP_MCP_SERVER_NAME): {
+                    "url": EXECUTOR_HTTP_MCP_URL,
+                    "environment_id": "local",
+                    "bearer_token_env_var": EXECUTOR_HTTP_AUTH_ENV_NAME,
+                    "startup_timeout_sec": 10,
+                },
+                (EXECUTOR_DISABLED_PLUGIN_SERVER_NAME): {
                     "url": EXECUTOR_HTTP_MCP_URL,
                     "environment_id": "local",
                     "startup_timeout_sec": 10,
@@ -295,7 +792,7 @@ startup_timeout_sec = 10
         .await?;
     let response: McpServerOauthLoginResponse =
         timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request_id)).await??;
-    let authorization_url = reqwest::Url::parse(&response.authorization_url)?;
+    let authorization_url = Url::parse(&response.authorization_url)?;
     let parameters = authorization_url
         .query_pairs()
         .into_owned()
@@ -308,14 +805,14 @@ startup_timeout_sec = 10
         registration_request_rx.try_recv().is_err(),
         "configured OAuth client must skip dynamic registration"
     );
-    let mut callback_url = reqwest::Url::parse(&parameters["redirect_uri"])?;
+    let mut callback_url = Url::parse(&parameters["redirect_uri"])?;
     callback_url
         .query_pairs_mut()
         .append_pair("code", "configured-test-code")
-        .append_pair("state", &parameters["state"]);
-    reqwest::Client::builder()
-        .no_proxy()
-        .build()?
+        .append_pair("state", &parameters["state"])
+        .append_pair("iss", EXECUTOR_OAUTH_MCP_URL);
+    HttpClientBuilder::new()
+        .build_direct()?
         .get(callback_url)
         .send()
         .await?
@@ -350,7 +847,7 @@ startup_timeout_sec = 10
             .authorization_url
             .starts_with("https://oauth-only.invalid/authorize?")
     );
-    let authorization_url = reqwest::Url::parse(&response.authorization_url)?;
+    let authorization_url = Url::parse(&response.authorization_url)?;
     let client_id = authorization_url
         .query_pairs()
         .find_map(|(key, value)| (key == "client_id").then(|| value.into_owned()));
@@ -371,15 +868,15 @@ startup_timeout_sec = 10
         registration_request["redirect_uris"],
         json!([redirect_uri.clone()])
     );
-    let mut callback_url = reqwest::Url::parse(&redirect_uri)?;
+    let mut callback_url = Url::parse(&redirect_uri)?;
     assert_eq!(callback_url.port(), Some(plugin_callback_port));
     callback_url
         .query_pairs_mut()
         .append_pair("code", "executor-test-code")
-        .append_pair("state", &state);
-    reqwest::Client::builder()
-        .no_proxy()
-        .build()?
+        .append_pair("state", &state)
+        .append_pair("iss", EXECUTOR_OAUTH_MCP_URL);
+    HttpClientBuilder::new()
+        .build_direct()?
         .get(callback_url)
         .send()
         .await?
@@ -548,6 +1045,7 @@ startup_timeout_sec = 10
     assert_eq!(
         selected_server_owners,
         BTreeMap::from([
+            (EXECUTOR_DISABLED_PLUGIN_SERVER_NAME.to_string(), None),
             (
                 HTTP_MCP_SERVER_NAME.to_string(),
                 Some("executor-demo@1".to_string()),

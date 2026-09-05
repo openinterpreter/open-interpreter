@@ -1,4 +1,4 @@
-//! Bounded, best-effort previews for the v2 `/agent` status output.
+//! Bounded, best-effort previews for the v2 `/subagents` status output.
 
 use super::ThreadBufferedEvent;
 use super::ThreadEventStore;
@@ -32,7 +32,7 @@ impl AgentStatusHistoryCell {
 impl HistoryCell for AgentStatusHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = vec![
-            "/agent".magenta().into(),
+            "/subagents".magenta().into(),
             "Sub-agents running".bold().into(),
             "".into(),
         ];
@@ -158,6 +158,10 @@ fn activity_summary(item: &ThreadItem) -> Option<String> {
         }
         ThreadItem::CollabAgentToolCall { tool, .. } => {
             let action = match tool {
+                CollabAgentTool::SendMessage
+                | CollabAgentTool::FollowupTask
+                | CollabAgentTool::InterruptAgent
+                | CollabAgentTool::ListAgents => return None,
                 CollabAgentTool::SpawnAgent => "Spawned an agent",
                 CollabAgentTool::SendInput => "Sent input to an agent",
                 CollabAgentTool::ResumeAgent => "Resumed an agent",
@@ -173,6 +177,7 @@ fn activity_summary(item: &ThreadItem) -> Option<String> {
                 SubAgentActivityKind::Started => "Started",
                 SubAgentActivityKind::Interacted => "Contacted",
                 SubAgentActivityKind::Interrupted => "Interrupted",
+                SubAgentActivityKind::Completed => "Completed",
             };
             return bounded_summary(&format!("{action} {agent_path}"));
         }
@@ -187,7 +192,10 @@ fn activity_summary(item: &ThreadItem) -> Option<String> {
         ThreadItem::EnteredReviewMode { .. } => return Some("Entered review mode".to_string()),
         ThreadItem::ExitedReviewMode { .. } => return Some("Exited review mode".to_string()),
         ThreadItem::ContextCompaction { .. } => return Some("Compacted context".to_string()),
-        ThreadItem::UserMessage { .. } | ThreadItem::HookPrompt { .. } | ThreadItem::Sleep(_) => {
+        ThreadItem::UserMessage { .. }
+        | ThreadItem::HookPrompt { .. }
+        | ThreadItem::FunctionCallOutput { .. }
+        | ThreadItem::Sleep(_) => {
             return None;
         }
     };

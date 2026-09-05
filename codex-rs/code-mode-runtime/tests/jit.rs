@@ -29,6 +29,7 @@ async fn code_mode_runs_with_jit_disabled() {
     assert_eq!(
         response,
         RuntimeResponse::Result {
+            code_mode_host_duration: None,
             cell_id,
             content_items: Vec::new(),
             error_text: None,

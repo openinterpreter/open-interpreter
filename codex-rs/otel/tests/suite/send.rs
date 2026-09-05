@@ -107,6 +107,26 @@ fn send_builds_payload_with_tags_and_histograms() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn histogram_uses_explicit_bucket_boundaries() -> Result<()> {
+    let (metrics, exporter) = build_metrics_with_defaults(&[])?;
+
+    metrics.histogram_with_boundaries(
+        "codex.payload_bytes",
+        /*value*/ 1024,
+        &[256.0, 1024.0, 4096.0],
+        &[],
+    )?;
+    metrics.shutdown()?;
+
+    assert_eq!(
+        histogram_data(&latest_metrics(&exporter), "codex.payload_bytes"),
+        (vec![256.0, 1024.0, 4096.0], vec![0, 1, 0, 0], 1024.0, 1)
+    );
+
+    Ok(())
+}
+
 // Ensures defaults merge per line and overrides take precedence.
 #[test]
 fn send_merges_default_tags_per_line() -> Result<()> {

@@ -384,6 +384,7 @@ async fn restore_thread_input_state_restores_pending_steers_without_downgrading_
             rejected_steer_history_records: VecDeque::new(),
             queued_user_messages,
             queued_user_message_history_records: VecDeque::new(),
+            recovered_queue: false,
             user_turn_pending_start: false,
             submit_pending_steers_after_interrupt: false,
             current_collaboration_mode: chat.current_collaboration_mode.clone(),
@@ -891,11 +892,11 @@ async fn esc_with_pending_steers_overrides_agent_command_interrupt_behavior() {
     }
 
     chat.bottom_pane
-        .set_composer_text("/agent ".to_string(), Vec::new(), Vec::new());
+        .set_composer_text("/subagents ".to_string(), Vec::new(), Vec::new());
     chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     next_interrupt_op(&mut op_rx);
-    assert_eq!(chat.bottom_pane.composer_text(), "/agent ");
+    assert_eq!(chat.bottom_pane.composer_text(), "/subagents ");
 }
 
 #[tokio::test]

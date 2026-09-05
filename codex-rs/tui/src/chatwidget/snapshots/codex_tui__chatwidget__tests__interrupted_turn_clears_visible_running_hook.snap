@@ -1,8 +1,18 @@
 ---
 source: tui/src/chatwidget/tests/status_and_layout.rs
-expression: "format!(\"before interrupt:\\n{before_interrupt}after interrupt:\\n{}\",\nactive_hook_blob(&chat))"
+expression: "format!(\"before interrupt:\\n{before_interrupt}\\nafter interrupt:\\n{}\",\nhook_status_frame(&chat, 80))"
 ---
 before interrupt:
-• Running PreToolUse hook: checking command policy
+"                                                                                "
+"• Working (0s • esc to interrupt) · checking command policy                     "
+"                                                                                "
+"                                                                                "
+"› Ask Codex to do anything                                                      "
+"                                                                                "
+"  gpt-5.6-sol default · /tmp/project                                            "
 after interrupt:
-<empty>
+"                                                                                "
+"                                                                                "
+"› Ask Codex to do anything                                                      "
+"                                                                                "
+"  gpt-5.6-sol default · /tmp/project                                            "

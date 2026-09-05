@@ -4,31 +4,50 @@ use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use codex_app_server_protocol::AdditionalContextEntry;
 use codex_app_server_protocol::AdditionalContextKind;
+use codex_app_server_protocol::ItemCompletedNotification;
+use codex_app_server_protocol::ItemStartedNotification;
+use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadInjectItemsParams;
 use codex_app_server_protocol::ThreadInjectItemsResponse;
+use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
+use codex_app_server_protocol::TurnStartedNotification;
+use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::TurnToolOutput;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_core::RolloutRecorder;
 use codex_features::Feature;
+use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ResponseItem;
 use codex_rollout::InitialHistory;
 use codex_rollout::RolloutItem;
+use codex_state::StateRuntime;
+use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses;
 use core_test_support::responses::strip_response_item_id;
 use core_test_support::responses::strip_response_item_ids_from_json;
 use serde_json::Value;
+use serde_json::json;
 use std::collections::HashMap;
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+#[test_case(ThreadHistoryMode::Legacy; "legacy")]
+#[test_case(ThreadHistoryMode::Paginated; "paginated")]
 #[tokio::test]
-async fn thread_inject_items_adds_raw_response_items_to_thread_history() -> Result<()> {
+async fn thread_inject_items_adds_raw_response_items_to_thread_history(
+    history_mode: ThreadHistoryMode,
+) -> Result<()> {
     let server = responses::start_mock_server().await;
     let body = responses::sse(vec![
         responses::ev_response_created("resp-1"),
@@ -39,8 +58,15 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history() -> Resu
 
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
+        .enable_feature(Feature::Sqlite)
         .enable_feature(Feature::RetainClientDeveloperMessages)
+        .with_extra_config("[memories]\ndisable_on_external_context = true")
         .write(codex_home.path())?;
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".into(),
+    )
+    .await?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -50,6 +76,7 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history() -> Resu
     let thread_req = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
+            history_mode: Some(history_mode),
             ..Default::default()
         })
         .await?;
@@ -78,6 +105,13 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history() -> Resu
     let injected_developer_item = developer_item("Injected developer context");
     let marker_shaped_developer_item =
         developer_item("<image_resize_notice>\nclient message\n</image_resize_notice>");
+    let named_tool_output = json!({
+        "type": "function_call_output",
+        "name": "send_message_to_thread",
+        "namespace": "codex_app",
+        "output": "Another agent delegated this task.",
+    });
+    let named_tool_item: ResponseItem = serde_json::from_value(named_tool_output.clone())?;
 
     let inject_req = mcp
         .send_thread_inject_items_request(ThreadInjectItemsParams {
@@ -86,11 +120,21 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history() -> Resu
                 serde_json::to_value(&injected_item)?,
                 serde_json::to_value(&injected_developer_item)?,
                 serde_json::to_value(&marker_shaped_developer_item)?,
+                named_tool_output.clone(),
             ],
         })
         .await?;
     let _response: ThreadInjectItemsResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(inject_req)).await??;
+    assert!(response_mock.requests().is_empty());
+
+    assert_eq!(
+        state_db
+            .get_thread_memory_mode(ThreadId::from_string(&thread.id)?)
+            .await?
+            .as_deref(),
+        Some("polluted")
+    );
 
     let rollout_path = thread.path.as_ref().context("thread path missing")?;
     let history = RolloutRecorder::get_rollout_history(rollout_path).await?;
@@ -114,6 +158,7 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history() -> Resu
             item == &injected_item
                 || item == &injected_developer_item
                 || item == &marker_shaped_developer_item
+                || item == &named_tool_item
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -122,6 +167,7 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history() -> Resu
             (injected_item.clone(), None),
             (injected_developer_item.clone(), Some(true)),
             (marker_shaped_developer_item.clone(), Some(true)),
+            (named_tool_item, None),
         ]
     );
 
@@ -233,6 +279,83 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history() -> Resu
         injected_index < user_prompt_index,
         "injected items should be sent before the user prompt"
     );
+    assert!(
+        model_input.contains(&named_tool_output),
+        "named unpaired tool output should be sent in the next model request"
+    );
+
+    let delegated_mock = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![responses::ev_completed("resp-delegated")]),
+    )
+    .await;
+    mcp.clear_message_buffer();
+    let delegated_req = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: Vec::new(),
+            tool_output: Some(Box::new(TurnToolOutput {
+                name: "send_message_to_thread".to_string(),
+                namespace: Some("codex_app".to_string()),
+                output: FunctionCallOutputBody::Text("Start a delegated turn.".to_string()),
+            })),
+            ..Default::default()
+        })
+        .await?;
+    let TurnStartResponse { turn } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(delegated_req)).await??;
+    let turn_started: TurnStartedNotification =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("turn/started")).await??;
+    let item_started: ItemStartedNotification =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("item/started")).await??;
+    let item_completed: ItemCompletedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("item/completed"),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    assert_eq!(turn.id, turn_started.turn.id);
+    assert_eq!(turn_started.turn.status, TurnStatus::InProgress);
+    assert_eq!(item_completed.turn_id, turn_started.turn.id);
+    assert_eq!(item_started.item, item_completed.item);
+    assert!(matches!(
+        &item_completed.item,
+        ThreadItem::FunctionCallOutput {
+            name,
+            namespace,
+            output: FunctionCallOutputBody::Text(output),
+            ..
+        } if name == "send_message_to_thread"
+            && namespace.as_deref() == Some("codex_app")
+            && output == "Start a delegated turn."
+    ));
+    assert!(
+        delegated_mock
+            .single_request()
+            .input()
+            .into_iter()
+            .any(|item| item["type"] == "function_call_output"
+                && item["output"] == "Start a delegated turn."),
+        "the delegated turn must preserve the original model-visible tool output"
+    );
+    let resume_req = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread.id,
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_req)).await??;
+    assert_eq!(thread.turns.len(), 2);
+    assert!(thread.turns.iter().any(|turn| {
+        turn.id == turn_started.turn.id
+            && turn.status == TurnStatus::Completed
+            && turn.items.contains(&item_completed.item)
+    }));
 
     Ok(())
 }

@@ -52,6 +52,7 @@ pub struct ExecRequest {
     pub cwd: PathUri,
     pub env: HashMap<String, String>,
     pub(crate) exec_server_env_config: Option<ExecServerEnvConfig>,
+    pub(crate) exec_server_shell_snapshot: Option<codex_exec_server::ShellSnapshotRequest>,
     pub network: Option<NetworkProxy>,
     pub network_environment_id: Option<String>,
     pub expiration: ExecExpiration,
@@ -59,6 +60,8 @@ pub struct ExecRequest {
     pub sandbox: SandboxType,
     pub windows_sandbox_policy_cwd: PathUri,
     pub windows_sandbox_workspace_roots: Vec<AbsolutePathBuf>,
+    // TODO(anp): Reconcile these backend copies with TurnEnvironment::sandbox_context
+    // and exec_server_sandbox so local and remote launches use the same settings.
     pub windows_sandbox_level: WindowsSandboxLevel,
     pub windows_sandbox_private_desktop: bool,
     pub permission_profile: PermissionProfile,
@@ -94,6 +97,7 @@ impl ExecRequest {
             cwd,
             env,
             exec_server_env_config: None,
+            exec_server_shell_snapshot: None,
             network,
             network_environment_id,
             expiration,
@@ -182,6 +186,7 @@ impl ExecRequest {
             cwd,
             env,
             exec_server_env_config: None,
+            exec_server_shell_snapshot: None,
             network,
             network_environment_id,
             expiration,

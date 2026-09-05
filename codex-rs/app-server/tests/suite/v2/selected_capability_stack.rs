@@ -39,6 +39,7 @@ use pretty_assertions::assert_eq;
 use pretty_assertions::assert_ne;
 use serde_json::json;
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
 use tokio::process::Child;
@@ -62,6 +63,93 @@ const NO_SELECTED_SKILLS_MESSAGE: &str = "No selected-environment skills are cur
 const MCP_SERVER_NAME: &str = "executor_probe";
 const MCP_CALL_ID: &str = "selected-executor-mcp-call";
 const CONNECTOR_ID: &str = "calendar";
+
+#[test_case(false; "direct selected root discovery")]
+#[test_case(true; "batched executor capability discovery")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn managed_plugins_requirement_disables_selected_executor_plugin_capabilities(
+    executor_capability_discovery: bool,
+) -> Result<()> {
+    let responses_server = responses::start_mock_server().await;
+    let (apps_url, apps_server_handle) = start_apps_server_with_delays(
+        vec![AppInfo {
+            id: CONNECTOR_ID.to_string(),
+            name: "Calendar".to_string(),
+            description: None,
+            logo_url: None,
+            logo_url_dark: None,
+            icon_assets: None,
+            icon_dark_assets: None,
+            distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
+            install_url: None,
+            is_accessible: false,
+            is_enabled: true,
+            plugin_display_names: Vec::new(),
+        }],
+        vec![connector_tool(CONNECTOR_ID, "Calendar")?],
+        Duration::ZERO,
+        Duration::ZERO,
+    )
+    .await?;
+    let fixture = selected_capability_fixture(&responses_server.uri(), &apps_url)?;
+    let config_path = fixture.codex_home.path().join("config.toml");
+    let config = std::fs::read_to_string(&config_path)?.replace(
+        "executor_capability_discovery = true",
+        &format!("executor_capability_discovery = {executor_capability_discovery}\nplugins = true"),
+    );
+    std::fs::write(config_path, config)?;
+    std::fs::write(
+        fixture.codex_home.path().join("requirements.toml"),
+        "[features]\nplugins = false\n",
+    )?;
+    let response_mock = responses::mount_sse_once(
+        &responses_server,
+        responses::sse(vec![
+            responses::ev_response_created("disabled-selected-plugin"),
+            responses::ev_assistant_message("disabled-selected-plugin-message", "Done"),
+            responses::ev_completed("disabled-selected-plugin"),
+        ]),
+    )
+    .await;
+
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(fixture.codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    timeout(READ_TIMEOUT, app_server.initialize()).await??;
+    let thread_id = start_thread(
+        &mut app_server,
+        fixture.selected_root,
+        fixture.environment_cwd.clone(),
+    )
+    .await?;
+    let mut exec_server =
+        spawn_exec_server(fixture.codex_home.path(), &fixture.exec_server_url).await?;
+    add_environment(&mut app_server, &fixture.exec_server_url).await?;
+
+    run_turn(
+        &mut app_server,
+        &thread_id,
+        "Inspect the disabled selected plugin capabilities",
+        fixture.environment_cwd,
+    )
+    .await?;
+
+    assert!(
+        !fixture.pid_file.exists(),
+        "the disabled selected plugin MCP server must never start"
+    );
+    assert_selected_capabilities_absent(&response_mock.single_request());
+
+    exec_server.kill().await?;
+    apps_server_handle.abort();
+    let _ = apps_server_handle.await;
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selected_capability_stack_tracks_environment_availability_and_resume() -> Result<()> {

@@ -1,0 +1,24 @@
+[package]
+name = "codex-worktree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false
+test = false
+
+[dependencies]
+anyhow = { workspace = true }
+codex-git-utils = { workspace = true }
+codex-protocol = { workspace = true }
+dunce = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use codex_exec_server_protocol::JSONRPCMessage;
 use tokio::sync::mpsc;
@@ -167,13 +168,26 @@ async fn run_connection(
                 dispatcher.handle_malformed_message(reason).await
             }
             JsonRpcConnectionEvent::Message(message) => match message {
-                JSONRPCMessage::Request(request) => dispatcher.dispatch_request(request).await,
+                JSONRPCMessage::Request(request) => {
+                    dispatcher
+                        .dispatch_request(request, tracing::Span::none(), Instant::now())
+                        .await
+                }
                 JSONRPCMessage::Notification(notification) => {
                     dispatcher.handle_notification(notification).await
                 }
                 JSONRPCMessage::Response(response) => dispatcher.handle_response(response),
                 JSONRPCMessage::Error(error) => dispatcher.handle_error(error),
             },
+            JsonRpcConnectionEvent::QueuedRequest {
+                request,
+                request_span,
+                queued_at,
+            } => {
+                dispatcher
+                    .dispatch_request(request, request_span, queued_at)
+                    .await
+            }
             JsonRpcConnectionEvent::Disconnected { reason } => {
                 if let Some(reason) = reason {
                     debug!("exec-server connection disconnected: {reason}");
@@ -217,6 +231,7 @@ fn complete_queued_client_responses(
             JsonRpcConnectionEvent::Message(
                 JSONRPCMessage::Request(_) | JSONRPCMessage::Notification(_),
             )
+            | JsonRpcConnectionEvent::QueuedRequest { .. }
             | JsonRpcConnectionEvent::MalformedMessage { .. }
             | JsonRpcConnectionEvent::Disconnected { .. } => continue,
         };
@@ -560,6 +575,7 @@ mod tests {
             argv: sleep_then_print_argv(),
             cwd: PathUri::from_host_native_path(std::env::current_dir().expect("cwd"))
                 .expect("cwd URI"),
+            shell_snapshot: None,
             env_policy: None,
             env,
             tty: false,

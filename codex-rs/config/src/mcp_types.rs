@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use base64::Engine;
@@ -71,13 +72,24 @@ impl fmt::Display for McpServerDisabledReason {
     }
 }
 
-/// Per-tool approval settings for a single MCP server tool.
+/// Per-tool settings for a single MCP server tool.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct McpServerToolConfig {
     /// Approval mode for this tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_mode: Option<AppToolApproval>,
+
+    /// Token budget for this tool's output, before the standard 20% serialization allowance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_limit: Option<NonZeroUsize>,
+}
+
+impl McpServerToolConfig {
+    /// Applies the stricter explicit output budget without changing approval policy.
+    pub fn restrict_output_token_limit(&mut self, limit: Option<NonZeroUsize>) {
+        self.output_token_limit = self.output_token_limit.into_iter().chain(limit).min();
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
@@ -145,6 +157,10 @@ pub struct McpServerOAuthConfig {
     /// Explicit OAuth client identifier to present during authorization and token exchange.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+
+    /// Registered callback URL associated with this OAuth client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
 
     /// Fixed callback port that takes precedence over Codex's global OAuth callback port.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -246,7 +262,7 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_resource: Option<String>,
 
-    /// Per-tool approval settings keyed by tool name.
+    /// Per-tool settings keyed by tool name.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tools: HashMap<String, McpServerToolConfig>,
 }
@@ -256,10 +272,13 @@ impl McpServerConfig {
         self.environment_id == DEFAULT_MCP_SERVER_ENVIRONMENT_ID
     }
 
-    /// Keeps local OAuth credentials compatible while isolating executor-owned servers.
+    /// Keeps local OAuth credentials compatible while reserving managed credential namespaces.
     pub fn oauth_credential_name<'a>(&self, server_name: &'a str) -> Cow<'a, str> {
         if self.is_local_environment() {
-            if server_name.starts_with("executor:") || server_name.starts_with("local:") {
+            if server_name.starts_with("executor:")
+                || server_name.starts_with("local:")
+                || server_name.starts_with("ema-idp:")
+            {
                 Cow::Owned(format!("local:{server_name}"))
             } else {
                 Cow::Borrowed(server_name)

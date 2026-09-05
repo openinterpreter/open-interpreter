@@ -136,19 +136,20 @@ pub(super) async fn run_main_inner(
     }
 
     let reuse_implicit_local_daemon = !workload_identity_selected
-        && can_reuse_implicit_local_daemon(
-            &cli_kv_overrides,
-            &launch_loader_overrides,
-            strict_config,
-            cli.bypass_hook_trust,
-        );
+        && (cli.agents_overview
+            || can_reuse_implicit_local_daemon(
+                &cli_kv_overrides,
+                &launch_loader_overrides,
+                strict_config,
+                cli.bypass_hook_trust,
+            ));
     let search_only_config_override = !workload_identity_selected
         && cli.web_search
         && startup_preflight::has_only_search_config_override(&cli_kv_overrides)
         && loader_overrides_are_default(&launch_loader_overrides)
         && !strict_config
         && !cli.bypass_hook_trust;
-    let initial_screen = if cli.resume_picker || cli.fork_picker {
+    let initial_screen = if cli.resume_picker || cli.fork_picker || cli.agents_overview {
         startup_draft::StartupDraftInitialScreen::SessionPicker
     } else if !cli.oss
         && explicit_remote_endpoint.is_none()
@@ -323,6 +324,9 @@ pub(super) async fn run_main_inner(
 
     let overrides = ConfigOverrides {
         model,
+        wire_api: cli
+            .chat_completions
+            .then_some(codex_model_provider_info::WireApi::Chat),
         approval_policy,
         sandbox_mode,
         cwd: cwd_override,
@@ -399,6 +403,17 @@ pub(super) async fn run_main_inner(
     };
     if let Some(metrics) = otel.as_ref().and_then(codex_otel::OtelProvider::metrics) {
         let _ = codex_otel::record_process_start_once(metrics, otel_originator.as_str());
+        // Count the selected mode once per TUI launch, independently of reconnects.
+        let app_server_mode = match &app_server_target {
+            AppServerTarget::Embedded => "in_process",
+            AppServerTarget::LocalDaemon { .. } => "local_daemon",
+            AppServerTarget::Remote { .. } => "remote",
+        };
+        let _ = metrics.counter(
+            "codex.tui.start",
+            /*inc*/ 1,
+            &[("app_server_mode", app_server_mode)],
+        );
         let telemetry =
             codex_rollout::sqlite_telemetry_recorder(metrics.clone(), otel_originator.as_str());
         let _ = codex_state::install_process_db_telemetry(telemetry);

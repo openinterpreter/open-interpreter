@@ -1,18 +1,17 @@
 use crate::agent::role::apply_role_to_config;
-use crate::agent::role::apply_role_to_config_for_multi_agent_v2;
 use crate::config::Config;
 use crate::config::DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
 use crate::config::HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS;
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
-use crate::session::turn_context::TurnEnvironment;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::BaseInstructions;
@@ -171,45 +170,38 @@ pub(crate) fn parse_collab_input(
 /// Builds the base config snapshot for a newly spawned sub-agent.
 ///
 /// The returned config starts from the parent's effective config and then refreshes the
-/// runtime-owned fields carried by the turn and selected environment, including model selection,
-/// reasoning settings, approval policy, sandbox, and cwd. Role-specific overrides are layered
+/// runtime-owned fields carried by the turn, including model selection, reasoning settings,
+/// approval policy, sandbox, and cwd. Role-specific overrides are layered
 /// after this step; skipping this helper and cloning stale config state directly can send the child
 /// agent out with the wrong provider or runtime policy.
 pub(crate) fn build_agent_spawn_config(
     base_instructions: &BaseInstructions,
     turn: &TurnContext,
-    environment: Option<&TurnEnvironment>,
 ) -> Result<Config, FunctionCallError> {
-    let mut config = build_agent_shared_config(turn, environment)?;
+    let mut config = build_agent_shared_config(turn)?;
     config.base_instructions = Some(base_instructions.text.clone());
     config.base_instructions_provenance = base_instructions.provenance.clone();
     Ok(config)
 }
 
-pub(crate) fn build_agent_resume_config(
-    turn: &TurnContext,
-    environment: Option<&TurnEnvironment>,
-) -> Result<Config, FunctionCallError> {
-    let mut config = build_agent_shared_config(turn, environment)?;
+pub(crate) fn build_agent_resume_config(turn: &TurnContext) -> Result<Config, FunctionCallError> {
+    let mut config = build_agent_shared_config(turn)?;
     // For resume, keep base instructions sourced from rollout/session metadata.
     config.base_instructions = None;
     config.base_instructions_provenance = None;
     Ok(config)
 }
 
-fn build_agent_shared_config(
-    turn: &TurnContext,
-    environment: Option<&TurnEnvironment>,
-) -> Result<Config, FunctionCallError> {
+fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, FunctionCallError> {
     let base_config = turn.config.clone();
     let mut config = (*base_config).clone();
-    config.model = Some(turn.model_info.slug.clone());
+    config.model = Some(turn.model_info().slug.clone());
     config.model_provider = turn.provider.info().clone();
     config.model_reasoning_effort = turn
-        .reasoning_effort
-        .clone()
-        .or_else(|| turn.model_info.default_reasoning_level.clone());
-    config.model_reasoning_summary = Some(turn.reasoning_summary);
+        .reasoning_effort()
+        .or(turn.model_info().default_reasoning_level.as_ref())
+        .cloned();
+    config.model_reasoning_summary = Some(turn.reasoning_summary());
     config.developer_instructions = turn.developer_instructions.clone();
     if turn.multi_agent_version == MultiAgentVersion::V2
         && let Some(developer_instructions) = turn
@@ -220,7 +212,7 @@ fn build_agent_shared_config(
     {
         config.developer_instructions = Some(developer_instructions);
     }
-    apply_spawn_agent_runtime_overrides(&mut config, turn, environment)?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn)?;
 
     Ok(config)
 }
@@ -238,13 +230,11 @@ pub(crate) fn reject_full_fork_agent_type_override(
 
 /// Copies runtime-only turn state onto a child config before it is handed to `AgentControl`.
 ///
-/// These values are chosen by the live turn and selected environment rather than persisted config,
-/// so leaving them stale can make a child agent disagree with its parent about approval policy,
-/// cwd, or sandboxing.
+/// These values are chosen by the live turn rather than persisted config, so leaving them stale can
+/// make a child agent disagree with its parent about approval policy, cwd, or sandboxing.
 pub(crate) fn apply_spawn_agent_runtime_overrides(
     config: &mut Config,
     turn: &TurnContext,
-    environment: Option<&TurnEnvironment>,
 ) -> Result<(), FunctionCallError> {
     config
         .permissions
@@ -257,12 +247,14 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
     #[allow(deprecated)]
     let turn_cwd = turn.cwd.clone();
     config.cwd = turn_cwd;
-    let permission_profile = environment
-        .map(|environment| environment.permission_profile().clone())
-        .unwrap_or_else(|| turn.permission_profile());
     config
         .permissions
-        .set_permission_profile(permission_profile)
+        .set_permission_profile_from_session_snapshot(
+            turn.config
+                .permissions
+                .permission_profile_state()
+                .snapshot(),
+        )
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("permission_profile is invalid: {err}"))
         })?;
@@ -317,8 +309,8 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
 
     if let Some(reasoning_effort) = requested_reasoning_effort {
         validate_spawn_agent_reasoning_effort(
-            &turn.model_info.slug,
-            &turn.model_info.supported_reasoning_levels,
+            &turn.model_info().slug,
+            &turn.model_info().supported_reasoning_levels,
             &reasoning_effort,
         )?;
         config.model_reasoning_effort = Some(reasoning_effort);
@@ -330,16 +322,13 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
 pub(crate) async fn apply_spawn_agent_service_tier(
     session: &Session,
     config: &mut Config,
-    parent_service_tier: Option<&str>,
-    requested_service_tier: Option<&str>,
 ) -> Result<(), FunctionCallError> {
-    let candidate_service_tiers = [
-        config.service_tier.clone(),
-        requested_service_tier.map(str::to_string),
-        parent_service_tier.map(str::to_string),
-    ];
-    if candidate_service_tiers.iter().all(Option::is_none) {
+    let Some(service_tier) = session.services.agent_control.root_service_tier() else {
         config.service_tier = None;
+        return Ok(());
+    };
+    if service_tier == SERVICE_TIER_DEFAULT_REQUEST_VALUE {
+        config.service_tier = Some(service_tier);
         return Ok(());
     }
 
@@ -354,31 +343,9 @@ pub(crate) async fn apply_spawn_agent_service_tier(
         .get_model_info(model.as_str(), &config.to_models_manager_config())
         .await;
 
-    if let Some(requested_service_tier) = requested_service_tier
-        && !model_info.supports_service_tier(requested_service_tier)
-    {
-        let supported_service_tiers = if model_info.service_tiers.is_empty() {
-            "none".to_string()
-        } else {
-            model_info
-                .service_tiers
-                .iter()
-                .map(|tier| tier.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        return Err(FunctionCallError::RespondToModel(format!(
-            "Service tier `{requested_service_tier}` is not supported for model `{model}`. Supported service tiers: {supported_service_tiers}"
-        )));
-    }
-
-    config.service_tier =
-        candidate_service_tiers
-            .into_iter()
-            .flatten()
-            .find(|candidate_service_tier| {
-                model_info.supports_service_tier(candidate_service_tier.as_str())
-            });
+    config.service_tier = model_info
+        .supports_service_tier(service_tier.as_str())
+        .then_some(service_tier);
     Ok(())
 }
 
@@ -389,15 +356,9 @@ pub(crate) async fn apply_spawn_agent_role(
 ) -> Result<(), FunctionCallError> {
     let previous_model = config.model.clone();
     let previous_reasoning_effort = config.model_reasoning_effort.clone();
-    if session.multi_agent_version() == Some(MultiAgentVersion::V2) {
-        apply_role_to_config_for_multi_agent_v2(config, role_name)
-            .await
-            .map_err(FunctionCallError::RespondToModel)?;
-    } else {
-        apply_role_to_config(config, role_name)
-            .await
-            .map_err(FunctionCallError::RespondToModel)?;
-    }
+    apply_role_to_config(config, role_name)
+        .await
+        .map_err(FunctionCallError::RespondToModel)?;
     if config.model == previous_model && config.model_reasoning_effort == previous_reasoning_effort
     {
         return Ok(());

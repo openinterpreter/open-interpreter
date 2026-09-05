@@ -101,6 +101,8 @@ pub struct ExecParams {
     pub network: Option<NetworkProxy>,
     pub network_environment_id: Option<String>,
     pub sandbox_permissions: SandboxPermissions,
+    // TODO(anp): Reconcile these launch settings with TurnEnvironment::sandbox_context
+    // so turn-scoped execution uses the selected environment's backend.
     pub windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel,
     pub windows_sandbox_private_desktop: bool,
     pub justification: Option<String>,
@@ -161,14 +163,6 @@ pub enum ExecExpirationOutcome {
     Cancelled,
 }
 
-impl From<Option<u64>> for ExecExpiration {
-    fn from(timeout_ms: Option<u64>) -> Self {
-        timeout_ms.map_or(ExecExpiration::DefaultTimeout, |timeout_ms| {
-            ExecExpiration::Timeout(Duration::from_millis(timeout_ms))
-        })
-    }
-}
-
 impl From<u64> for ExecExpiration {
     fn from(timeout_ms: u64) -> Self {
         ExecExpiration::Timeout(Duration::from_millis(timeout_ms))
@@ -205,6 +199,7 @@ impl ExecExpiration {
     }
 
     /// If ExecExpiration is a timeout, returns the timeout in milliseconds.
+    #[cfg(target_os = "windows")]
     pub(crate) fn timeout_ms(&self) -> Option<u64> {
         match self {
             ExecExpiration::Timeout(duration) => Some(duration.as_millis() as u64),
@@ -415,6 +410,7 @@ pub(crate) async fn execute_exec_request(
         cwd,
         env,
         exec_server_env_config: _,
+        exec_server_shell_snapshot: _,
         network,
         expiration,
         capture_policy,

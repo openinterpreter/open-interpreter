@@ -61,17 +61,26 @@ fn empty_layers_compose_to_none() {
 fn cloud_auth_requirements_do_not_override_local_or_discard_other_policy() {
     let local = RequirementsLayerEntry::from_toml(
         RequirementSource::Unknown,
-        "allowed_login_methods = [\"api\"]",
+        r#"allowed_login_methods = ["api"]
+cli_auth_credentials_store = "keyring"
+chatgpt_base_url = "https://managed.example/backend-api/""#,
     );
     let cloud = layer(
         "req_cloud",
         "Cloud policy",
-        "allowed_login_methods = [\"saml\"]\nallowed_chatgpt_workspaces = \"invalid\"\nallow_login_shell = false",
+        r#"allowed_login_methods = ["saml"]
+allowed_chatgpt_workspaces = "invalid"
+cli_auth_credentials_store = "invalid"
+chatgpt_base_url = false
+allow_login_shell = false"#,
     );
     assert_eq!(
         compose(vec![local, cloud]).expect("cloud auth cannot invalidate enterprise policy"),
         Some(expected_requirements(
-            "allowed_login_methods = [\"api\"]\nallow_login_shell = false"
+            r#"allowed_login_methods = ["api"]
+cli_auth_credentials_store = "keyring"
+chatgpt_base_url = "https://managed.example/backend-api/"
+allow_login_shell = false"#
         ))
     );
 }
@@ -87,6 +96,7 @@ allowed_approval_policies = ["on-request"]
 allowed_sandbox_modes = ["workspace-write"]
 default_permissions = ":workspace"
 allow_remote_control = true
+additional_developer_instructions = "Lower-priority instructions."
 
 [allowed_permission_profiles]
 ":read-only" = true
@@ -101,6 +111,7 @@ allowed_approval_policies = ["never"]
 allowed_sandbox_modes = ["read-only"]
 default_permissions = ":read-only"
 allow_remote_control = false
+additional_developer_instructions = ""
 
 [allowed_permission_profiles]
 ":danger-full-access" = false
@@ -119,6 +130,7 @@ allowed_approval_policies = ["never"]
 allowed_sandbox_modes = ["read-only"]
 default_permissions = ":read-only"
 allow_remote_control = false
+additional_developer_instructions = ""
 
 [allowed_permission_profiles]
 ":danger-full-access" = false
@@ -592,6 +604,114 @@ fn network_maps_use_regular_toml_merge() {
 "/tmp/high.sock" = "allow"
 "/tmp/low.sock" = "allow"
 "/tmp/shared.sock" = "allow"
+"#
+        )
+    );
+}
+
+#[test]
+fn browser_and_computer_use_requirements_use_regular_toml_merge() {
+    let composed = compose(vec![
+        layer(
+            "req_low",
+            "Low",
+            r#"
+allow_browser_and_computer_use = true
+
+[browser_use]
+allow_history_access = true
+allow_global_persistent_approval = true
+
+[browser_use.default_origin_policy]
+access = "allow"
+access_approval_lifetime = "thread"
+
+[browser_use.origins."https://example.com"]
+access = "deny"
+downloads = "allow"
+
+[computer_use]
+allow_locked_computer_use = true
+default_app_access = "allow"
+
+[computer_use.macos.bundle_ids]
+"com.apple.Safari" = "deny"
+
+[computer_use.windows.aumids]
+"Microsoft.Paint_8wekyb3d8bbwe!App" = "allow"
+"#,
+        ),
+        layer(
+            "req_high",
+            "High",
+            r#"
+allow_browser_and_computer_use = false
+
+[browser_use]
+allow_history_access = false
+allow_global_persistent_approval = false
+
+[browser_use.default_origin_policy]
+persistent_approval = false
+access_approval_lifetime = "turn"
+
+[browser_use.origins."https://example.com"]
+downloads = "deny"
+uploads = "deny"
+
+[computer_use]
+allow_persistent_approval = false
+
+[computer_use.macos.bundle_ids]
+"com.apple.Safari" = "allow"
+
+[[computer_use.windows.exes]]
+publisher_name = "CN=Google LLC"
+product_name = "Google Chrome"
+binary_name = "chrome.exe"
+access = "deny"
+"#,
+        ),
+    ])
+    .expect("compose requirements")
+    .expect("requirements present");
+
+    assert_eq!(
+        composed,
+        expected_requirements(
+            r#"
+allow_browser_and_computer_use = false
+
+[browser_use]
+allow_history_access = false
+allow_global_persistent_approval = false
+
+[browser_use.default_origin_policy]
+access = "allow"
+persistent_approval = false
+access_approval_lifetime = "turn"
+
+[browser_use.origins."https://example.com"]
+access = "deny"
+downloads = "deny"
+uploads = "deny"
+
+[computer_use]
+allow_locked_computer_use = true
+allow_persistent_approval = false
+default_app_access = "allow"
+
+[computer_use.macos.bundle_ids]
+"com.apple.Safari" = "allow"
+
+[computer_use.windows.aumids]
+"Microsoft.Paint_8wekyb3d8bbwe!App" = "allow"
+
+[[computer_use.windows.exes]]
+publisher_name = "CN=Google LLC"
+product_name = "Google Chrome"
+binary_name = "chrome.exe"
+access = "deny"
 "#
         )
     );

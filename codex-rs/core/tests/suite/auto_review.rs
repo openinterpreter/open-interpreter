@@ -2,10 +2,14 @@ use codex_core::TurnInputRequest;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use anyhow::Result;
+use codex_config::test_support::CloudConfigBundleFixture;
+use codex_core::config::Constrained;
 use codex_extension_api::ApprovalReviewContributor;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionFuture;
+use codex_extension_api::ExtensionMetrics;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_login::CodexAuth;
@@ -28,6 +32,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::request_permissions::PermissionGrantScope;
+use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::user_input::UserInput;
 use core_test_support::TempDirExt;
@@ -49,6 +54,7 @@ use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_with_timeout;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use test_case::test_case;
 use tokio::time::timeout;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -59,14 +65,33 @@ use wiremock::matchers::path;
 struct ApprovedReviewContributor;
 
 impl ApprovalReviewContributor for ApprovedReviewContributor {
-    fn contribute<'a>(
+    fn fast_decision<'a>(
         &'a self,
         _session_store: &'a ExtensionData,
         _thread_store: &'a ExtensionData,
         prompt: &'a str,
+        extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
     ) -> ExtensionFuture<'a, Option<ReviewDecision>> {
         Box::pin(async move {
+            assert!(extension_metrics.is_some());
             assert!(prompt.contains("\"tool\":\"request_permissions\""));
+            Some(ReviewDecision::Approved)
+        })
+    }
+}
+
+struct EscalationApprovingReviewContributor;
+
+impl ApprovalReviewContributor for EscalationApprovingReviewContributor {
+    fn fast_decision<'a>(
+        &'a self,
+        _session_store: &'a ExtensionData,
+        _thread_store: &'a ExtensionData,
+        prompt: &'a str,
+        _extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
+    ) -> ExtensionFuture<'a, Option<ReviewDecision>> {
+        Box::pin(async move {
+            assert!(prompt.contains("\"sandbox_permissions\":\"require_escalated\""));
             Some(ReviewDecision::Approved)
         })
     }
@@ -148,6 +173,241 @@ async fn approval_review_contributor_skips_existing_guardian_model_call() -> Res
             .to_string()
             .contains("enabled")
     );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn require_escalated_bypasses_extension_approval_and_runs_guardian() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(Ok(()), "exec_command requires host-native paths");
+
+    let server = MockServer::start().await;
+    let call_id = "require-escalated-command";
+    let justification = "run outside the sandbox after a blocked attempt";
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-parent-1"),
+                ev_function_call(
+                    call_id,
+                    "exec_command",
+                    &json!({
+                        "cmd": "pwd",
+                        "sandbox_permissions": "require_escalated",
+                        "justification": justification,
+                    })
+                    .to_string(),
+                ),
+                ev_completed("resp-parent-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-guardian"),
+                ev_assistant_message(
+                    "msg-guardian",
+                    &json!({
+                        "risk_level": "high",
+                        "user_authorization": "low",
+                        "outcome": "deny",
+                        "rationale": "The unsandboxed command is not authorized.",
+                    })
+                    .to_string(),
+                ),
+                ev_completed("resp-guardian"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-parent-2"),
+                ev_assistant_message("msg-parent", "done"),
+                ev_completed("resp-parent-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.approval_review_contributor(Arc::new(EscalationApprovingReviewContributor));
+    let mut builder = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(|config| {
+            config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::read_only())
+                .expect("set read-only permission profile");
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "retry the blocked command outside the sandbox".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    loop {
+        match wait_for_event(&test.codex, |_| true).await {
+            EventMsg::ExecApprovalRequest(event) => {
+                panic!("escalated command should not prompt the user: {event:?}")
+            }
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 3);
+    let guardian_request = requests
+        .iter()
+        .find(|request| {
+            request.body_json()["client_metadata"]["x-openai-subagent"].as_str() == Some("guardian")
+        })
+        .context("expected full Guardian review for require_escalated")?;
+    assert!(guardian_request.body_contains_text(justification));
+    assert!(
+        responses
+            .function_call_output_text(call_id)
+            .context("expected exec_command output")?
+            .contains("not authorized")
+    );
+
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum GuardianV2DisableSource {
+    Config,
+    ManagedRequirements,
+}
+
+#[test_case(GuardianV2DisableSource::Config; "disabled in config")]
+#[test_case(GuardianV2DisableSource::ManagedRequirements; "disabled by managed policy")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn required_model_bypasses_extension_approval_when_guardian_v2_is_disabled(
+    disable_source: GuardianV2DisableSource,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(Ok(()), "request_permissions requires host-native paths");
+
+    let server = MockServer::start().await;
+    let model = "gpt-5.4";
+    let call_id = "required-model-permissions";
+    let reason = "request network access under mandatory Guardian review";
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-required-model-parent"),
+                ev_function_call(
+                    call_id,
+                    "request_permissions",
+                    &json!({
+                        "reason": reason,
+                        "permissions": { "network": { "enabled": true } },
+                    })
+                    .to_string(),
+                ),
+                ev_completed("resp-required-model-parent"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-required-model-review"),
+                ev_assistant_message(
+                    "msg-required-model-review",
+                    &json!({
+                        "risk_level": "high",
+                        "user_authorization": "low",
+                        "outcome": "deny",
+                        "rationale": "The requested network access is not authorized.",
+                    })
+                    .to_string(),
+                ),
+                ev_completed("resp-required-model-review"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-required-model-followup"),
+                ev_assistant_message("msg-required-model-followup", "done"),
+                ev_completed("resp-required-model-followup"),
+            ]),
+        ],
+    )
+    .await;
+
+    let (guardian_v2_config, reviewer_requirements) = match disable_source {
+        GuardianV2DisableSource::Config => ("false", ""),
+        GuardianV2DisableSource::ManagedRequirements => {
+            ("true", "allowed_approvals_reviewers = [\"auto_review\"]\n")
+        }
+    };
+    let requirements =
+        format!("{reviewer_requirements}[auto_review]\nrequired_on_models = [\"{model}\"]\n");
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.approval_review_contributor(Arc::new(ApprovedReviewContributor));
+    let mut builder = test_codex()
+        .with_model(model)
+        .with_extensions(Arc::new(extensions.build()))
+        .with_pre_build_hook(move |home| {
+            std::fs::write(
+                home.join("config.toml"),
+                format!("[features]\nguardianv2 = {guardian_v2_config}\n"),
+            )
+            .expect("Guardian v2 configuration should be written");
+        })
+        .with_cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(requirements),
+        )
+        .with_config(|config| {
+            config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::read_only())
+                .expect("set read-only permission profile");
+            config
+                .features
+                .enable(Feature::RequestPermissionsTool)
+                .expect("test config should allow feature update");
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    assert!(!test.config.features.enabled(Feature::GuardianV2));
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: reason.into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let event = wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::RequestPermissions(_) | EventMsg::TurnComplete(_)
+        )
+    })
+    .await;
+    assert!(
+        matches!(event, EventMsg::TurnComplete(_)),
+        "required-model review should not prompt the user: {event:?}"
+    );
+
+    let output = responses
+        .function_call_output_text(call_id)
+        .context("expected request_permissions output")?;
+    let actual: RequestPermissionsResponse = serde_json::from_str(&output)?;
+    assert_eq!(
+        actual,
+        RequestPermissionsResponse {
+            permissions: RequestPermissionProfile::default(),
+            scope: PermissionGrantScope::Turn,
+            strict_auto_review: false,
+        }
+    );
+    let requests = responses.requests();
+    let guardian_request = requests
+        .iter()
+        .find(|request| {
+            request.body_json()["client_metadata"]["x-openai-subagent"].as_str() == Some("guardian")
+        })
+        .context("expected full Guardian review for the required model")?;
+    assert!(guardian_request.body_contains_text(reason));
 
     Ok(())
 }
@@ -339,6 +599,7 @@ async fn remote_model_override_uses_catalog_model_for_strict_auto_review() -> Re
         guardian_request.body_json()["model"].as_str(),
         Some(review_model)
     );
+    assert_eq!(guardian_request.path(), "/v1/responses");
 
     timeout(Duration::from_secs(10), codex.shutdown_and_wait()).await??;
 
@@ -370,6 +631,7 @@ fn remote_model_with_auto_review_override(slug: &str, review_model: &str) -> Mod
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
+        multi_agent_reasoning_effort: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),

@@ -2,6 +2,7 @@ use super::*;
 use crate::app_event::HistoryLookupResponse;
 use codex_app_server_protocol::NetworkAccess;
 use codex_app_server_protocol::SandboxPolicy;
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -95,6 +96,7 @@ async fn replayed_failed_turns_preserve_overload_warnings_between_retries() {
             /*duration_ms*/ None,
             /*error*/
             Some(AppServerTurnError {
+                misalignment: None,
                 message: error_message.to_string(),
                 codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
                 additional_details: None,
@@ -275,6 +277,49 @@ async fn replayed_review_prompt_does_not_seed_composer_history() {
 }
 
 #[tokio::test]
+async fn replayed_delegated_tool_output_is_attributed_without_seeding_composer_history() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    let item = AppServerThreadItem::FunctionCallOutput {
+        id: "delegation-1".to_string(),
+        name: "send_message_to_thread".to_string(),
+        namespace: Some("codex_tui".to_string()),
+        output: FunctionCallOutputBody::Text(
+            "<codex_delegation>\n  <source_thread_id>source-task</source_thread_id>\n  <input>Follow &lt;up&gt; &amp; report</input>\n</codex_delegation>".to_string(),
+        ),
+    };
+    chat.replay_thread_item(
+        item.clone(),
+        "turn-1".to_string(),
+        ReplayKind::ResumeInitialMessages,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1);
+    assert_chatwidget_snapshot!(
+        "replayed_delegated_tool_output",
+        lines_to_single_string(&cells[0])
+    );
+    let projected = crate::thread_transcript::thread_items_to_transcript_cells(
+        /*thread_id*/ None,
+        &chat.config.cwd,
+        [item],
+        crate::thread_transcript::RawReasoningVisibility::Hidden,
+        /*config*/ None,
+    );
+    assert_eq!(
+        projected
+            .iter()
+            .map(|cell| lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
+            .collect::<Vec<_>>(),
+        vec![lines_to_single_string(&cells[0])]
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(chat.bottom_pane.composer_text(), "");
+}
+
+#[tokio::test]
 async fn replayed_nested_review_prompts_do_not_render_or_seed_composer_history() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     let review_hint = "current changes";
@@ -332,6 +377,8 @@ async fn replayed_nested_review_prompts_do_not_render_or_seed_composer_history()
                         text: "review result is retained".to_string(),
                         phase: Some(MessagePhase::FinalAnswer),
                         memory_citation: None,
+                        delivery: None,
+                        questions: None,
                     },
                 ],
                 ..app_server_turn(
@@ -1023,6 +1070,7 @@ async fn replayed_retryable_app_server_error_keeps_turn_running() {
     chat.handle_server_notification(
         ServerNotification::Error(ErrorNotification {
             error: AppServerTurnError {
+                misalignment: None,
                 message: "Reconnecting... 1/5".to_string(),
                 codex_error_info: None,
                 additional_details: Some("Idle timeout waiting for SSE".to_string()),
@@ -1184,6 +1232,70 @@ async fn replayed_in_progress_mcp_tool_call_stays_active() {
     let active = active_blob(&chat);
     assert!(active.contains("Calling"));
     assert!(!active.contains("MCP tool call completed without a result"));
+}
+
+#[tokio::test]
+async fn failed_repl_mcp_tool_call_preserves_status_and_result() {
+    for server in ["node_repl", "cua_repl"] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        let _ = drain_insert_history(&mut rx);
+
+        chat.handle_server_notification(
+            ServerNotification::ItemCompleted(ItemCompletedNotification {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                completed_at_ms: 0,
+                item: AppServerThreadItem::McpToolCall {
+                    id: "mcp-failed".to_string(),
+                    server: server.to_string(),
+                    tool: "js".to_string(),
+                    status: codex_app_server_protocol::McpToolCallStatus::Failed,
+                    arguments: json!({"title": "Inspect workspace"}),
+                    app_context: None,
+                    mcp_app_resource_uri: None,
+                    plugin_id: None,
+                    read_only_hint: None,
+                    result: Some(Box::new(codex_app_server_protocol::McpToolCallResult {
+                        content: vec![
+                            json!({"type": "text", "text": "Script failed"}),
+                            json!({"type": "text", "text": r#"{"exit_code":0,"output":"ready","chunk_id":"chunk-1"}"#}),
+                            json!({"type": "text", "text": "Script error:\npermission denied"}),
+                        ],
+                        structured_content: None,
+                        meta: None,
+                    })),
+                    error: None,
+                    duration_ms: Some(5),
+                },
+            }),
+            /*replay_kind*/ None,
+        );
+
+        let cells = drain_insert_history(&mut rx);
+        let [lines] = cells.as_slice() else {
+            panic!("expected one completed MCP tool call for {server}");
+        };
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(lines_to_single_string(lines), @r#"
+            • Called Inspect workspace
+              └ Script failed
+                {"exit_code": 0, "output": "ready", "chunk_id": "chunk-1"}
+                Script error:
+                permission denied
+            "#);
+        }
+        assert_eq!(
+            lines.first(),
+            Some(&Line::from(vec![
+                "•".red().bold(),
+                " ".into(),
+                "Called".bold(),
+                " ".into(),
+                "Inspect workspace".cyan(),
+            ])),
+            "{server}",
+        );
+    }
 }
 
 #[tokio::test]

@@ -11,8 +11,13 @@ use codex_exec_server::FileMetadata;
 use codex_exec_server::FileSystemReadStream;
 use codex_exec_server::FileSystemResult;
 use codex_exec_server::FileSystemSandboxContext;
+use codex_exec_server::GetMetadataOptions;
 use codex_exec_server::ReadDirectoryEntry;
+use codex_exec_server::ReadFileOptions;
 use codex_exec_server::RemoveOptions;
+use codex_exec_server::WalkOptions;
+use codex_exec_server::WalkOutcome;
+use codex_exec_server::WriteFileOptions;
 use codex_plugin::ResolvedPlugin;
 use codex_plugin::manifest::PluginManifest;
 use codex_plugin::manifest::PluginManifestMcpServers;
@@ -59,6 +64,7 @@ impl ExecutorFileSystem for SyntheticExecutorFileSystem {
     fn read_file<'a>(
         &'a self,
         path: &'a PathUri,
+        _options: ReadFileOptions,
         _sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
         Box::pin(async move {
@@ -88,6 +94,7 @@ impl ExecutorFileSystem for SyntheticExecutorFileSystem {
         &'a self,
         _path: &'a PathUri,
         _contents: Vec<u8>,
+        _options: WriteFileOptions,
         _sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, ()> {
         Box::pin(async { Self::unsupported() })
@@ -105,6 +112,7 @@ impl ExecutorFileSystem for SyntheticExecutorFileSystem {
     fn get_metadata<'a>(
         &'a self,
         _path: &'a PathUri,
+        _options: GetMetadataOptions,
         _sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, FileMetadata> {
         Box::pin(async { Self::unsupported() })
@@ -115,6 +123,15 @@ impl ExecutorFileSystem for SyntheticExecutorFileSystem {
         _path: &'a PathUri,
         _sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, Vec<ReadDirectoryEntry>> {
+        Box::pin(async { Self::unsupported() })
+    }
+
+    fn walk<'a>(
+        &'a self,
+        _path: &'a PathUri,
+        _options: WalkOptions,
+        _sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, WalkOutcome> {
         Box::pin(async { Self::unsupported() })
     }
 

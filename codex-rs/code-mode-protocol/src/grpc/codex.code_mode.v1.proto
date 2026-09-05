@@ -82,6 +82,11 @@ message ToolCall {
 
   // Starts at one and increases independently for each execution.
   uint64 sequence = 9;
+
+  // The host tool invocation span's W3C parent context for this streamed callback.
+  // gRPC metadata is fixed when the subscription stream opens, so each call
+  // carries its own context in the message.
+  optional string traceparent = 10;
 }
 
 message CompleteToolCallRequest {
@@ -192,6 +197,12 @@ message TerminateRequest {
 message ExecutionOutcome {
   string cell_id = 1;
   repeated ContentItem content_items = 2;
+
+  // Elapsed monotonic time from receipt of this Execute, Wait, or Terminate
+  // request until its outcome is ready, before serialization and delivery.
+  // Includes nested tool waits, but not background time between requests.
+  // Always supplied by the host; zero is a valid measurement.
+  uint64 code_mode_host_duration_ns = 6;
 
   oneof outcome {
     ExecutionYielded yielded = 3;

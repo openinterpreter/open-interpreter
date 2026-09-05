@@ -44,6 +44,7 @@ fn tool_call(execution_id: &str, invocation_id: u128) -> grpc::ToolCall {
         tool_kind: grpc::ToolKind::Function as i32,
         input_json: None,
         sequence: 1,
+        traceparent: None,
     }
 }
 

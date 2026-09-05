@@ -21,6 +21,7 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::ListMcpServerStatusParams;
 use codex_app_server_protocol::ListMcpServerStatusResponse;
+use codex_app_server_protocol::McpServerConnectionStatus;
 use codex_app_server_protocol::McpServerOauthLoginCompletedNotification;
 use codex_app_server_protocol::McpServerOauthLoginResponse;
 use codex_app_server_protocol::McpServerStatusDetail;
@@ -28,7 +29,11 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_core::config::set_project_trust_level;
+use codex_http_client::HttpClientBuilder;
 use codex_protocol::config_types::TrustLevel;
+use codex_rmcp_client::McpOAuthCallbackMode;
+use codex_rmcp_client::resolve_mcp_oauth_callback_url;
+use core_test_support::skip_if_remote;
 use core_test_support::stdio_server_bin;
 use pretty_assertions::assert_eq;
 use rmcp::handler::server::ServerHandler;
@@ -48,11 +53,13 @@ use rmcp::transport::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use serde_json::json;
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tokio::time::timeout;
+use url::Url;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
@@ -62,16 +69,73 @@ use wiremock::matchers::path;
 
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[test_case(false, None, None, None, true; "legacy callback")]
+#[test_case(
+    false,
+    Some("http://127.0.0.1/callback/registered"),
+    None,
+    None,
+    true;
+    "ordinary configured callback falls back to default"
+)]
+#[test_case(
+    false,
+    Some("http://127.0.0.1/callback/registered"),
+    Some("http://127.0.0.1/global/callback"),
+    None,
+    true;
+    "ordinary configured callback falls back to global"
+)]
+#[test_case(
+    false,
+    Some("http://127.0.0.1/callback/registered"),
+    Some("http://127.0.0.1/global/callback"),
+    Some("https://unexpected.example"),
+    false;
+    "legacy callback fallback rejects mismatched issuer"
+)]
+#[test_case(
+    true,
+    Some("http://127.0.0.1/callback"),
+    None,
+    Some("matching"),
+    true;
+    "matching issuer"
+)]
+#[test_case(
+    true,
+    Some("http://127.0.0.1/callback"),
+    None,
+    Some("https://unexpected.example"),
+    false;
+    "mismatched issuer"
+)]
+#[test_case(
+    true,
+    Some("http://127.0.0.1/callback"),
+    None,
+    None,
+    false;
+    "missing issuer"
+)]
 #[tokio::test]
-async fn oauth_login_uses_http_headers_helper() -> Result<()> {
+async fn oauth_login_validates_callback_issuer_and_uses_http_headers_helper(
+    issuer_supported: bool,
+    configured_callback: Option<&str>,
+    global_callback: Option<&str>,
+    callback_issuer: Option<&str>,
+    expected_success: bool,
+) -> Result<()> {
     let oauth = MockServer::start().await;
+    let issuer = format!("{}/mcp", oauth.uri());
     Mock::given(method("GET"))
         .and(path("/.well-known/oauth-authorization-server/mcp"))
         .and(header("x-gateway", "gateway-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "issuer": format!("{}/mcp", oauth.uri()),
+            "issuer": issuer,
             "authorization_endpoint": format!("{}/oauth/authorize", oauth.uri()),
             "token_endpoint": format!("{}/oauth/token", oauth.uri()),
+            "authorization_response_iss_parameter_supported": issuer_supported,
         })))
         .mount(&oauth)
         .await;
@@ -82,7 +146,7 @@ async fn oauth_login_uses_http_headers_helper() -> Result<()> {
             "access_token": "oauth-token",
             "token_type": "Bearer",
         })))
-        .expect(1)
+        .expect(u64::from(expected_success))
         .mount(&oauth)
         .await;
 
@@ -92,15 +156,23 @@ async fn oauth_login_uses_http_headers_helper() -> Result<()> {
     } else {
         r#"printf '{"X-Gateway":"gateway-token"}'"#
     };
+    let saved_callback = configured_callback
+        .map(|callback| format!("callback_url = \"{callback}\"\n"))
+        .unwrap_or_default();
+    let global_callback_config = global_callback
+        .map(|callback| format!("mcp_oauth_callback_url = \"{callback}\"\n"))
+        .unwrap_or_default();
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
             "mcp_oauth_credentials_store = \"file\"\n\
+             {global_callback_config}\
              [mcp_servers.gateway]\n\
              url = \"{}/mcp\"\n\
              http_headers_helper = {}\n\
              [mcp_servers.gateway.oauth]\n\
-             client_id = \"test-client\"\n",
+             client_id = \"test-client\"\n\
+             {saved_callback}",
             oauth.uri(),
             toml::Value::String(helper_command.to_string()),
         ),
@@ -118,16 +190,37 @@ async fn oauth_login_uses_http_headers_helper() -> Result<()> {
         .await?;
     let response: McpServerOauthLoginResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
-    let authorization_url = reqwest::Url::parse(&response.authorization_url)?;
+    let authorization_url = Url::parse(&response.authorization_url)?;
     let query: BTreeMap<_, _> = authorization_url.query_pairs().into_owned().collect();
-    let mut callback_url = reqwest::Url::parse(&query["redirect_uri"])?;
+    let mut callback_url = Url::parse(&query["redirect_uri"])?;
+    let expected_callback = if issuer_supported {
+        configured_callback
+            .expect("issuer-bound cases configure a stable callback")
+            .to_string()
+    } else {
+        resolve_mcp_oauth_callback_url(
+            &issuer,
+            global_callback,
+            McpOAuthCallbackMode::CallbackSpecific,
+        )?
+    };
+    assert_eq!(callback_url.path(), Url::parse(&expected_callback)?.path());
     callback_url
         .query_pairs_mut()
         .append_pair("code", "test-code")
         .append_pair("state", &query["state"]);
-    reqwest::Client::builder()
-        .no_proxy()
-        .build()?
+    if let Some(callback_issuer) = callback_issuer {
+        let callback_issuer = if callback_issuer == "matching" {
+            issuer.as_str()
+        } else {
+            callback_issuer
+        };
+        callback_url
+            .query_pairs_mut()
+            .append_pair("iss", callback_issuer);
+    }
+    HttpClientBuilder::new()
+        .build_direct()?
         .get(callback_url)
         .send()
         .await?
@@ -138,28 +231,34 @@ async fn oauth_login_uses_http_headers_helper() -> Result<()> {
     )
     .await??;
     assert_eq!(
-        completed,
-        McpServerOauthLoginCompletedNotification {
-            name: "gateway".to_string(),
-            thread_id: None,
-            success: true,
-            error: None,
-        }
+        (
+            completed.name.as_str(),
+            completed.thread_id,
+            completed.success,
+            completed.error.is_some(),
+        ),
+        ("gateway", None, expected_success, !expected_success)
     );
     oauth.verify().await;
     Ok(())
 }
 
+#[test_case(false; "plain HTTP")]
+#[test_case(true; "HTTP headers helper")]
 #[tokio::test]
-async fn oauth_login_does_not_run_helper_disabled_by_managed_requirements() -> Result<()> {
+async fn oauth_login_rejects_servers_disabled_by_managed_requirements(
+    with_headers_helper: bool,
+) -> Result<()> {
     let codex_home = TempDir::new()?;
     let marker = codex_home.path().join("helper-ran");
-    let helper = toml::Value::String(format!("echo invoked > \"{}\"", marker.display()));
+    let helper = with_headers_helper
+        .then(|| toml::Value::String(format!("echo invoked > \"{}\"", marker.display())))
+        .map_or_else(String::new, |command| {
+            format!("http_headers_helper = {command}\n")
+        });
     std::fs::write(
         codex_home.path().join("config.toml"),
-        format!(
-            "[mcp_servers.blocked]\nurl = \"https://example.com/mcp\"\nhttp_headers_helper = {helper}\n"
-        ),
+        format!("[mcp_servers.blocked]\nurl = \"https://example.com/mcp\"\n{helper}"),
     )?;
     std::fs::write(
         codex_home.path().join("requirements.toml"),
@@ -243,7 +342,6 @@ async fn oauth_login_automatically_selects_callback_specific_cimd_without_metada
     });
     let registrations = Arc::new(AtomicUsize::new(0));
     let registration_count = Arc::clone(&registrations);
-    let token_count = Arc::new(AtomicUsize::new(0));
     let (token_request_tx, mut token_request_rx) = mpsc::unbounded_channel();
     let (mcp_authorization_tx, mut mcp_authorization_rx) = mpsc::unbounded_channel();
     let tool_name = Arc::new("cimd".to_string());
@@ -296,7 +394,6 @@ async fn oauth_login_automatically_selects_callback_specific_cimd_without_metada
             "/token",
             post(move |headers: HeaderMap, body: Bytes| {
                 let token_request_tx = token_request_tx.clone();
-                let token_count = Arc::clone(&token_count);
                 async move {
                     let _ = token_request_tx.send((
                         String::from_utf8_lossy(&body).into_owned(),
@@ -305,21 +402,12 @@ async fn oauth_login_automatically_selects_callback_specific_cimd_without_metada
                             .and_then(|value| value.to_str().ok())
                             .map(str::to_string),
                     ));
-                    if token_count.fetch_add(1, Ordering::SeqCst) == 0 {
-                        Json(json!({
-                            "access_token": "expired-cimd-access-token",
-                            "token_type": "Bearer",
-                            "expires_in": 0,
-                            "refresh_token": "test-refresh-token",
-                        }))
-                    } else {
-                        Json(json!({
-                            "access_token": "refreshed-cimd-access-token",
-                            "token_type": "Bearer",
-                            "expires_in": 3600,
-                            "refresh_token": "test-refresh-token",
-                        }))
-                    }
+                    Json(json!({
+                        "access_token": "cimd-access-token",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "refresh_token": "test-refresh-token",
+                    }))
                 }
             }),
         )
@@ -348,13 +436,13 @@ async fn oauth_login_automatically_selects_callback_specific_cimd_without_metada
         .await?;
     let response: McpServerOauthLoginResponse =
         timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(request_id)).await??;
-    let authorization_url = reqwest::Url::parse(&response.authorization_url)?;
+    let authorization_url = Url::parse(&response.authorization_url)?;
     let parameters = authorization_url
         .query_pairs()
         .into_owned()
         .collect::<BTreeMap<String, String>>();
     let redirect_uri = parameters["redirect_uri"].clone();
-    let mut callback_url = reqwest::Url::parse(&redirect_uri)?;
+    let mut callback_url = Url::parse(&redirect_uri)?;
     let callback_id = callback_url
         .path()
         .strip_prefix("/callback/")
@@ -371,9 +459,8 @@ async fn oauth_login_automatically_selects_callback_specific_cimd_without_metada
         .query_pairs_mut()
         .append_pair("code", "cimd-authorization-code")
         .append_pair("state", &parameters["state"]);
-    reqwest::Client::builder()
-        .no_proxy()
-        .build()?
+    HttpClientBuilder::new()
+        .build_direct()?
         .get(callback_url)
         .send()
         .await?
@@ -424,29 +511,11 @@ async fn oauth_login_automatically_selects_callback_specific_cimd_without_metada
             },
         })
         .await?;
-    let (refresh_request, refresh_authorization) =
-        timeout(DEFAULT_READ_TIMEOUT, token_request_rx.recv())
-            .await?
-            .expect("expired CIMD token should be refreshed");
-    let refresh_parameters = url::form_urlencoded::parse(refresh_request.as_bytes())
-        .into_owned()
-        .collect::<BTreeMap<String, String>>();
-    assert_eq!(
-        refresh_parameters.get("grant_type").map(String::as_str),
-        Some("refresh_token")
-    );
-    assert_eq!(
-        refresh_parameters.get("refresh_token").map(String::as_str),
-        Some("test-refresh-token")
-    );
-    assert_eq!(refresh_parameters.get("client_id"), Some(&client_id));
-    assert!(!refresh_parameters.contains_key("client_secret"));
-    assert_eq!(refresh_authorization, None);
     assert_eq!(
         timeout(DEFAULT_READ_TIMEOUT, mcp_authorization_rx.recv())
             .await?
-            .expect("MCP startup should use the refreshed token"),
-        "Bearer refreshed-cimd-access-token"
+            .expect("MCP startup should use the access token"),
+        "Bearer cimd-access-token"
     );
     assert_eq!(registrations.load(Ordering::SeqCst), 0);
 
@@ -487,6 +556,7 @@ async fn mcp_server_status_list_returns_raw_server_and_tool_names() -> Result<()
     assert_eq!(response.data.len(), 1);
     let status = &response.data[0];
     assert_eq!(status.name, "some-server");
+    assert_eq!(status.runtime_status, None);
     assert_eq!(status.plugin_id, None);
     assert_eq!(
         status.tools.keys().cloned().collect::<BTreeSet<_>>(),
@@ -648,6 +718,7 @@ url = "{mcp_server_url}/mcp"
     assert_eq!(thread_response.data.len(), 1);
     let status = &thread_response.data[0];
     assert_eq!(status.name, "project-server");
+    assert_eq!(status.runtime_status, None);
     assert_eq!(
         status.tools.keys().cloned().collect::<BTreeSet<_>>(),
         BTreeSet::from(["project_lookup".to_string()])
@@ -656,6 +727,179 @@ url = "{mcp_server_url}/mcp"
     mcp_server_handle.abort();
     let _ = mcp_server_handle.await;
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_server_status_list_reports_thread_runtime_connections() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let (mcp_server_url, mcp_server_handle) = start_mcp_server("lookup").await?;
+    let codex_home = TempDir::new()?;
+    mock_responses_config(&server.uri())
+        .with_extra_config(&format!(
+            "[mcp_servers.connected]\nurl = \"{mcp_server_url}/mcp\"\n\
+             [mcp_servers.disabled]\nurl = \"{mcp_server_url}/mcp\"\nenabled = false\n"
+        ))
+        .write(codex_home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let ThreadStartResponse { thread, .. } = mcp.start_thread(ThreadStartParams::default()).await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_matching_notification("connected MCP server ready", |notification| {
+            notification.method == "mcpServer/startupStatus/updated"
+                && notification.params.as_ref().is_some_and(|params| {
+                    params["name"] == "connected" && params["status"] == "ready"
+                })
+        }),
+    )
+    .await??;
+    let response: ListMcpServerStatusResponse = mcp
+        .request(|request_id| ClientRequest::McpServerStatusList {
+            request_id,
+            params: ListMcpServerStatusParams {
+                cursor: None,
+                limit: None,
+                detail: Some(McpServerStatusDetail::ToolsAndAuthOnly),
+                thread_id: Some(thread.id.clone()),
+            },
+        })
+        .await?;
+    assert_eq!(
+        response
+            .data
+            .into_iter()
+            .map(|status| (status.name, status.runtime_status))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "connected".to_string(),
+                Some(McpServerConnectionStatus::Connected)
+            ),
+            (
+                "disabled".to_string(),
+                Some(McpServerConnectionStatus::Disabled)
+            ),
+        ]
+    );
+    // Inventory uses the latest config, but a same-name replacement is not the
+    // connection that this thread started. Unchanged registrations retain status.
+    let (replacement_url, replacement_handle) = start_mcp_server("replacement_lookup").await?;
+    mock_responses_config(&server.uri())
+        .with_extra_config(&format!(
+            "[mcp_servers.connected]\nurl = \"{replacement_url}/mcp\"\n\
+             [mcp_servers.disabled]\nurl = \"{mcp_server_url}/mcp\"\nenabled = false\n"
+        ))
+        .write(codex_home.path())?;
+    let response: ListMcpServerStatusResponse = mcp
+        .request(|request_id| ClientRequest::McpServerStatusList {
+            request_id,
+            params: ListMcpServerStatusParams {
+                cursor: None,
+                limit: None,
+                detail: Some(McpServerStatusDetail::ToolsAndAuthOnly),
+                thread_id: Some(thread.id),
+            },
+        })
+        .await?;
+    assert_eq!(
+        response
+            .data
+            .into_iter()
+            .map(|status| (
+                status.name,
+                status.runtime_status,
+                status.tools.into_keys().collect::<BTreeSet<_>>()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "connected".to_string(),
+                None,
+                BTreeSet::from(["replacement_lookup".to_string()])
+            ),
+            (
+                "disabled".to_string(),
+                Some(McpServerConnectionStatus::Disabled),
+                BTreeSet::new()
+            ),
+        ]
+    );
+    replacement_handle.abort();
+    let _ = replacement_handle.await;
+    mcp_server_handle.abort();
+    let _ = mcp_server_handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_server_status_list_reports_disconnected_stdio_transport() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "the stdio executable and shutdown marker are host-local"
+    );
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let codex_home = TempDir::new()?;
+    let exit_file = codex_home.path().join("exit-mcp-server");
+    mock_responses_config(&server.uri())
+        .with_extra_config(&format!(
+            "[mcp_servers.stdio]\ncommand = {}\nstartup_timeout_sec = 2\n\
+             [mcp_servers.stdio.env]\nMCP_TEST_EXIT_FILE = {}\n",
+            toml::Value::String(stdio_server_bin()?),
+            toml::Value::String(exit_file.to_string_lossy().into_owned()),
+        ))
+        .write(codex_home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let ThreadStartResponse { thread, .. } = mcp.start_thread(ThreadStartParams::default()).await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_matching_notification("stdio MCP server ready", |notification| {
+            notification.method == "mcpServer/startupStatus/updated"
+                && notification
+                    .params
+                    .as_ref()
+                    .is_some_and(|params| params["name"] == "stdio" && params["status"] == "ready")
+        }),
+    )
+    .await??;
+    for expected in [
+        McpServerConnectionStatus::Connected,
+        McpServerConnectionStatus::Failed,
+    ] {
+        if expected == McpServerConnectionStatus::Failed {
+            std::fs::write(&exit_file, "exit")?;
+        }
+        timeout(DEFAULT_READ_TIMEOUT, async {
+            loop {
+                let response: ListMcpServerStatusResponse = mcp
+                    .request(|request_id| ClientRequest::McpServerStatusList {
+                        request_id,
+                        params: ListMcpServerStatusParams {
+                            cursor: None,
+                            limit: None,
+                            detail: Some(McpServerStatusDetail::ToolsAndAuthOnly),
+                            thread_id: Some(thread.id.clone()),
+                        },
+                    })
+                    .await?;
+                let statuses = response
+                    .data
+                    .into_iter()
+                    .map(|status| (status.name, status.runtime_status))
+                    .collect::<Vec<_>>();
+                if statuses == vec![("stdio".to_string(), Some(expected))] {
+                    return Ok::<(), anyhow::Error>(());
+                }
+                sleep(Duration::from_millis(/*millis*/ 20)).await;
+            }
+        })
+        .await??;
+    }
     Ok(())
 }
 

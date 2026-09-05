@@ -178,7 +178,7 @@ fn well_known_sid_str(name: &str) -> Option<&'static str> {
     }
 }
 
-fn sid_bytes_from_string(sid_str: &str) -> Result<Vec<u8>> {
+pub(crate) fn sid_bytes_from_string(sid_str: &str) -> Result<Vec<u8>> {
     let sid_w = to_wide(OsStr::new(sid_str));
     let mut psid: *mut std::ffi::c_void = std::ptr::null_mut();
     if unsafe { ConvertStringSidToSidW(sid_w.as_ptr(), &mut psid) } == 0 {

@@ -22,6 +22,7 @@ fn request_with_input(input: Vec<ResponseItem>) -> ResponsesApiRequest {
         service_tier: None,
         prompt_cache_key: None,
         client_metadata: None,
+        access_programs: None,
         text: None,
     }
 }
@@ -41,7 +42,9 @@ fn function_call(call_id: &str) -> ResponseItem {
 fn function_output(call_id: &str, output: &str) -> ResponseItem {
     ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: call_id.to_string(),
+        call_id: Some(call_id.to_string()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_text(output.to_string()),
         internal_chat_message_metadata_passthrough: None,
     }

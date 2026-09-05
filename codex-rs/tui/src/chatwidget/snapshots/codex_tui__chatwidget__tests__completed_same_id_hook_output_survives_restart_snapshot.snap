@@ -1,9 +1,16 @@
 ---
 source: tui/src/chatwidget/tests/status_and_layout.rs
-expression: "format!(\"active hooks:\\n{}history:\\n{history}\", active_hook_blob(&chat))"
+expression: "hook_status_and_history_snapshot(&chat, \"restarted\", &history)"
 ---
-active hooks:
-• Running Stop hook: checking stop condition
+restarted
+activity:
+"                                                                                "
+"• Checking stop condition                                                       "
+"                                                                                "
+"                                                                                "
+"› Ask Codex to do anything                                                      "
+"                                                                                "
+"  gpt-5.6-sol default · /tmp/project                                            "
 history:
-• Stop hook (stopped)
-  stop: continue with more context
+• Hook stopped
+  └ continue with more context

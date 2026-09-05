@@ -100,6 +100,7 @@ fn test_model_info(
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
+        multi_agent_reasoning_effort: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers,
@@ -237,7 +238,7 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
     );
     assert!(
         description.contains(
-            "Do not set the `model` field unless the user explicitly asks for a different model or there is a clear task-specific reason."
+            "Do not set the `model` field unless the user explicitly asks for a different model."
         ),
         "expected model override usage guidance in spawn_agent description: {description:?}"
     );

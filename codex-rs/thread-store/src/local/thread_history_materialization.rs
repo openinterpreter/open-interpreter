@@ -5,6 +5,7 @@ use chrono::DateTime;
 use codex_app_server_protocol::ThreadHistoryChangeSet;
 use codex_app_server_protocol::project_rollout_line;
 use codex_protocol::ThreadId;
+use codex_rollout::RolloutItem;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 use tracing::warn;
@@ -28,9 +29,9 @@ pub(super) async fn materialize_to_sqlite(
         .as_ref()
         .map_or(0, |state| state.next_byte_offset);
     if projection_state.is_none()
-        && !tokio::fs::try_exists(rollout_path)
+        && codex_rollout::existing_rollout_path(rollout_path)
             .await
-            .map_err(thread_store_io_error)?
+            .is_none()
     {
         return Ok(());
     }
@@ -75,13 +76,21 @@ async fn read_projection_steps(
     thread_id: ThreadId,
     subagent_history_start_ordinal: Option<u64>,
 ) -> ThreadStoreResult<(Vec<RolloutProjectionStep>, u64)> {
-    let file_end_offset = match tokio::fs::metadata(rollout_path).await {
-        Ok(metadata) => metadata.len(),
+    let path = rollout_path.to_path_buf();
+    let file =
+        tokio::task::spawn_blocking(move || codex_rollout::open_rollout_seekable_reader(&path))
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to join rollout projection read: {err}"),
+            })?;
+    let mut file = match file {
+        Ok(file) => tokio::fs::File::from_std(file),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && start_offset == 0 => {
             return Ok((Vec::new(), 0));
         }
         Err(err) => return Err(thread_store_io_error(err)),
     };
+    let file_end_offset = file.metadata().await.map_err(thread_store_io_error)?.len();
     let byte_count =
         file_end_offset
             .checked_sub(start_offset)
@@ -92,9 +101,6 @@ async fn read_projection_steps(
         message: "durable rollout append exceeds addressable memory".to_string(),
     })?;
     let mut bytes = vec![0; byte_count];
-    let mut file = tokio::fs::File::open(rollout_path)
-        .await
-        .map_err(thread_store_io_error)?;
     file.seek(SeekFrom::Start(start_offset))
         .await
         .map_err(thread_store_io_error)?;
@@ -204,7 +210,9 @@ async fn read_projection_steps(
                 ),
             });
         }
-        let changes = if subagent_history_start_ordinal.is_some_and(|start| ordinal < start) {
+        let is_inherited_subagent_history =
+            subagent_history_start_ordinal.is_some_and(|start| ordinal < start);
+        let changes = if is_inherited_subagent_history {
             ThreadHistoryChangeSet::default()
         } else {
             project_rollout_line(&line)
@@ -213,6 +221,8 @@ async fn read_projection_steps(
             .changed_items
             .iter()
             .any(|item| item.started_at_ms.is_none())
+            || (!is_inherited_subagent_history
+                && matches!(&line.item, RolloutItem::RealtimeItem(_)))
         {
             match DateTime::parse_from_rfc3339(line.timestamp.as_str()) {
                 Ok(timestamp) => Some(timestamp.timestamp_millis()),
@@ -259,13 +269,19 @@ async fn read_projection_steps(
                 .ok_or_else(|| ThreadStoreError::Internal {
                     message: "rollout ordinal exceeds SQLite integer range".to_string(),
                 })?;
-        projections.push(RolloutProjectionStep::Line(ProjectedRolloutLine {
-            ordinal,
-            start_byte_offset: line_start_offset,
-            end_byte_offset: line_end_offset,
-            fallback_created_at_ms,
-            changes,
-        }));
+        projections.push(RolloutProjectionStep::Line(Box::new(
+            ProjectedRolloutLine {
+                ordinal,
+                start_byte_offset: line_start_offset,
+                end_byte_offset: line_end_offset,
+                fallback_created_at_ms,
+                changes,
+                realtime_item: match line.item {
+                    RolloutItem::RealtimeItem(item) if !is_inherited_subagent_history => Some(item),
+                    _ => None,
+                },
+            },
+        )));
         next_ordinal = next_line_ordinal;
         next_offset = line_end_offset;
         line_start_offset = line_end_offset;

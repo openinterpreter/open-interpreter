@@ -1,19 +1,15 @@
-use crate::proxy_lifecycle::PROXY_SOCKET_DIR_PREFIX;
-use crate::proxy_lifecycle::cleanup_stale_proxy_socket_dirs_in;
 use crate::proxy_lifecycle::close_fd;
-use crate::proxy_lifecycle::create_ready_pipe;
 use crate::proxy_lifecycle::harden_bridge_process;
-use crate::proxy_lifecycle::spawn_proxy_socket_dir_cleanup_worker;
+use crate::proxy_lifecycle::move_fd_above_stdio;
+use crate::proxy_lifecycle::receive_listener;
+use crate::proxy_lifecycle::send_listener;
 use codex_network_proxy::PROXY_ATTRIBUTION_TOKEN_ENV_KEY;
 use codex_network_proxy::write_attribution_frame;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::fs::DirBuilder;
 use std::fs::File;
-use std::fs::Permissions;
 use std::io;
 use std::io::Read;
 use std::io::Write;
@@ -23,14 +19,11 @@ use std::net::Shutdown;
 use std::net::SocketAddr;
 use std::net::TcpListener;
 use std::net::TcpStream;
+use std::os::fd::AsRawFd;
 use std::os::fd::FromRawFd;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
-use std::path::PathBuf;
+use std::time::Duration;
 use url::Url;
 
 const PROXY_ENV_KEYS: &[&str] = &[
@@ -54,8 +47,7 @@ const PROXY_ENV_KEYS: &[&str] = &[
 
 const HOST_BRIDGE_READY: u8 = 1;
 const LOOPBACK_INTERFACE_NAME: &[u8] = b"lo";
-// Linux sockaddr_un.sun_path allows 108 bytes, including the trailing NUL.
-const UNIX_SOCKET_PATH_MAX_BYTES: usize = 107;
+const HANDOFF_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ProxyRouteSpec {
@@ -65,7 +57,7 @@ pub(crate) struct ProxyRouteSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct ProxyRouteEntry {
     env_key: String,
-    uds_path: PathBuf,
+    control_fd: libc::c_int,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,7 +72,7 @@ struct ProxyRoutePlan {
     has_proxy_config: bool,
 }
 
-pub(crate) fn prepare_host_proxy_route_spec() -> io::Result<(String, AbsolutePathBuf)> {
+pub(crate) fn prepare_host_proxy_route_spec() -> io::Result<(String, Vec<File>)> {
     let (attribution_token, plan) = extract_attribution_token_and_plan(std::env::vars().collect());
     // SAFETY: the sandbox helper is single-threaded here, before it forks bridge workers or
     // executes the user command.
@@ -97,48 +89,35 @@ pub(crate) fn prepare_host_proxy_route_spec() -> io::Result<(String, AbsolutePat
         return Err(io::Error::new(io::ErrorKind::InvalidInput, message));
     }
 
-    let socket_parent_dir = proxy_socket_parent_dir();
-    let _ = cleanup_stale_proxy_socket_dirs_in(socket_parent_dir.as_path());
-
-    let socket_dir = create_proxy_socket_dir()?;
-    let readable_socket_dir = AbsolutePathBuf::relative_to_current_dir(&socket_dir)?;
-    let mut socket_by_endpoint: BTreeMap<SocketAddr, PathBuf> = BTreeMap::new();
-    let mut next_index = 0usize;
+    let mut control_by_endpoint = BTreeMap::new();
     for route in &plan.routes {
-        if socket_by_endpoint.contains_key(&route.endpoint) {
+        if control_by_endpoint.contains_key(&route.endpoint) {
             continue;
         }
-        let socket_path = socket_dir.join(format!("proxy-route-{next_index}.sock"));
-        next_index += 1;
-        socket_by_endpoint.insert(route.endpoint, socket_path);
-    }
-
-    let mut host_bridge_pids = Vec::with_capacity(socket_by_endpoint.len());
-    for (endpoint, socket_path) in &socket_by_endpoint {
-        host_bridge_pids.push(spawn_host_bridge(
-            *endpoint,
-            socket_path,
+        let control = spawn_host_bridge(
+            route.endpoint,
             attribution_token.as_deref(),
-        )?);
+            &mut control_by_endpoint,
+        )?;
+        control_by_endpoint.insert(route.endpoint, control);
     }
-    spawn_proxy_socket_dir_cleanup_worker(socket_dir, host_bridge_pids)?;
 
     let mut routes = Vec::with_capacity(plan.routes.len());
     for route in plan.routes {
-        let Some(uds_path) = socket_by_endpoint.get(&route.endpoint) else {
+        let Some(control) = control_by_endpoint.get(&route.endpoint) else {
             return Err(io::Error::other(format!(
-                "missing UDS path for endpoint {}",
+                "missing bootstrap channel for endpoint {}",
                 route.endpoint
             )));
         };
         routes.push(ProxyRouteEntry {
             env_key: route.env_key,
-            uds_path: uds_path.clone(),
+            control_fd: control.as_raw_fd(),
         });
     }
 
     let spec = serde_json::to_string(&ProxyRouteSpec { routes }).map_err(io::Error::other)?;
-    Ok((spec, readable_socket_dir))
+    Ok((spec, control_by_endpoint.into_values().collect()))
 }
 
 fn extract_attribution_token_and_plan(
@@ -159,21 +138,50 @@ pub(crate) fn activate_proxy_routes_in_netns(serialized_spec: &str) -> io::Resul
         ));
     }
 
-    let mut local_port_by_uds_path: BTreeMap<PathBuf, u16> = BTreeMap::new();
+    let mut local_port_by_control = BTreeMap::new();
     for route in &spec.routes {
-        if local_port_by_uds_path.contains_key(&route.uds_path) {
+        if local_port_by_control.contains_key(&route.control_fd) {
             continue;
         }
-        let local_port = spawn_local_bridge(route.uds_path.as_path())?;
-        local_port_by_uds_path.insert(route.uds_path.clone(), local_port);
+        if route.control_fd <= libc::STDERR_FILENO {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "proxy bootstrap channel must not use standard descriptors",
+            ));
+        }
+        // SAFETY: F_GETFD takes only a descriptor, with no pointer arguments;
+        // an invalid inherited descriptor returns EBADF.
+        let flags = unsafe { libc::fcntl(route.control_fd, libc::F_GETFD) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the outer helper left this descriptor open across exec, which
+        // discarded its Rust owner. F_GETFD above confirmed it is still valid.
+        // The map ensures each descriptor is claimed once, even for proxy aliases.
+        let mut control = unsafe { UnixStream::from_raw_fd(route.control_fd) };
+        // SAFETY: F_SETFD takes integer flags, not a pointer; `control` owns the
+        // live descriptor throughout the call.
+        if unsafe { libc::fcntl(control.as_raw_fd(), libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        control.set_read_timeout(Some(HANDOFF_TIMEOUT))?;
+        let listener = bind_local_loopback_listener()?;
+        let local_port = listener.local_addr()?.port();
+        send_listener(&control, &listener)?;
+        let mut ready = [0_u8; 1];
+        control.read_exact(&mut ready)?;
+        if ready != [HOST_BRIDGE_READY] {
+            return Err(io::Error::other("host bridge did not accept its listener"));
+        }
+        // Loop scope closes both descriptors, leaving only the host's listener.
+        // Neither can reach the namespace reaper or the untrusted command.
+        local_port_by_control.insert(route.control_fd, local_port);
     }
 
     for route in spec.routes {
-        let Some(local_port) = local_port_by_uds_path.get(&route.uds_path) else {
-            return Err(io::Error::other(format!(
-                "missing local bridge port for UDS path {}",
-                route.uds_path.display()
-            )));
+        let Some(local_port) = local_port_by_control.get(&route.control_fd) else {
+            return Err(io::Error::other("missing proxy listener port"));
         };
         let original_value = std::env::var(&route.env_key).map_err(|_| {
             io::Error::new(
@@ -306,129 +314,62 @@ fn rewrite_proxy_env_value(proxy_url: &str, local_port: u16) -> Option<String> {
     Some(rewritten)
 }
 
-fn create_proxy_socket_dir() -> io::Result<PathBuf> {
-    let temp_dir = proxy_socket_parent_dir();
-    let pid = std::process::id();
-    let uid = unsafe { libc::geteuid() };
-    for attempt in 0..128 {
-        let candidate = temp_dir.join(format!("{PROXY_SOCKET_DIR_PREFIX}{pid}-{uid}-{attempt}"));
-        // The bridge UDS paths live under a shared temp root, so the per-run
-        // directory should not be traversable by other processes.
-        let mut dir_builder = DirBuilder::new();
-        dir_builder.mode(0o700);
-        match dir_builder.create(&candidate) {
-            Ok(()) => return Ok(candidate),
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(err),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        format!(
-            "failed to allocate proxy routing temp dir under {}",
-            temp_dir.display()
-        ),
-    ))
-}
-
-fn proxy_socket_parent_dir() -> PathBuf {
-    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
-        let candidate = PathBuf::from(codex_home).join("tmp");
-        if proxy_socket_paths_fit(candidate.as_path())
-            && ensure_private_proxy_socket_parent_dir(candidate.as_path()).is_ok()
-        {
-            return candidate;
-        }
-    }
-    let temp_dir = std::env::temp_dir();
-    if proxy_socket_paths_fit(temp_dir.as_path()) {
-        temp_dir
-    } else {
-        PathBuf::from("/tmp")
-    }
-}
-
-fn proxy_socket_paths_fit(parent: &Path) -> bool {
-    let socket_path = parent
-        .join(format!(
-            "{PROXY_SOCKET_DIR_PREFIX}{}-{}-127",
-            u32::MAX,
-            libc::uid_t::MAX
-        ))
-        .join(format!("proxy-route-{}.sock", usize::MAX));
-    socket_path.as_os_str().as_bytes().len() <= UNIX_SOCKET_PATH_MAX_BYTES
-}
-
-fn ensure_private_proxy_socket_parent_dir(path: &Path) -> io::Result<()> {
-    let mut dir_builder = DirBuilder::new();
-    dir_builder.recursive(true);
-    dir_builder.mode(0o700);
-    match dir_builder.create(path) {
-        Ok(()) => {}
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(err) => return Err(err),
-    }
-    std::fs::set_permissions(path, Permissions::from_mode(0o700))
-}
-
 fn spawn_host_bridge(
     endpoint: SocketAddr,
-    uds_path: &Path,
     attribution_token: Option<&str>,
-) -> io::Result<libc::pid_t> {
-    let (read_fd, write_fd) = create_ready_pipe()?;
+    inherited_controls: &mut BTreeMap<SocketAddr, File>,
+) -> io::Result<File> {
+    let (host_control, control) = UnixStream::pair()?;
+    let host_control = UnixStream::from(move_fd_above_stdio(host_control.into())?);
+    let mut control = UnixStream::from(move_fd_above_stdio(control.into())?);
+    control.set_read_timeout(Some(HANDOFF_TIMEOUT))?;
     let parent_pid = unsafe { libc::getpid() };
     let pid = unsafe { libc::fork() };
     if pid < 0 {
-        let err = io::Error::last_os_error();
-        close_fd(read_fd)?;
-        close_fd(write_fd)?;
-        return Err(err);
+        return Err(io::Error::last_os_error());
     }
 
     if pid == 0 {
-        if close_fd(read_fd).is_err() {
-            unsafe { libc::_exit(1) };
-        }
-        let result = run_host_bridge(endpoint, uds_path, write_fd, attribution_token, parent_pid);
+        drop(control);
+        // A worker must not retain another route's inner bootstrap endpoint.
+        // Drop this child's inherited owners; the parent's copies are unaffected by fork.
+        inherited_controls.clear();
+        let result = run_host_bridge(endpoint, host_control, attribution_token, parent_pid);
         if result.is_err() {
             unsafe { libc::_exit(1) };
         }
         unsafe { libc::_exit(0) };
     }
 
-    close_fd(write_fd)?;
+    drop(host_control);
     let mut ready = [0_u8; 1];
-    let mut read_file = unsafe { File::from_raw_fd(read_fd) };
-    read_file.read_exact(&mut ready)?;
-    if ready[0] != HOST_BRIDGE_READY {
+    control.read_exact(&mut ready)?;
+    if ready != [HOST_BRIDGE_READY] {
         return Err(io::Error::other(
             "host bridge did not acknowledge readiness",
         ));
     }
-    Ok(pid)
+    Ok(File::from(OwnedFd::from(control)))
 }
 
 fn run_host_bridge(
     endpoint: SocketAddr,
-    uds_path: &Path,
-    ready_fd: libc::c_int,
+    mut control: UnixStream,
     attribution_token: Option<&str>,
     parent_pid: libc::pid_t,
 ) -> io::Result<()> {
     harden_bridge_process(parent_pid)?;
-    if uds_path.exists() {
-        std::fs::remove_file(uds_path)?;
-    }
-    let listener = UnixListener::bind(uds_path)?;
-
-    let mut ready_file = unsafe { File::from_raw_fd(ready_fd) };
-    ready_file.write_all(&[HOST_BRIDGE_READY])?;
-    drop(ready_file);
+    control.write_all(&[HOST_BRIDGE_READY])?;
+    // The outer helper must launch bubblewrap before this listener can arrive.
+    // The socket keeps its isolated network namespace even though we accept in
+    // the host process; newly opened upstream sockets use our host namespace.
+    let listener = receive_listener(&control)?;
+    control.write_all(&[HOST_BRIDGE_READY])?;
+    drop(control);
 
     let attribution_token = attribution_token.map(str::to_owned);
     loop {
-        let (unix_stream, _) = listener.accept()?;
+        let (client_stream, _) = listener.accept()?;
         let attribution_token = attribution_token.clone();
         std::thread::spawn(move || {
             let mut tcp_stream = match TcpStream::connect(endpoint) {
@@ -442,63 +383,7 @@ fn run_host_bridge(
                 // application bytes if this bridge cannot prove the exec attribution first.
                 return;
             }
-            let _ = proxy_bidirectional(tcp_stream, unix_stream);
-        });
-    }
-}
-
-fn spawn_local_bridge(uds_path: &Path) -> io::Result<u16> {
-    let (read_fd, write_fd) = create_ready_pipe()?;
-    let parent_pid = unsafe { libc::getpid() };
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        let err = io::Error::last_os_error();
-        close_fd(read_fd)?;
-        close_fd(write_fd)?;
-        return Err(err);
-    }
-
-    if pid == 0 {
-        if close_fd(read_fd).is_err() {
-            unsafe { libc::_exit(1) };
-        }
-        let result = run_local_bridge(uds_path, write_fd, parent_pid);
-        if result.is_err() {
-            unsafe { libc::_exit(1) };
-        }
-        unsafe { libc::_exit(0) };
-    }
-
-    close_fd(write_fd)?;
-    let mut port_bytes = [0_u8; 2];
-    let mut read_file = unsafe { File::from_raw_fd(read_fd) };
-    read_file.read_exact(&mut port_bytes)?;
-    Ok(u16::from_be_bytes(port_bytes))
-}
-
-fn run_local_bridge(
-    uds_path: &Path,
-    ready_fd: libc::c_int,
-    parent_pid: libc::pid_t,
-) -> io::Result<()> {
-    harden_bridge_process(parent_pid)?;
-    let listener = bind_local_loopback_listener()?;
-    let port = listener.local_addr()?.port();
-
-    let mut ready_file = unsafe { File::from_raw_fd(ready_fd) };
-    ready_file.write_all(&port.to_be_bytes())?;
-    drop(ready_file);
-
-    let uds_path = uds_path.to_path_buf();
-    loop {
-        let (tcp_stream, _) = listener.accept()?;
-        let socket_path = uds_path.clone();
-        std::thread::spawn(move || {
-            let unix_stream = match UnixStream::connect(socket_path) {
-                Ok(stream) => stream,
-                Err(_) => return,
-            };
-            let _ = proxy_bidirectional(tcp_stream, unix_stream);
+            let _ = proxy_bidirectional(tcp_stream, client_stream);
         });
     }
 }
@@ -583,21 +468,21 @@ fn ensure_loopback_interface_up() -> io::Result<()> {
     close_fd(fd)
 }
 
-fn proxy_bidirectional(mut tcp_stream: TcpStream, mut unix_stream: UnixStream) -> io::Result<()> {
-    let mut tcp_reader = tcp_stream.try_clone()?;
-    let mut unix_writer = unix_stream.try_clone()?;
-    let tcp_to_unix = std::thread::spawn(move || {
-        let result = std::io::copy(&mut tcp_reader, &mut unix_writer);
-        let _ = unix_writer.shutdown(Shutdown::Write);
+fn proxy_bidirectional(mut upstream: TcpStream, mut client: TcpStream) -> io::Result<()> {
+    let mut upstream_reader = upstream.try_clone()?;
+    let mut client_writer = client.try_clone()?;
+    let upstream_to_client = std::thread::spawn(move || {
+        let result = std::io::copy(&mut upstream_reader, &mut client_writer);
+        let _ = client_writer.shutdown(Shutdown::Write);
         result
     });
-    let unix_to_tcp = std::io::copy(&mut unix_stream, &mut tcp_stream);
-    let _ = tcp_stream.shutdown(Shutdown::Write);
-    let tcp_to_unix = tcp_to_unix
+    let client_to_upstream = std::io::copy(&mut client, &mut upstream);
+    let _ = upstream.shutdown(Shutdown::Write);
+    let upstream_to_client = upstream_to_client
         .join()
         .map_err(|_| io::Error::other("bridge thread panicked"))?;
-    tcp_to_unix?;
-    unix_to_tcp?;
+    upstream_to_client?;
+    client_to_upstream?;
     Ok(())
 }
 
@@ -611,12 +496,10 @@ mod tests {
     use super::is_proxy_env_key;
     use super::parse_loopback_proxy_endpoint;
     use super::plan_proxy_routes;
-    use super::proxy_socket_paths_fit;
     use super::rewrite_proxy_env_value;
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
     use std::net::SocketAddr;
-    use std::path::PathBuf;
 
     #[test]
     fn recognizes_proxy_env_keys_case_insensitively() {
@@ -718,30 +601,18 @@ mod tests {
     }
 
     #[test]
-    fn proxy_socket_paths_enforce_linux_path_limit() {
-        assert_eq!(
-            proxy_socket_paths_fit(PathBuf::from("/tmp").as_path()),
-            true
-        );
-        assert_eq!(
-            proxy_socket_paths_fit(PathBuf::from(format!("/tmp/{}", "a".repeat(96))).as_path()),
-            false
-        );
-    }
-
-    #[test]
     fn proxy_route_spec_serialization_omits_proxy_urls() {
         let spec = ProxyRouteSpec {
             routes: vec![ProxyRouteEntry {
                 env_key: "HTTP_PROXY".to_string(),
-                uds_path: PathBuf::from("/tmp/proxy-route-0.sock"),
+                control_fd: 3,
             }],
         };
         let serialized = serde_json::to_string(&spec).expect("proxy route spec should serialize");
 
         assert_eq!(
             serialized,
-            r#"{"routes":[{"env_key":"HTTP_PROXY","uds_path":"/tmp/proxy-route-0.sock"}]}"#
+            r#"{"routes":[{"env_key":"HTTP_PROXY","control_fd":3}]}"#
         );
     }
 }

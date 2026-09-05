@@ -111,7 +111,10 @@ pub(super) fn search_check() -> DoctorCheck {
     };
     let mut check = DoctorCheck::new("runtime.search", "search", status, summary).details(details);
     if status != CheckStatus::Ok {
-        check = check.remediation("Install ripgrep or repair the bundled Codex package.");
+        let product = codex_product_info::Product::current().short_display_name();
+        check = check.remediation(format!(
+            "Install ripgrep or repair the bundled {product} package."
+        ));
     }
     check
 }
@@ -121,6 +124,7 @@ fn install_method_name(context: &InstallContext) -> &'static str {
         InstallMethod::Standalone { .. } => "standalone",
         InstallMethod::Npm => "npm",
         InstallMethod::Bun => "bun",
+        InstallMethod::VitePlus => "vite+",
         InstallMethod::Pnpm => "pnpm",
         InstallMethod::Brew => "brew",
         InstallMethod::Other => "local build",

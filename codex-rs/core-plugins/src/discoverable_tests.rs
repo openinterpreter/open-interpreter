@@ -10,7 +10,11 @@ use crate::remote::fetch_and_cache_global_remote_plugin_catalog;
 use crate::startup_sync::curated_plugins_repo_path;
 use crate::test_support::TEST_CURATED_PLUGIN_SHA;
 use crate::test_support::load_plugins_config;
+use crate::test_support::set_test_auth_mode;
+use crate::test_support::test_auth_manager;
 use crate::test_support::test_plugins_manager;
+use crate::test_support::test_plugins_manager_with_auth_manager;
+use crate::test_support::test_plugins_manager_with_options;
 use crate::test_support::write_curated_plugin;
 use crate::test_support::write_curated_plugin_sha_with;
 use crate::test_support::write_file;
@@ -19,11 +23,13 @@ use crate::test_support::write_openai_curated_marketplace;
 use codex_config::CONFIG_TOML_FILE;
 use codex_login::CodexAuth;
 use codex_protocol::auth::AuthMode;
+use codex_protocol::protocol::Product;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 use tempfile::tempdir;
 use tracing::Level;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -50,8 +56,11 @@ remote_plugin = false
     write_openai_curated_marketplace(&curated_root, &["sample", "slack", "openai-developers"]);
 
     let plugins = load_plugins_config(codex_home.path(), codex_home.path()).await;
-    let plugins_manager = test_plugins_manager(codex_home.path().to_path_buf());
-    plugins_manager.set_auth_mode(Some(AuthMode::Chatgpt));
+    let plugins_manager = test_plugins_manager_with_options(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::Chatgpt),
+    );
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let discoverable_plugins = list_discoverable_plugins(
         &plugins_manager,
@@ -79,8 +88,11 @@ async fn returns_api_curated_fallback_plugins_for_direct_provider_auth() {
     write_openai_api_curated_marketplace(&curated_root, &["sample", "slack", "openai-developers"]);
 
     let plugins = load_plugins_config(codex_home.path(), codex_home.path()).await;
-    let plugins_manager = test_plugins_manager(codex_home.path().to_path_buf());
-    plugins_manager.set_auth_mode(Some(AuthMode::ApiKey));
+    let plugins_manager = test_plugins_manager_with_options(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::ApiKey),
+    );
     let auth = CodexAuth::from_api_key("test-api-key");
     let discoverable_plugins = list_discoverable_plugins(
         &plugins_manager,
@@ -112,8 +124,11 @@ async fn returns_microsoft_fallback_plugins() {
     install_marketplace_plugin(codex_home.path(), curated_root.as_path(), "teams").await;
 
     let plugins = load_plugins_config(codex_home.path(), codex_home.path()).await;
-    let plugins_manager = test_plugins_manager(codex_home.path().to_path_buf());
-    plugins_manager.set_auth_mode(Some(AuthMode::Chatgpt));
+    let plugins_manager = test_plugins_manager_with_options(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::Chatgpt),
+    );
     let discoverable_plugins = list_discoverable_plugins(
         &plugins_manager,
         discovery_input(plugins, &[], &[], &[]),
@@ -141,9 +156,9 @@ async fn omits_openai_curated_but_keeps_configured_marketplaces_for_remote_codex
     write_openai_curated_marketplace(&curated_root, &["slack"]);
 
     let bundled_marketplace_name = OPENAI_BUNDLED_MARKETPLACE_NAME;
-    let bundled_marketplace_root = codex_home
-        .path()
-        .join(format!(".tmp/marketplaces/{bundled_marketplace_name}"));
+    let bundled_marketplace_root = codex_home.path().join(format!(
+        ".tmp/bundled-marketplaces/{bundled_marketplace_name}"
+    ));
     write_file(
         &bundled_marketplace_root.join(".agents/plugins/marketplace.json"),
         &format!(
@@ -164,15 +179,18 @@ async fn omits_openai_curated_but_keeps_configured_marketplaces_for_remote_codex
 plugins = true
 
 [marketplaces.{bundled_marketplace_name}]
-source_type = "git"
-source = "/tmp/{bundled_marketplace_name}"
+source_type = "local"
+source = {bundled_marketplace_root:?}
 "#
         ),
     );
 
     let plugins = load_plugins_config(codex_home.path(), codex_home.path()).await;
-    let plugins_manager = test_plugins_manager(codex_home.path().to_path_buf());
-    plugins_manager.set_auth_mode(Some(AuthMode::Chatgpt));
+    let plugins_manager = test_plugins_manager_with_options(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::Chatgpt),
+    );
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let discoverable_plugins = list_discoverable_plugins(
         &plugins_manager,
@@ -222,7 +240,7 @@ async fn deduplicates_and_reprojects_cached_configured_marketplace_plugin() {
     let plugin_id = format!("{plugin_name}@{marketplace_name}");
     let marketplace_root = codex_home
         .path()
-        .join(format!(".tmp/marketplaces/{marketplace_name}"));
+        .join(format!(".tmp/bundled-marketplaces/{marketplace_name}"));
     write_file(
         &marketplace_root.join(".agents/plugins/marketplace.json"),
         &format!(
@@ -249,14 +267,18 @@ async fn deduplicates_and_reprojects_cached_configured_marketplace_plugin() {
 plugins = true
 
 [marketplaces.{marketplace_name}]
-source_type = "git"
-source = "/tmp/{marketplace_name}"
+source_type = "local"
+source = {marketplace_root:?}
 "#
         ),
     );
     let plugins = load_plugins_config(codex_home.path(), codex_home.path()).await;
-    let plugins_manager = test_plugins_manager(codex_home.path().to_path_buf());
-    assert!(plugins_manager.set_auth_mode(Some(AuthMode::Chatgpt)));
+    let auth_manager = test_auth_manager(Some(AuthMode::Chatgpt));
+    let plugins_manager = test_plugins_manager_with_auth_manager(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Arc::clone(&auth_manager),
+    );
     let chatgpt_projection = list_discoverable_plugins(
         &plugins_manager,
         discovery_input(plugins.clone(), &[plugin_id.as_str()], &[], &[]),
@@ -276,7 +298,7 @@ source = "/tmp/{marketplace_name}"
     };
     assert_eq!(chatgpt_projection, vec![expected.clone()]);
 
-    assert!(plugins_manager.set_auth_mode(Some(AuthMode::ApiKey)));
+    set_test_auth_mode(&auth_manager, Some(AuthMode::ApiKey)).await;
     let api_key_projection = list_discoverable_plugins(
         &plugins_manager,
         discovery_input(plugins, &[plugin_id.as_str()], &[], &[]),
@@ -300,8 +322,11 @@ async fn reprojects_cached_skill_availability_for_current_config() {
     write_openai_curated_marketplace(&curated_root, &["slack"]);
 
     let plugins = load_plugins_config(codex_home.path(), codex_home.path()).await;
-    let plugins_manager = test_plugins_manager(codex_home.path().to_path_buf());
-    plugins_manager.set_auth_mode(Some(AuthMode::Chatgpt));
+    let plugins_manager = test_plugins_manager_with_options(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::Chatgpt),
+    );
     let expected = ToolSuggestDiscoverablePlugin {
         id: "slack@openai-curated".to_string(),
         remote_plugin_id: None,
@@ -355,8 +380,11 @@ async fn does_not_advertise_skills_when_skill_loading_fails() {
     );
 
     let plugins = load_plugins_config(codex_home.path(), codex_home.path()).await;
-    let plugins_manager = test_plugins_manager(codex_home.path().to_path_buf());
-    plugins_manager.set_auth_mode(Some(AuthMode::Chatgpt));
+    let plugins_manager = test_plugins_manager_with_options(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::Chatgpt),
+    );
     let discoverable_plugins = list_discoverable_plugins(
         &plugins_manager,
         discovery_input(plugins, &[], &[], &[]),
@@ -395,8 +423,11 @@ async fn clear_cache_invalidates_cached_tool_suggest_metadata() {
     );
 
     let plugins = load_plugins_config(codex_home.path(), codex_home.path()).await;
-    let plugins_manager = test_plugins_manager(codex_home.path().to_path_buf());
-    plugins_manager.set_auth_mode(Some(AuthMode::Chatgpt));
+    let plugins_manager = test_plugins_manager_with_options(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::Chatgpt),
+    );
     let input = discovery_input(plugins, &[], &[], &[]);
     let expected_cached = vec![ToolSuggestDiscoverablePlugin {
         id: "slack@openai-curated".to_string(),
@@ -468,8 +499,11 @@ source = "/tmp/{marketplace_name}"
     install_marketplace_plugin(codex_home.path(), curated_root.as_path(), "installed").await;
 
     let plugins = load_plugins_config(codex_home.path(), codex_home.path()).await;
-    let plugins_manager = test_plugins_manager(codex_home.path().to_path_buf());
-    plugins_manager.set_auth_mode(Some(AuthMode::Chatgpt));
+    let plugins_manager = test_plugins_manager_with_options(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::Chatgpt),
+    );
     let discoverable_plugins = list_discoverable_plugins(
         &plugins_manager,
         discovery_input(plugins, &[], &[], &[]),
@@ -496,8 +530,11 @@ async fn normalizes_description() {
     install_marketplace_plugin(codex_home.path(), curated_root.as_path(), "installed").await;
 
     let plugins = load_plugins_config(codex_home.path(), codex_home.path()).await;
-    let plugins_manager = test_plugins_manager(codex_home.path().to_path_buf());
-    plugins_manager.set_auth_mode(Some(AuthMode::Chatgpt));
+    let plugins_manager = test_plugins_manager_with_options(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::Chatgpt),
+    );
     let discoverable_plugins = list_discoverable_plugins(
         &plugins_manager,
         discovery_input(plugins, &[], &[], &[]),
@@ -581,8 +618,11 @@ async fn omits_not_available_curated_plugins() {
     install_marketplace_plugin(codex_home.path(), curated_root.as_path(), "installed").await;
 
     let plugins = load_plugins_config(codex_home.path(), codex_home.path()).await;
-    let plugins_manager = test_plugins_manager(codex_home.path().to_path_buf());
-    plugins_manager.set_auth_mode(Some(AuthMode::Chatgpt));
+    let plugins_manager = test_plugins_manager_with_options(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::Chatgpt),
+    );
     let discoverable_plugins = list_discoverable_plugins(
         &plugins_manager,
         discovery_input(plugins, &[], &[], &[]),
@@ -623,8 +663,11 @@ async fn does_not_reload_marketplace_per_plugin() {
     }
 
     let plugins = load_plugins_config(codex_home.path(), codex_home.path()).await;
-    let plugins_manager = test_plugins_manager(codex_home.path().to_path_buf());
-    plugins_manager.set_auth_mode(Some(AuthMode::Chatgpt));
+    let plugins_manager = test_plugins_manager_with_options(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::Chatgpt),
+    );
     let buffer: &'static std::sync::Mutex<Vec<u8>> =
         Box::leak(Box::new(std::sync::Mutex::new(Vec::new())));
     let subscriber = tracing_subscriber::fmt()
@@ -903,7 +946,11 @@ plugins = true
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let mut plugins = load_plugins_config(codex_home.path(), codex_home.path()).await;
     plugins.chatgpt_base_url = format!("{}/backend-api", server.uri());
-    let plugins_manager = test_plugins_manager(codex_home.path().to_path_buf());
+    let plugins_manager = test_plugins_manager_with_options(
+        codex_home.path().to_path_buf(),
+        Some(Product::Codex),
+        Some(AuthMode::Chatgpt),
+    );
     fetch_and_cache_global_remote_plugin_catalog(
         codex_home.path(),
         &RemotePluginServiceConfig::new(
@@ -1034,7 +1081,7 @@ async fn install_marketplace_plugin(codex_home: &Path, marketplace_root: &Path, 
     let config = load_plugins_config(codex_home, marketplace_root).await;
     test_plugins_manager(codex_home.to_path_buf())
         .install_plugin(
-            &config.config_layer_stack,
+            &config,
             PluginInstallRequest {
                 plugin_name: plugin_name.to_string(),
                 marketplace_path: AbsolutePathBuf::try_from(

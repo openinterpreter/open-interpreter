@@ -22,6 +22,8 @@ axum = { workspace = true, features = ["http1", "tokio", "ws"] }
 clap = { workspace = true, features = ["derive"] }
 codex-code-mode-protocol = { workspace = true }
 codex-code-mode-runtime = { workspace = true }
+codex-otel = { workspace = true }
+codex-otel-trace-websocket = { workspace = true }
 codex-protocol = { workspace = true }
 futures = { workspace = true }
 prost = "0.14.3"
@@ -39,4 +41,3 @@ codex-code-mode = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
-tokio-tungstenite = { workspace = true }

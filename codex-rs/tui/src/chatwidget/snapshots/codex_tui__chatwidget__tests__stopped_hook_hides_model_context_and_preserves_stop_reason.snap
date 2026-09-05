@@ -1,0 +1,7 @@
+---
+source: tui/src/chatwidget/tests/status_and_layout.rs
+expression: history
+---
+• Hook stopped
+  └ The hook stopped this turn for an important reason.
+    This second line must remain visible in full.

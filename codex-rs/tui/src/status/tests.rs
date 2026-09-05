@@ -733,11 +733,13 @@ async fn status_snapshot_shows_active_user_defined_profile() {
 async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_link() {
     let temp_home = TempDir::new().expect("temp home");
     let mut config = test_config(&temp_home).await;
+    config.model = Some("gpt-5.6-sol".to_string());
     config.model_provider_id = "amazon-bedrock".to_string();
     config.model_provider =
         ModelProviderInfo::create_amazon_bedrock_provider(Some(ModelProviderAwsAuthInfo {
             profile: None,
             region: Some("eu-west-1".to_string()),
+            auth_refresh: None,
         }));
     config.model_provider.base_url =
         Some("https://bedrock-mantle.us-east-1.api.aws/openai/v1".to_string());

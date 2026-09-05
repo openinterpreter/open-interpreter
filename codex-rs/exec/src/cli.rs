@@ -2,6 +2,7 @@ use clap::Args;
 use clap::FromArgMatches;
 use clap::Parser;
 use clap::ValueEnum;
+use codex_protocol::protocol::ThreadSource;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::SharedCliOptions;
 use std::path::PathBuf;
@@ -9,21 +10,25 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(
     version,
-    override_usage = "codex exec [OPTIONS] [PROMPT]\n       codex exec [OPTIONS] <COMMAND> [ARGS]"
+    override_usage = exec_usage()
 )]
 pub struct Cli {
     /// Action to perform. If omitted, runs a new non-interactive session.
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Error out when config.toml contains fields that are not recognized by this version of Codex.
+    /// Error out when config.toml contains fields that are not recognized by this version.
     #[arg(long = "strict-config", global = true, default_value_t = false)]
     pub strict_config: bool,
 
     #[clap(flatten)]
     pub shared: ExecSharedCliOptions,
 
-    /// Allow running Codex outside a Git repository.
+    /// Source classification for newly created or forked threads.
+    #[arg(long = "thread-source", value_name = "SOURCE", global = true)]
+    pub thread_source: Option<ThreadSource>,
+
+    /// Allow running the agent outside a Git repository.
     #[arg(long = "skip-git-repo-check", global = true, default_value_t = false)]
     pub skip_git_repo_check: bool,
 
@@ -73,6 +78,11 @@ pub struct Cli {
     /// a prompt is also provided, stdin is appended as a `<stdin>` block.
     #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
     pub prompt: Option<String>,
+}
+
+fn exec_usage() -> String {
+    let command = codex_product_info::Product::current().command_name();
+    format!("{command} exec [OPTIONS] [PROMPT]\n       {command} exec [OPTIONS] <COMMAND> [ARGS]")
 }
 
 impl std::ops::Deref for Cli {

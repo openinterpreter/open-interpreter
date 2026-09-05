@@ -1,4 +1,5 @@
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_redacted_string::RedactedString;
 use schemars::JsonSchema;
 use schemars::r#gen::SchemaGenerator;
 use schemars::schema::InstanceType;
@@ -20,6 +21,23 @@ use ts_rs::TS;
 use wildmatch::WildMatchPattern;
 
 use crate::openai_models::ReasoningEffort;
+
+/// Limit for the text included in `codex.tool_result` log records.
+/// This does not affect model-visible output. Raising it can expose more tool data to logs.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[serde(default)]
+pub struct ToolResultLogConfig {
+    /// Maximum UTF-8 bytes before the truncation notice. Defaults to 2048.
+    pub max_bytes: usize,
+}
+
+impl Default for ToolResultLogConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes: 2 * 1024,
+        }
+    }
+}
 
 /// Selects which part of the active context is charged against
 /// `model_auto_compact_token_limit`.
@@ -554,7 +572,7 @@ pub struct ModelProviderAuthInfo {
 
     /// Command arguments.
     #[serde(default)]
-    pub args: Vec<String>,
+    pub args: Vec<RedactedString>,
 
     /// Maximum time to wait for the token command to exit successfully.
     #[serde(default = "default_provider_auth_timeout_ms")]

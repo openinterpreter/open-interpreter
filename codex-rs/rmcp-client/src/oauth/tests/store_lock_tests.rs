@@ -103,10 +103,43 @@ fn sample_tokens() -> StoredOAuthTokens {
     StoredOAuthTokens {
         server_name: "test-server".to_string(),
         url: "https://example.test".to_string(),
+        issuer: Some("https://issuer.example.test".to_string()),
         client_id: "client-id".to_string(),
         token_response: WrappedOAuthTokenResponse(response),
         expires_at,
     }
+}
+
+#[test]
+fn file_credentials_keep_repeated_local_prefixes_isolated() -> Result<()> {
+    let _env = TempCodexHome::new();
+    let config: codex_config::McpServerConfig = serde_json::from_value(serde_json::json!({
+        "url": "https://example.test",
+    }))?;
+    let mut first = sample_tokens();
+    first.server_name = config.oauth_credential_name("local:foo").into_owned();
+    first.expires_at = None;
+    first.token_response.0.set_expires_in(None);
+    save_oauth_tokens_to_file(&first)?;
+
+    let second_name = config.oauth_credential_name("local:local:foo");
+    assert_eq!(load_oauth_tokens_from_file(&second_name, &first.url)?, None);
+
+    let mut second = first.clone();
+    second.server_name = second_name.into_owned();
+    second
+        .token_response
+        .0
+        .set_access_token(AccessToken::new("second-token".to_string()));
+    save_oauth_tokens_to_file(&second)?;
+
+    for expected in [first, second] {
+        assert_eq!(
+            load_oauth_tokens_from_file(&expected.server_name, &expected.url)?,
+            Some(expected)
+        );
+    }
+    Ok(())
 }
 
 #[test]

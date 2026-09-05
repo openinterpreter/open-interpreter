@@ -78,6 +78,24 @@ pub struct HttpResponseBodyStream {
 }
 
 impl HttpResponseBodyStream {
+    /// Creates an in-memory response stream from pre-buffered chunks.
+    ///
+    /// This is useful for [`crate::HttpClient`] implementations that already
+    /// own the response bytes, including lightweight test clients.
+    #[doc(hidden)]
+    pub fn from_chunks(chunks: Vec<Vec<u8>>) -> Self {
+        let body = futures::stream::iter(
+            chunks
+                .into_iter()
+                .map(|chunk| Ok::<Bytes, HttpError>(chunk.into())),
+        );
+        Self {
+            inner: HttpResponseBodyStreamInner::Local {
+                body: Box::pin(body),
+            },
+        }
+    }
+
     pub(super) fn local(response: HttpResponse) -> Self {
         Self {
             inner: HttpResponseBodyStreamInner::Local {

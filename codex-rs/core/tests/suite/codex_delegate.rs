@@ -240,9 +240,9 @@ default_tools_approval_mode = "prompt"
         panic!("expected the model request and MCP-denial continuation");
     };
     let output = completion_request.function_call_output(call_id);
-    let response = output["output"]
+    let response = output["output"][1]["text"]
         .as_str()
-        .expect("MCP tool output should be a string");
+        .expect("MCP tool output should contain an input_text item");
     assert!(
         response.contains("approval policy is never"),
         "MCP tool should be rejected by the delegate's approval policy: {response}"
@@ -282,7 +282,7 @@ async fn codex_delegate_rejects_skill_mcp_dependency_installation_without_prompt
             let agents_dir = skill_dir.join("agents");
             fs.create_directory(
                 &PathUri::from_host_native_path(&agents_dir)?,
-                CreateDirectoryOptions { recursive: true },
+                CreateDirectoryOptions { recursive: true, follow_symlinks: true },
                 /*sandbox*/ None,
             )
             .await?;
@@ -290,14 +290,14 @@ async fn codex_delegate_rejects_skill_mcp_dependency_installation_without_prompt
                 &PathUri::from_host_native_path(skill_dir.join("SKILL.md"))?,
                 b"---\nname: dependency-skill\ndescription: Requires an MCP server.\n---\n\nReview dependency instructions.\n"
                     .to_vec(),
-                /*sandbox*/ None,
+                Default::default(), /*sandbox*/ None,
             )
             .await?;
             fs.write_file(
                 &PathUri::from_host_native_path(agents_dir.join("openai.yaml"))?,
                 b"dependencies:\n  tools:\n    - type: mcp\n      value: missing-review-server\n      transport: streamable_http\n      url: http://127.0.0.1:1/mcp\n"
                     .to_vec(),
-                /*sandbox*/ None,
+                Default::default(), /*sandbox*/ None,
             )
             .await?;
             Ok(())

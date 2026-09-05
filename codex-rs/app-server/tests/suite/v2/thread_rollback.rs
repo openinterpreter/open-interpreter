@@ -22,8 +22,10 @@ use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
+use serde_json::json;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
@@ -142,6 +144,7 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
     let start_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
+            history_mode: Some(ThreadHistoryMode::Legacy),
             ..Default::default()
         })
         .await?;
@@ -195,6 +198,27 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
     let _completed2 = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    drop(mcp);
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread.id.clone(),
+            model: Some("gpt-5.2".to_string()),
+            config: Some([("model_reasoning_effort".to_string(), json!("high"))].into()),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
+    // Drain the resume snapshots before checking rollback notification ordering.
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("thread/goal/cleared"),
     )
     .await??;
     mcp.clear_message_buffer();
@@ -252,6 +276,13 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
 
     assert_eq!(rolled_back_thread.turns.len(), 1);
     assert_eq!(rolled_back_thread.status, ThreadStatus::Idle);
+    assert_eq!(
+        (
+            rolled_back_thread.model.as_deref(),
+            rolled_back_thread.reasoning_effort
+        ),
+        (Some("gpt-5.2"), Some(ReasoningEffort::High))
+    );
     assert_eq!(rolled_back_thread.turns[0].items.len(), 2);
     match &rolled_back_thread.turns[0].items[0] {
         ThreadItem::UserMessage { content, .. } => {

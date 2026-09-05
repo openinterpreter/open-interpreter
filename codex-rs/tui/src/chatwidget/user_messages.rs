@@ -131,6 +131,7 @@ pub(crate) struct ThreadInputState {
     pub(super) rejected_steer_history_records: VecDeque<UserMessageHistoryRecord>,
     pub(super) queued_user_messages: VecDeque<QueuedUserMessage>,
     pub(super) queued_user_message_history_records: VecDeque<UserMessageHistoryRecord>,
+    pub(crate) recovered_queue: bool,
     pub(super) user_turn_pending_start: bool,
     pub(super) submit_pending_steers_after_interrupt: bool,
     pub(super) current_collaboration_mode: CollaborationMode,
@@ -596,8 +597,58 @@ pub(crate) fn mention_bindings_from_user_inputs(
             | UserInput::LocalAudio { .. } => None,
         })
         .collect();
+    for item in items {
+        let UserInput::Text {
+            text,
+            text_elements,
+        } = item
+        else {
+            continue;
+        };
+        for element in text_elements {
+            if let Some((mention, path, end)) =
+                crate::task_mentions::parse_task_link(text, element.byte_range.start)
+                && end == element.byte_range.end
+                && element
+                    .placeholder()
+                    .and_then(|placeholder| placeholder.strip_prefix('@'))
+                    == Some(mention.as_str())
+            {
+                mention_bindings.push(MentionBinding {
+                    sigil: '@',
+                    mention,
+                    path,
+                });
+            }
+        }
+    }
     mention_bindings.sort_by_key(|binding| {
-        mention_start(binding.sigil, &binding.mention).unwrap_or(usize::MAX)
+        let token = if crate::task_mentions::valid_thread_path(&binding.path).is_some() {
+            crate::task_mentions::format_task_link(&binding.mention, &binding.path)
+        } else {
+            format!("{}{}", binding.sigil, binding.mention)
+        };
+        let mut text_offset = 0;
+        items
+            .iter()
+            .find_map(|item| {
+                let UserInput::Text {
+                    text,
+                    text_elements,
+                } = item
+                else {
+                    return None;
+                };
+                let offset = text_offset;
+                text_offset += text.len();
+                text_elements.iter().find_map(|element| {
+                    (text.get(element.byte_range.start..element.byte_range.end)
+                        == Some(token.as_str()))
+                    .then_some(offset + element.byte_range.start)
+                })
+            })
+            .or_else(|| mention_start(binding.sigil, &binding.mention))
+            .unwrap_or(usize::MAX)
     });
     mention_bindings
 }
@@ -713,6 +764,8 @@ impl ChatWidget {
                 | UserInput::Mention { .. } => {}
             }
         }
+
+        (message, text_elements) = crate::task_mentions::decode_task_links(&message, text_elements);
 
         Self::user_message_display_from_parts(
             message,

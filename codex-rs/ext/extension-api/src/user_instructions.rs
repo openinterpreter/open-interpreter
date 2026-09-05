@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
 
-/// User instructions supplied by the host.
+/// Instructions supplied by the host.
 ///
 /// `source` must be an absolute filesystem path because the app-server
 /// `instructionSources` API currently exposes instruction sources as
@@ -11,8 +11,8 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 // TODO(anp): Replace the absolute path with a more general instruction-source
 // abstraction when non-filesystem providers need first-class attribution.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UserInstructions {
-    /// Model-visible user instruction text.
+pub struct Instructions {
+    /// Model-visible instruction text.
     pub text: String,
     /// Absolute filesystem path reported through `instructionSources`.
     pub source: AbsolutePathBuf,
@@ -22,7 +22,7 @@ pub struct UserInstructions {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LoadedUserInstructions {
     /// Loaded instructions, or `None` when the provider has no applicable text.
-    pub instructions: Option<UserInstructions>,
+    pub instructions: Option<Instructions>,
     /// Recoverable loading problems that should be surfaced during startup.
     pub warnings: Vec<String>,
 }

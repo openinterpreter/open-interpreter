@@ -20,10 +20,13 @@ pub use codex_extension_items::image_generation::ImageGenerationItem;
 pub use codex_extension_items::sleep::SleepItem;
 pub use codex_extension_items::web_search::WebSearchAction;
 pub use codex_extension_items::web_search::WebSearchItem;
+use codex_protocol::approvals::ExecApprovalKind as CoreExecApprovalKind;
 use codex_protocol::approvals::GuardianAssessmentAction as CoreGuardianAssessmentAction;
 use codex_protocol::approvals::GuardianAssessmentDecisionSource as CoreGuardianAssessmentDecisionSource;
 use codex_protocol::approvals::GuardianCommandSource as CoreGuardianCommandSource;
 use codex_protocol::items::AgentMessageContent as CoreAgentMessageContent;
+pub use codex_protocol::items::AgentMessageDelivery;
+pub use codex_protocol::items::AsyncUserInputQuestion;
 use codex_protocol::items::CollabAgentTool as CoreCollabAgentTool;
 use codex_protocol::items::CollabAgentToolCallStatus as CoreCollabAgentToolCallStatus;
 use codex_protocol::items::CommandExecutionStatus as CoreCommandExecutionStatus;
@@ -32,6 +35,7 @@ use codex_protocol::items::McpToolCallStatus as CoreMcpToolCallStatus;
 use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::memory_citation::MemoryCitation as CoreMemoryCitation;
 use codex_protocol::memory_citation::MemoryCitationEntry as CoreMemoryCitationEntry;
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -250,6 +254,18 @@ pub enum ThreadItem {
         phase: Option<MessagePhase>,
         #[serde(default)]
         memory_citation: Option<MemoryCitation>,
+        #[serde(default)]
+        delivery: Option<AgentMessageDelivery>,
+        #[serde(default)]
+        questions: Option<Vec<AsyncUserInputQuestion>>,
+    },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    FunctionCallOutput {
+        id: String,
+        name: String,
+        namespace: Option<String>,
+        output: FunctionCallOutputBody,
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -425,6 +441,7 @@ impl ThreadItem {
             ThreadItem::UserMessage { id, .. }
             | ThreadItem::HookPrompt { id, .. }
             | ThreadItem::AgentMessage { id, .. }
+            | ThreadItem::FunctionCallOutput { id, .. }
             | ThreadItem::Plan { id, .. }
             | ThreadItem::Reasoning { id, .. }
             | ThreadItem::CommandExecution { id, .. }
@@ -632,6 +649,15 @@ pub enum GuardianApprovalReviewAction {
         argv: Vec<String>,
         cwd: AbsolutePathBuf,
     },
+    /// A child approval for input to an existing command execution item.
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    WriteStdin {
+        approval_id: String,
+        process_id: String,
+        stdin: String,
+        cwd: LegacyAppPathString,
+    },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     ApplyPatch {
@@ -685,6 +711,17 @@ impl From<CoreGuardianAssessmentAction> for GuardianApprovalReviewAction {
                 program,
                 argv,
                 cwd,
+            },
+            CoreGuardianAssessmentAction::WriteStdin {
+                approval_id,
+                process_id,
+                stdin,
+                cwd,
+            } => Self::WriteStdin {
+                approval_id,
+                process_id,
+                stdin,
+                cwd: cwd.into(),
             },
             CoreGuardianAssessmentAction::ApplyPatch { cwd, files } => {
                 Self::ApplyPatch { cwd, files }
@@ -748,6 +785,19 @@ impl TryFrom<GuardianApprovalReviewAction> for CoreGuardianAssessmentAction {
                 program,
                 argv,
                 cwd,
+            },
+            GuardianApprovalReviewAction::WriteStdin {
+                approval_id,
+                process_id,
+                stdin,
+                cwd,
+            } => Self::WriteStdin {
+                approval_id,
+                process_id,
+                stdin,
+                cwd: cwd
+                    .try_into()
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?,
             },
             GuardianApprovalReviewAction::ApplyPatch { cwd, files } => {
                 Self::ApplyPatch { cwd, files }
@@ -833,8 +883,16 @@ impl From<CoreTurnItem> for ThreadItem {
                     text,
                     phase: agent.phase,
                     memory_citation: agent.memory_citation.map(Into::into),
+                    delivery: agent.delivery,
+                    questions: agent.questions,
                 }
             }
+            CoreTurnItem::FunctionCallOutput(output) => ThreadItem::FunctionCallOutput {
+                id: output.id,
+                name: output.name,
+                namespace: output.namespace,
+                output: output.output,
+            },
             CoreTurnItem::Plan(plan) => ThreadItem::Plan {
                 id: plan.id,
                 text: plan.text,
@@ -935,6 +993,7 @@ impl From<CoreTurnItem> for ThreadItem {
                     transparent_background: None,
                     failure: None,
                     saved_path: image.saved_path,
+                    imagegen_request_id: None,
                 })
             }
             CoreTurnItem::EnteredReviewMode(review) => ThreadItem::EnteredReviewMode {
@@ -1053,6 +1112,10 @@ pub enum CollabAgentTool {
     ResumeAgent,
     Wait,
     CloseAgent,
+    SendMessage,
+    FollowupTask,
+    InterruptAgent,
+    ListAgents,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -1145,6 +1208,7 @@ pub enum CollabAgentToolCallStatus {
     InProgress,
     Completed,
     Failed,
+    Interrupted,
 }
 
 impl From<CoreCollabAgentTool> for CollabAgentTool {
@@ -1155,6 +1219,10 @@ impl From<CoreCollabAgentTool> for CollabAgentTool {
             CoreCollabAgentTool::ResumeAgent => Self::ResumeAgent,
             CoreCollabAgentTool::Wait => Self::Wait,
             CoreCollabAgentTool::CloseAgent => Self::CloseAgent,
+            CoreCollabAgentTool::SendMessage => Self::SendMessage,
+            CoreCollabAgentTool::FollowupTask => Self::FollowupTask,
+            CoreCollabAgentTool::InterruptAgent => Self::InterruptAgent,
+            CoreCollabAgentTool::ListAgents => Self::ListAgents,
         }
     }
 }
@@ -1165,6 +1233,7 @@ impl From<CoreCollabAgentToolCallStatus> for CollabAgentToolCallStatus {
             CoreCollabAgentToolCallStatus::InProgress => Self::InProgress,
             CoreCollabAgentToolCallStatus::Completed => Self::Completed,
             CoreCollabAgentToolCallStatus::Failed => Self::Failed,
+            CoreCollabAgentToolCallStatus::Interrupted => Self::Interrupted,
         }
     }
 }
@@ -1176,6 +1245,7 @@ pub enum SubAgentActivityKind {
     Started,
     Interacted,
     Interrupted,
+    Completed,
 }
 
 impl From<CoreSubAgentActivityKind> for SubAgentActivityKind {
@@ -1184,6 +1254,7 @@ impl From<CoreSubAgentActivityKind> for SubAgentActivityKind {
             CoreSubAgentActivityKind::Started => SubAgentActivityKind::Started,
             CoreSubAgentActivityKind::Interacted => SubAgentActivityKind::Interacted,
             CoreSubAgentActivityKind::Interrupted => SubAgentActivityKind::Interrupted,
+            CoreSubAgentActivityKind::Completed => SubAgentActivityKind::Completed,
         }
     }
 }
@@ -1274,6 +1345,8 @@ pub struct ItemGuardianApprovalReviewStartedNotification {
     /// In most cases, one review maps to one target item. The exceptions are
     /// - execve reviews, where a single command may contain multiple execve
     ///   calls to review (only possible when using the shell_zsh_fork feature)
+    /// - stdin reviews, which refer to the existing parent command item and
+    ///   have a separate approval ID in the action payload
     /// - network policy reviews, where there is no target item
     ///
     /// A network call is triggered by a CommandExecution item, so having a
@@ -1306,6 +1379,8 @@ pub struct ItemGuardianApprovalReviewCompletedNotification {
     /// In most cases, one review maps to one target item. The exceptions are
     /// - execve reviews, where a single command may contain multiple execve
     ///   calls to review (only possible when using the shell_zsh_fork feature)
+    /// - stdin reviews, which refer to the existing parent command item and
+    ///   have a separate approval ID in the action payload
     /// - network policy reviews, where there is no target item
     ///
     /// A network call is triggered by a CommandExecution item, so having a
@@ -1441,10 +1516,24 @@ pub struct FileChangePatchUpdatedNotification {
     pub changes: Vec<FileUpdateChange>,
 }
 
+v2_enum_from_core! {
+    /// Distinguishes a command approval from input sent to an existing terminal.
+    #[derive(Default)]
+    #[ts(rename_all = "camelCase")]
+    pub enum CommandExecutionApprovalKind from CoreExecApprovalKind {
+        #[default]
+        Command,
+        WriteStdin,
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct CommandExecutionRequestApprovalParams {
+    /// Kind of action under review. Defaults to `command` for older servers.
+    #[serde(default)]
+    pub kind: CommandExecutionApprovalKind,
     pub thread_id: String,
     pub turn_id: String,
     pub item_id: String,
@@ -1458,6 +1547,7 @@ pub struct CommandExecutionRequestApprovalParams {
     /// For zsh-exec-bridge subcommand approvals, multiple callbacks can belong to
     /// one parent `itemId`, so `approvalId` is a distinct opaque callback id
     /// (a UUID) used to disambiguate routing.
+    /// Stdin approvals also use a distinct callback id; inspect `kind` to distinguish them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub approval_id: Option<String>,

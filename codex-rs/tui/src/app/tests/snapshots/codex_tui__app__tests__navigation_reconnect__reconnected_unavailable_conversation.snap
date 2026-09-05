@@ -1,0 +1,12 @@
+---
+source: tui/src/app/tests/navigation_reconnect_tests.rs
+expression: "format!(\"{content}\\n{}\", render_bottom_popup(&app.chat_widget, 80))"
+---
+Cached previous conversation
+ 
+• This conversation is unavailable. Its cached transcript and draft remain here; input is paused. Open the agent picker or return to the parent to continue.
+• Reconnected. No input was resent. Review uncertain submissions before retrying; recovered queues remain paused.
+• The rename target disappeared. Unsubmitted title: Keep this task draft!
+› latest draft
+
+  gpt-test default · /tmp/project

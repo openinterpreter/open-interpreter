@@ -1,36 +1,23 @@
 //! History cell for hook execution.
 //!
 //! Hooks are intentionally quieter than normal tool calls. A hook that starts and finishes
-//! successfully without output should not leave a transcript artifact, and very fast hooks should
-//! not flash in the viewport. This cell keeps that policy local by treating each hook run as a
-//! small rendering state machine:
+//! successfully without user-facing output should not leave a transcript artifact, and very fast
+//! hooks should not flash in the viewport. Model-facing hook context never appears in the TUI. This
+//! cell keeps that policy local by treating each hook run as a small rendering state machine:
 //!
 //! 1. New runs begin hidden in `PendingReveal`.
-//! 2. Runs that outlive the reveal delay become visible and may be coalesced with adjacent runs.
-//! 3. Visible quiet successes linger briefly so they do not disappear in the same frame they were
-//!    first drawn.
-//! 4. Completed runs only persist when they have output or a non-success status.
+//! 2. Revealed runs contribute to the compact activity summary, never transcript lines.
+//! 3. Quiet completions leave the summary immediately but retain their existing cleanup timer
+//!    for exec-flush and usage-output ordering.
+//! 4. Completed runs only persist when they have user-facing output or a non-success status.
 use super::HistoryCell;
 use super::plain_lines;
-use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
-use crate::motion::MotionMode;
-use crate::motion::ReducedMotionIndicator;
-use crate::motion::activity_indicator;
-use crate::motion::shimmer_text;
-use crate::render::line_utils::push_owned_lines;
-use crate::render::renderable::Renderable;
-use crate::ui_consts::TRANSCRIPT_HINT;
-use crate::wrapping::RtOptions;
-use crate::wrapping::word_wrap_line;
-use codex_app_server_protocol::HookEventName;
 use codex_app_server_protocol::HookOutputEntry;
 use codex_app_server_protocol::HookOutputEntryKind;
 use codex_app_server_protocol::HookRunStatus;
 use codex_app_server_protocol::HookRunSummary;
 use ratatui::prelude::*;
 use ratatui::style::Stylize;
-use ratatui::widgets::Paragraph;
-use ratatui::widgets::Wrap;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -38,31 +25,26 @@ use std::time::Instant;
 pub(crate) struct HookCell {
     /// Hook runs that are active, lingering, or have persistent output to render.
     runs: Vec<HookRunCell>,
-    /// Mirrors the global animation setting so transcript rendering and viewport rendering agree.
-    animations_enabled: bool,
 }
 
 /// Minimum runtime before a hook is allowed to draw.
 ///
-/// Helps avoids a flash of text forwork that was effectively instant.
+/// Avoids flashing activity for work that was effectively instant.
 const HOOK_RUN_REVEAL_DELAY: Duration = Duration::from_millis(300);
 
-/// Minimum time a quiet success remains on screen after becoming visible.
+/// Minimum interval after reveal before quiet-completion bookkeeping is removed.
 ///
-/// This pairs with `HOOK_RUN_REVEAL_DELAY`: once the user has seen a hook row, keep it stable long
-/// enough to read instead of removing it immediately when the success event arrives.
+/// The activity summary clears on completion; retain the existing cleanup timing
+/// used by exec flushing and deferred usage output.
 const QUIET_HOOK_MIN_VISIBLE: Duration = Duration::from_millis(600);
 
 const HOOK_OUTPUT_INDENT: &str = "  ";
 const HOOK_OUTPUT_BODY_INDENT: &str = "    ";
-const HOOK_CONTEXT_MAX_DISPLAY_ROWS: usize = 3;
 
 #[derive(Debug)]
 struct HookRunCell {
     /// Stable protocol id used to match begin/end updates for the same hook invocation.
     id: String,
-    /// Hook event kind, kept outside `state` so a begin update can refresh metadata in place.
-    event_name: HookEventName,
     /// Optional hook-supplied detail shown next to the running header.
     status_message: Option<String>,
     /// Rendering lifecycle for this run.
@@ -73,22 +55,16 @@ struct HookRunCell {
 enum HookRunState {
     /// A newly-started run that is active but deliberately hidden until `reveal_deadline`.
     PendingReveal {
-        /// The original start time, used for spinner phase and grouping once revealed.
-        start_time: Instant,
         /// First instant at which the run may become visible.
         reveal_deadline: Instant,
     },
     /// A run that survived the reveal delay and is currently shown as running.
     VisibleRunning {
-        /// The original start time, used to keep animation timing stable across transitions.
-        start_time: Instant,
         /// First instant the run was actually rendered, used by quiet-success linger.
         visible_since: Instant,
     },
     /// A visible run that completed successfully without output but is still lingering briefly.
     QuietLinger {
-        /// The original start time, retained so the spinner does not jump during the linger frame.
-        start_time: Instant,
         /// Instant after which the quiet success can be removed entirely.
         removal_deadline: Instant,
     },
@@ -101,42 +77,17 @@ enum HookRunState {
     },
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct RunningHookGroupKey {
-    event_name: HookEventName,
-    status_message: Option<String>,
-}
-
-/// Accumulator for adjacent running hooks that can share one status line.
-///
-/// Grouping happens only while building display lines, the underlying runs stay separate so their
-/// protocol ids and completion transitions remain independent.
-struct RunningHookGroup {
-    /// Shared event/status pair for every run in this display group.
-    key: RunningHookGroupKey,
-    /// Earliest start time in the group, so the combined spinner reflects the oldest work.
-    start_time: Option<Instant>,
-    /// Number of adjacent runs represented by the group line.
-    count: usize,
-}
-
 impl HookCell {
     /// Creates a cell around a hook that has just started.
-    fn new_active(run: HookRunSummary, animations_enabled: bool) -> Self {
-        let mut cell = Self {
-            runs: Vec::new(),
-            animations_enabled,
-        };
+    fn new_active(run: HookRunSummary) -> Self {
+        let mut cell = Self { runs: Vec::new() };
         cell.start_run(run);
         cell
     }
 
     /// Creates a cell around an already-completed hook from transcript/history data.
-    fn new_completed(run: HookRunSummary, animations_enabled: bool) -> Self {
-        let mut cell = Self {
-            runs: Vec::new(),
-            animations_enabled,
-        };
+    fn new_completed(run: HookRunSummary) -> Self {
+        let mut cell = Self { runs: Vec::new() };
         cell.add_completed_run(run);
         cell
     }
@@ -155,11 +106,6 @@ impl HookCell {
         !self.is_active() && !self.is_empty()
     }
 
-    /// Returns whether this cell has at least one line worth drawing right now.
-    pub(crate) fn should_render(&self) -> bool {
-        self.runs.iter().any(|run| run.state.should_render())
-    }
-
     /// Splits durable completed runs from ephemeral active-cell bookkeeping.
     ///
     /// Quiet successes are left behind so they can disappear from the active cell, while failures,
@@ -175,15 +121,41 @@ impl HookCell {
             }
         }
         self.runs = remaining;
-        (!completed.is_empty()).then_some(Self {
-            runs: completed,
-            animations_enabled: self.animations_enabled,
-        })
+        (!completed.is_empty()).then_some(Self { runs: completed })
     }
 
-    /// Used by callers that need to know whether the active cell currently occupies viewport space.
+    /// Returns true for revealed runs still participating in lifecycle bookkeeping.
     pub(crate) fn has_visible_running_run(&self) -> bool {
         self.runs.iter().any(|run| run.state.is_running_visible())
+    }
+
+    /// Describes revealed hooks without implying per-handler completion progress.
+    /// Synchronous completions can arrive together after the whole batch finishes.
+    pub(crate) fn running_status_summary(&self) -> Option<String> {
+        let mut messages = self
+            .runs
+            .iter()
+            .filter(|run| matches!(run.state, HookRunState::VisibleRunning { .. }))
+            .map(|run| {
+                run.status_message
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|message| !message.is_empty())
+            })
+            .peekable();
+        let message = messages.next()?;
+        let multiple = messages.peek().is_some();
+        Some(
+            if let Some(message) = message
+                && messages.all(|other| other == Some(message))
+            {
+                message.to_string()
+            } else if multiple {
+                "Running hooks".to_string()
+            } else {
+                "Running hook".to_string()
+            },
+        )
     }
 
     /// Advances reveal/removal timers and reports whether rendering should be refreshed.
@@ -204,14 +176,12 @@ impl HookCell {
     pub(crate) fn start_run(&mut self, run: HookRunSummary) {
         let now = Instant::now();
         if let Some(existing) = self.runs.iter_mut().find(|existing| existing.id == run.id) {
-            existing.event_name = run.event_name;
             existing.status_message = run.status_message;
             existing.state = HookRunState::pending(now);
             return;
         }
         self.runs.push(HookRunCell {
             id: run.id,
-            event_name: run.event_name,
             status_message: run.status_message,
             state: HookRunState::pending(now),
         });
@@ -235,14 +205,12 @@ impl HookCell {
             return true;
         }
         let HookRunSummary {
-            event_name,
             status_message,
             status,
             entries,
             ..
         } = run;
         let existing = &mut self.runs[index];
-        existing.event_name = event_name;
         existing.status_message = status_message;
         existing.state = HookRunState::completed(status, entries);
         true
@@ -257,7 +225,6 @@ impl HookCell {
         }
         let HookRunSummary {
             id,
-            event_name,
             status_message,
             status,
             entries,
@@ -265,7 +232,6 @@ impl HookCell {
         } = run;
         self.runs.push(HookRunCell {
             id,
-            event_name,
             status_message,
             state: HookRunState::completed(status, entries),
         });
@@ -301,93 +267,74 @@ impl HookCell {
         }
     }
 
-    /// Builds hook lines for either the bounded main viewport or the full transcript overlay.
-    fn output_lines(&self, width: u16, render_full_context: bool) -> Vec<Line<'static>> {
+    /// Builds only durable completion output; active hooks use the activity summary.
+    fn output_lines(&self) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
-        let mut running_group: Option<RunningHookGroup> = None;
         for run in &self.runs {
-            if !run.state.should_render() {
-                continue;
-            }
-
-            let Some(key) = run.running_group_key() else {
-                // Completed runs keep their own output lines, so any pending running group must be
-                // emitted before drawing the completed run.
-                if let Some(group) = running_group.take() {
-                    push_running_hook_group(&mut lines, &group, self.animations_enabled);
-                }
-                push_hook_line_separator(&mut lines);
-                run.push_display_lines(
-                    &mut lines,
-                    self.animations_enabled,
-                    width,
-                    render_full_context,
-                );
+            let HookRunState::Completed { status, entries } = &run.state else {
                 continue;
             };
-
-            if let Some(group) = running_group.as_mut()
-                && group.key == key
-            {
-                group.count += 1;
-                // Preserve the earliest start time so grouped spinners do not reset when a later
-                // adjacent hook is folded into the same line.
-                group.start_time = earliest_instant(group.start_time, run.state.start_time());
-                continue;
+            if !lines.is_empty() {
+                lines.push("".into());
             }
-
-            if let Some(group) =
-                running_group.replace(RunningHookGroup::new(key, run.state.start_time()))
+            let system_message = entries
+                .iter()
+                .find(|entry| entry.kind == HookOutputEntryKind::Warning);
+            let mut system_message_lines = system_message.map(|entry| entry.text.split('\n'));
+            if *status == HookRunStatus::Completed
+                && let Some(first_line) = system_message_lines.as_mut().and_then(Iterator::next)
             {
-                push_running_hook_group(&mut lines, &group, self.animations_enabled);
+                lines.push(vec!["↳ Hook · ".dim(), first_line.to_string().into()].into());
+            } else {
+                let header_text = match status {
+                    HookRunStatus::Completed => "Hook completed",
+                    HookRunStatus::Failed => "Hook failed",
+                    HookRunStatus::Blocked => "Blocked by hook",
+                    HookRunStatus::Stopped => "Hook stopped",
+                    HookRunStatus::Running => "Hook running",
+                };
+                lines.push(
+                    vec![
+                        hook_completed_bullet(*status),
+                        " ".into(),
+                        header_text.into(),
+                    ]
+                    .into(),
+                );
+                if let Some(first_line) = system_message_lines.as_mut().and_then(Iterator::next) {
+                    lines.push(format!("{HOOK_OUTPUT_INDENT}└ {first_line}").into());
+                }
             }
-        }
-        if let Some(group) = running_group {
-            push_running_hook_group(&mut lines, &group, self.animations_enabled);
+            if let Some(system_message_lines) = system_message_lines {
+                for line in system_message_lines {
+                    if line.is_empty() {
+                        lines.push("".into());
+                    } else {
+                        lines.push(format!("{HOOK_OUTPUT_BODY_INDENT}{line}").into());
+                    }
+                }
+            }
+            for entry in entries {
+                if matches!(
+                    entry.kind,
+                    HookOutputEntryKind::Warning | HookOutputEntryKind::Context
+                ) {
+                    continue;
+                }
+                push_full_hook_output_entry(&mut lines, entry);
+            }
         }
         lines
     }
 }
 
 impl HistoryCell for HookCell {
-    /// Builds viewport lines while coalescing adjacent visible-running hooks.
-    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.output_lines(width, /*render_full_context*/ false)
-    }
-
-    /// The transcript overlay preserves complete hook context hidden by the viewport preview.
-    fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.output_lines(width, /*render_full_context*/ true)
+    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+        self.output_lines()
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
-        plain_lines(self.output_lines(u16::MAX, /*render_full_context*/ true))
-    }
-
-    /// Produces a coarse cache key for transcript overlays while hook animations are active.
-    fn transcript_animation_tick(&self) -> Option<u64> {
-        if !self.animations_enabled {
-            return None;
-        }
-        let elapsed = self
-            .runs
-            .iter()
-            .filter(|run| run.state.is_running_visible())
-            .find_map(|run| run.state.start_time())?
-            .elapsed();
-        Some(elapsed.as_millis() as u64 / 600)
-    }
-}
-
-impl Renderable for HookCell {
-    fn render(&self, area: Rect, buf: &mut Buffer) {
-        let lines = self.display_lines(area.width);
-        let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
-        paragraph.render(area, buf);
-    }
-
-    fn desired_height(&self, width: u16) -> u16 {
-        HistoryCell::desired_height(self, width)
+        plain_lines(self.output_lines())
     }
 }
 
@@ -424,89 +371,12 @@ impl HookRunCell {
             *reveal_deadline = delayed_deadline;
         }
     }
-
-    /// Returns the grouping key only for states that render as running.
-    fn running_group_key(&self) -> Option<RunningHookGroupKey> {
-        self.state
-            .is_running_visible()
-            .then(|| RunningHookGroupKey {
-                event_name: self.event_name,
-                status_message: self.status_message.clone(),
-            })
-    }
-
-    /// Appends the lines for a single, ungrouped hook run.
-    fn push_display_lines(
-        &self,
-        lines: &mut Vec<Line<'static>>,
-        animations_enabled: bool,
-        width: u16,
-        render_full_context: bool,
-    ) {
-        let label = hook_event_label(self.event_name);
-        match &self.state {
-            HookRunState::VisibleRunning { start_time, .. }
-            | HookRunState::QuietLinger { start_time, .. } => {
-                let hook_text = format!("Running {label} hook");
-                push_running_hook_header(
-                    lines,
-                    &hook_text,
-                    Some(*start_time),
-                    self.status_message.as_deref(),
-                    animations_enabled,
-                );
-            }
-            HookRunState::Completed { status, entries } => {
-                let system_message = entries
-                    .iter()
-                    .find(|entry| entry.kind == HookOutputEntryKind::Warning);
-                let mut system_message_lines = system_message.map(|entry| entry.text.split('\n'));
-                let status_text = format!("{status:?}").to_lowercase();
-                let header_text = if let Some(first_line) =
-                    system_message_lines.as_mut().and_then(Iterator::next)
-                {
-                    format!("{label} ({status_text}) says: {first_line}")
-                } else {
-                    format!("{label} hook ({status_text})")
-                };
-                lines.push(
-                    vec![
-                        hook_completed_bullet(*status, entries),
-                        " ".into(),
-                        header_text.into(),
-                    ]
-                    .into(),
-                );
-                if let Some(system_message_lines) = system_message_lines {
-                    for line in system_message_lines {
-                        if line.is_empty() {
-                            lines.push("".into());
-                        } else {
-                            lines.push(format!("{HOOK_OUTPUT_BODY_INDENT}{line}").into());
-                        }
-                    }
-                }
-                for entry in entries {
-                    if entry.kind == HookOutputEntryKind::Warning {
-                        continue;
-                    }
-                    if !render_full_context && entry.kind == HookOutputEntryKind::Context {
-                        lines.extend(hook_context_preview_lines(&entry.text, width));
-                    } else {
-                        push_full_hook_output_entry(lines, entry);
-                    }
-                }
-            }
-            HookRunState::PendingReveal { .. } => {}
-        }
-    }
 }
 
 fn push_full_hook_output_entry(lines: &mut Vec<Line<'static>>, entry: &HookOutputEntry) {
-    let prefix = hook_output_prefix(entry.kind);
     let mut output_lines = entry.text.split('\n');
     if let Some(first_line) = output_lines.next() {
-        lines.push(format!("{HOOK_OUTPUT_INDENT}{prefix}{first_line}").into());
+        lines.push(format!("{HOOK_OUTPUT_INDENT}└ {first_line}").into());
     }
     for line in output_lines {
         if line.is_empty() {
@@ -517,70 +387,10 @@ fn push_full_hook_output_entry(lines: &mut Vec<Line<'static>>, entry: &HookOutpu
     }
 }
 
-fn hook_context_preview_lines(text: &str, width: u16) -> Vec<Line<'static>> {
-    let width = usize::from(width.max(1));
-    let mut wrapped = Vec::new();
-    let mut source_lines = text.split('\n');
-    let first_line = source_lines.next().unwrap_or_default();
-    push_wrapped_hook_context_line(
-        &mut wrapped,
-        first_line,
-        width,
-        Line::from(format!(
-            "{HOOK_OUTPUT_INDENT}{}",
-            hook_output_prefix(HookOutputEntryKind::Context)
-        )),
-    );
-    for line in source_lines {
-        if line.is_empty() {
-            wrapped.push("".into());
-        } else {
-            push_wrapped_hook_context_line(
-                &mut wrapped,
-                line,
-                width,
-                Line::from(HOOK_OUTPUT_BODY_INDENT),
-            );
-        }
-    }
-
-    if wrapped.len() <= HOOK_CONTEXT_MAX_DISPLAY_ROWS {
-        return wrapped;
-    }
-
-    let retained_rows = HOOK_CONTEXT_MAX_DISPLAY_ROWS - 1;
-    let omitted_rows = wrapped.len() - retained_rows;
-    wrapped.truncate(retained_rows);
-    let hint = vec![
-        HOOK_OUTPUT_BODY_INDENT.into(),
-        format!("… +{omitted_rows} lines ({TRANSCRIPT_HINT})").dim(),
-    ]
-    .into();
-    wrapped.push(truncate_line_with_ellipsis_if_overflow(hint, width));
-    wrapped
-}
-
-fn push_wrapped_hook_context_line(
-    output: &mut Vec<Line<'static>>,
-    text: &str,
-    width: usize,
-    initial_indent: Line<'static>,
-) {
-    let line = Line::from(text.to_string());
-    let wrapped = word_wrap_line(
-        &line,
-        RtOptions::new(width)
-            .initial_indent(initial_indent)
-            .subsequent_indent(Line::from(HOOK_OUTPUT_BODY_INDENT)),
-    );
-    push_owned_lines(&wrapped, output);
-}
-
 impl HookRunState {
     /// Creates the hidden initial state for a live hook run.
     fn pending(start_time: Instant) -> Self {
         Self::PendingReveal {
-            start_time,
             reveal_deadline: start_time + HOOK_RUN_REVEAL_DELAY,
         }
     }
@@ -600,21 +410,14 @@ impl HookRunState {
         }
     }
 
-    /// Returns true when this run contributes at least one line to the current render.
-    fn should_render(&self) -> bool {
-        match self {
-            HookRunState::VisibleRunning { .. }
-            | HookRunState::QuietLinger { .. }
-            | HookRunState::Completed { .. } => true,
-            HookRunState::PendingReveal { .. } => false,
-        }
-    }
-
     /// Returns true for completed runs that should survive outside the active cell.
     fn has_persistent_output(&self) -> bool {
         match self {
             HookRunState::Completed { status, entries } => {
-                *status != HookRunStatus::Completed || !entries.is_empty()
+                *status != HookRunStatus::Completed
+                    || entries
+                        .iter()
+                        .any(|entry| entry.kind != HookOutputEntryKind::Context)
             }
             HookRunState::PendingReveal { .. }
             | HookRunState::VisibleRunning { .. }
@@ -622,19 +425,7 @@ impl HookRunState {
         }
     }
 
-    /// Returns the original start time for active states.
-    ///
-    /// Completed runs no longer animate, so they intentionally have no start time.
-    fn start_time(&self) -> Option<Instant> {
-        match self {
-            HookRunState::PendingReveal { start_time, .. }
-            | HookRunState::VisibleRunning { start_time, .. }
-            | HookRunState::QuietLinger { start_time, .. } => Some(*start_time),
-            HookRunState::Completed { .. } => None,
-        }
-    }
-
-    /// Returns true when the run should be treated as an in-progress row.
+    /// Returns true for revealed runs whose lifecycle bookkeeping is still active.
     fn is_running_visible(&self) -> bool {
         matches!(
             self,
@@ -647,20 +438,13 @@ impl HookRunState {
     /// Returns true only when this call changes the state, allowing timer callbacks to avoid
     /// unnecessary redraws.
     fn reveal_if_due(&mut self, now: Instant) -> bool {
-        let HookRunState::PendingReveal {
-            start_time,
-            reveal_deadline,
-        } = self
-        else {
+        let HookRunState::PendingReveal { reveal_deadline } = self else {
             return false;
         };
         if now < *reveal_deadline {
             return false;
         }
-        *self = HookRunState::VisibleRunning {
-            start_time: *start_time,
-            visible_since: now,
-        };
+        *self = HookRunState::VisibleRunning { visible_since: now };
         true
     }
 
@@ -694,158 +478,42 @@ impl HookRunState {
     /// Returns false when the success should be removed immediately: either it was never visible or
     /// it has already stayed visible for the minimum duration.
     fn complete_quiet_success(&mut self, now: Instant) -> bool {
-        let HookRunState::VisibleRunning {
-            start_time,
-            visible_since,
-            ..
-        } = self
-        else {
+        let HookRunState::VisibleRunning { visible_since, .. } = self else {
             return false;
         };
-        let start_time = *start_time;
         let minimum_deadline = *visible_since + QUIET_HOOK_MIN_VISIBLE;
         if now >= minimum_deadline {
             return false;
         }
         *self = HookRunState::QuietLinger {
-            start_time,
             removal_deadline: minimum_deadline,
         };
         true
     }
 }
 
-impl RunningHookGroup {
-    fn new(key: RunningHookGroupKey, start_time: Option<Instant>) -> Self {
-        Self {
-            key,
-            start_time,
-            count: 1,
-        }
-    }
+pub(crate) fn new_active_hook_cell(run: HookRunSummary) -> HookCell {
+    HookCell::new_active(run)
 }
 
-/// Emits one grouped running-hook status row.
-fn push_running_hook_group(
-    lines: &mut Vec<Line<'static>>,
-    group: &RunningHookGroup,
-    animations_enabled: bool,
-) {
-    push_hook_line_separator(lines);
-    let label = hook_event_label(group.key.event_name);
-    let hook_text = if group.count == 1 {
-        format!("Running {label} hook")
-    } else {
-        format!("Running {} {label} hooks", group.count)
-    };
-    push_running_hook_header(
-        lines,
-        &hook_text,
-        group.start_time,
-        group.key.status_message.as_deref(),
-        animations_enabled,
-    );
-}
-
-/// Emits the animated or static header used by all running hook rows.
-fn push_running_hook_header(
-    lines: &mut Vec<Line<'static>>,
-    hook_text: &str,
-    start_time: Option<Instant>,
-    status_message: Option<&str>,
-    animations_enabled: bool,
-) {
-    let mut header = Vec::new();
-    let motion_mode = MotionMode::from_animations_enabled(animations_enabled);
-    if let Some(indicator) =
-        activity_indicator(start_time, motion_mode, ReducedMotionIndicator::Hidden)
-    {
-        header.push(indicator);
-        header.push(" ".into());
-    }
-    header.extend(shimmer_text(hook_text, motion_mode));
-    if !animations_enabled && let Some(span) = header.last_mut() {
-        span.style = span.style.patch(Style::default().bold());
-    }
-    if let Some(status_message) = status_message
-        && !status_message.is_empty()
-    {
-        header.push(": ".into());
-        header.push(status_message.to_string().dim());
-    }
-    lines.push(header.into());
-}
-
-/// Adds a blank separator between hook blocks without leaving a leading blank line.
-fn push_hook_line_separator(lines: &mut Vec<Line<'static>>) {
-    if !lines.is_empty() {
-        lines.push("".into());
-    }
-}
-
-/// Combines optional instants while preserving the earliest known start time.
-fn earliest_instant(left: Option<Instant>, right: Option<Instant>) -> Option<Instant> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (Some(left), None) => Some(left),
-        (None, Some(right)) => Some(right),
-        (None, None) => None,
-    }
-}
-
-pub(crate) fn new_active_hook_cell(run: HookRunSummary, animations_enabled: bool) -> HookCell {
-    HookCell::new_active(run, animations_enabled)
-}
-
-pub(crate) fn new_completed_hook_cell(run: HookRunSummary, animations_enabled: bool) -> HookCell {
-    HookCell::new_completed(run, animations_enabled)
+pub(crate) fn new_completed_hook_cell(run: HookRunSummary) -> HookCell {
+    HookCell::new_completed(run)
 }
 
 /// Returns true for hook completions that should be invisible in history.
 fn hook_run_is_quiet_success(run: &HookRunSummary) -> bool {
-    run.status == HookRunStatus::Completed && run.entries.is_empty()
+    run.status == HookRunStatus::Completed
+        && run
+            .entries
+            .iter()
+            .all(|entry| entry.kind == HookOutputEntryKind::Context)
 }
 
-fn hook_completed_bullet(status: HookRunStatus, entries: &[HookOutputEntry]) -> Span<'static> {
+fn hook_completed_bullet(status: HookRunStatus) -> Span<'static> {
     match status {
-        HookRunStatus::Completed => {
-            if entries
-                .iter()
-                .any(|entry| entry.kind == HookOutputEntryKind::Warning)
-            {
-                "•".bold()
-            } else {
-                "•".green().bold()
-            }
-        }
+        HookRunStatus::Completed => "•".green().bold(),
         HookRunStatus::Blocked | HookRunStatus::Failed | HookRunStatus::Stopped => "•".red().bold(),
         HookRunStatus::Running => "•".into(),
-    }
-}
-
-fn hook_output_prefix(kind: HookOutputEntryKind) -> &'static str {
-    match kind {
-        HookOutputEntryKind::Warning => "warning: ",
-        HookOutputEntryKind::Stop => "stop: ",
-        HookOutputEntryKind::Feedback => "feedback: ",
-        HookOutputEntryKind::Context => "hook context: ",
-        HookOutputEntryKind::Error => "error: ",
-    }
-}
-
-fn hook_event_label(event_name: HookEventName) -> &'static str {
-    match event_name {
-        HookEventName::PreToolUse => "PreToolUse",
-        HookEventName::PermissionRequest => "PermissionRequest",
-        HookEventName::PostToolUse => "PostToolUse",
-        HookEventName::PreCompact => "PreCompact",
-        HookEventName::PostCompact => "PostCompact",
-        HookEventName::SessionStart => "SessionStart",
-        HookEventName::SessionEnd => "SessionEnd",
-        HookEventName::UserPromptSubmit => "UserPromptSubmit",
-        HookEventName::SubagentStart => "SubagentStart",
-        HookEventName::SubagentStop => "SubagentStop",
-        HookEventName::Stop => "Stop",
     }
 }
 
@@ -854,25 +522,39 @@ mod tests {
     use super::*;
     use crate::test_support::PathBufExt;
     use crate::test_support::test_path_buf;
+    use codex_app_server_protocol::HookEventName;
     use pretty_assertions::assert_eq;
+    use ratatui::style::Color;
     use ratatui::style::Modifier;
 
     #[test]
-    fn completed_hook_with_warning_uses_default_bold_bullet() {
-        let entries = vec![HookOutputEntry {
-            kind: HookOutputEntryKind::Warning,
-            text: "Heads up from the hook".to_string(),
-        }];
+    fn completed_hook_system_message_uses_dim_provenance_and_hides_context() {
+        let cell = completed_hook_cell(
+            HookEventName::SessionStart,
+            HookRunStatus::Completed,
+            vec![
+                HookOutputEntry {
+                    kind: HookOutputEntryKind::Warning,
+                    text: "Heads up from the hook".to_string(),
+                },
+                HookOutputEntry {
+                    kind: HookOutputEntryKind::Context,
+                    text: "Private model-facing project instructions".to_string(),
+                },
+            ],
+        );
+        let lines = cell.display_lines(/*width*/ 80);
+        let expected = vec!["↳ Hook · Heads up from the hook".to_string()];
 
-        let bullet = hook_completed_bullet(HookRunStatus::Completed, &entries);
-
-        assert_eq!(bullet.content.as_ref(), "•");
-        assert_eq!(bullet.style.fg, None);
-        assert!(bullet.style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(line_texts(&lines), expected);
+        assert_eq!(line_texts(&cell.transcript_lines(/*width*/ 80)), expected);
+        assert_eq!(line_texts(&cell.raw_lines()), expected);
+        assert!(lines[0].spans[0].style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(lines[0].spans[1].style, Style::default());
     }
 
     #[test]
-    fn completed_hook_short_multiline_context_preserves_display_transcript_and_raw_lines() {
+    fn completed_hook_with_only_context_is_quiet_on_every_tui_surface() {
         let cell = completed_hook_cell(
             HookEventName::SessionStart,
             HookRunStatus::Completed,
@@ -881,59 +563,61 @@ mod tests {
                 text: "## Working Memory Recall\n\nSource: Codex compaction".to_string(),
             }],
         );
-        let expected = vec![
-            "• SessionStart hook (completed)".to_string(),
-            "  hook context: ## Working Memory Recall".to_string(),
-            "".to_string(),
-            "    Source: Codex compaction".to_string(),
-        ];
 
-        assert_eq!(line_texts(&cell.display_lines(/*width*/ 80)), expected);
-        assert_eq!(line_texts(&cell.transcript_lines(/*width*/ 80)), expected);
-        assert_eq!(line_texts(&cell.raw_lines()), expected);
+        assert!(cell.is_empty());
+        assert!(cell.display_lines(/*width*/ 80).is_empty());
+        assert!(cell.transcript_lines(/*width*/ 80).is_empty());
+        assert!(cell.raw_lines().is_empty());
     }
 
     #[test]
-    fn completed_hook_long_single_line_context_is_truncated_only_in_display() {
-        let full_context = format!(
-            "{}tail-marker",
-            "context words that should wrap across the terminal width ".repeat(8)
-        );
-        let cell = completed_hook_cell(
-            HookEventName::SessionStart,
-            HookRunStatus::Completed,
-            vec![HookOutputEntry {
-                kind: HookOutputEntryKind::Context,
-                text: full_context.clone(),
-            }],
-        );
+    fn running_hook_summary_uses_only_revealed_messages() {
+        for (messages, expected) in [
+            (vec![None], "Running hook"),
+            (vec![Some("   ")], "Running hook"),
+            (vec![None, None], "Running hooks"),
+            (vec![Some("checking policy")], "checking policy"),
+            (
+                vec![Some("  checking policy  "), Some("checking policy")],
+                "checking policy",
+            ),
+            (vec![Some("checking policy"), None], "Running hooks"),
+            (vec![None, Some("checking policy")], "Running hooks"),
+            (
+                vec![Some("checking policy"), Some("scanning secrets")],
+                "Running hooks",
+            ),
+        ] {
+            let mut first = hook_run_summary("0");
+            first.status_message = messages[0].map(str::to_string);
+            let mut cell = HookCell::new_active(first);
+            for (index, message) in messages.iter().enumerate().skip(1) {
+                let mut run = hook_run_summary(&index.to_string());
+                run.status_message = message.map(str::to_string);
+                cell.start_run(run);
+            }
+            assert_eq!(cell.running_status_summary(), None);
+            cell.reveal_running_runs_now_for_test();
+            cell.advance_time(Instant::now());
+            assert_eq!(cell.running_status_summary().as_deref(), Some(expected));
 
-        let display_lines = cell.display_lines(/*width*/ 80);
-        let display = line_texts(&display_lines);
-        assert_eq!(display.len(), 4);
-        assert_eq!(
-            Paragraph::new(Text::from(display_lines[1..].to_vec()))
-                .wrap(Wrap { trim: false })
-                .line_count(/*width*/ 80),
-            HOOK_CONTEXT_MAX_DISPLAY_ROWS
-        );
-        assert!(
-            display
-                .iter()
-                .any(|line| line.contains("ctrl + t to view transcript")),
-            "expected truncated context to advertise the transcript: {display:?}"
-        );
-        assert!(display.iter().all(|line| !line.contains("tail-marker")));
+            // A new hook must not change the summary before its own reveal delay.
+            let mut fast = hook_run_summary("fast");
+            fast.status_message = Some("another message".to_string());
+            cell.start_run(fast.clone());
+            assert_eq!(cell.running_status_summary().as_deref(), Some(expected));
+            fast.status = HookRunStatus::Completed;
+            cell.complete_run(fast);
+            assert_eq!(cell.running_status_summary().as_deref(), Some(expected));
 
-        let expected_full = vec![
-            "• SessionStart hook (completed)".to_string(),
-            format!("  hook context: {full_context}"),
-        ];
-        assert_eq!(
-            line_texts(&cell.transcript_lines(/*width*/ 80)),
-            expected_full
-        );
-        assert_eq!(line_texts(&cell.raw_lines()), expected_full);
+            // Synchronous completion notifications arrive after the batch finishes.
+            for index in 0..messages.len() {
+                let mut completed = hook_run_summary(&index.to_string());
+                completed.status = HookRunStatus::Completed;
+                cell.complete_run(completed);
+            }
+            assert_eq!(cell.running_status_summary(), None);
+        }
     }
 
     #[test]
@@ -953,16 +637,42 @@ mod tests {
                 }],
             );
 
-            let display = line_texts(&cell.display_lines(/*width*/ 20));
-            assert!(
-                display.iter().any(|line| line == "    fifth"),
-                "expected {kind:?} output to remain complete: {display:?}"
+            assert_eq!(
+                line_texts(&cell.display_lines(/*width*/ 20)).join("\n"),
+                "• Hook stopped\n  └ first\n    second\n    third\n    fourth\n    fifth",
+                "expected {kind:?} output to remain complete",
             );
+        }
+    }
+
+    #[test]
+    fn unsuccessful_hooks_use_bold_red_bullets_and_actionable_details() {
+        for (status, expected_header) in [
+            (HookRunStatus::Failed, "• Hook failed"),
+            (HookRunStatus::Blocked, "• Blocked by hook"),
+            (HookRunStatus::Stopped, "• Hook stopped"),
+        ] {
+            let detail = "Policy prevented this action.";
+            let cell = completed_hook_cell(
+                HookEventName::PreToolUse,
+                status,
+                vec![HookOutputEntry {
+                    kind: HookOutputEntryKind::Error,
+                    text: detail.to_string(),
+                }],
+            );
+            let lines = cell.display_lines(/*width*/ 80);
+
+            assert_eq!(
+                line_texts(&lines),
+                vec![expected_header.to_string(), format!("  └ {detail}")],
+            );
+            assert_eq!(lines[0].spans[0].style.fg, Some(Color::Red));
             assert!(
-                display
-                    .iter()
-                    .all(|line| !line.contains("ctrl + t to view transcript")),
-                "did not expect a transcript hint for {kind:?}: {display:?}"
+                lines[0].spans[0]
+                    .style
+                    .add_modifier
+                    .contains(Modifier::BOLD)
             );
         }
     }
@@ -981,60 +691,9 @@ mod tests {
         assert_eq!(
             line_texts(&cell.display_lines(/*width*/ 80)),
             vec![
-                "• Stop (completed) says: Heads up".to_string(),
+                "↳ Hook · Heads up".to_string(),
                 "    Review generated files".to_string(),
             ]
-        );
-    }
-
-    #[test]
-    fn pending_hook_does_not_animate_transcript() {
-        let cell =
-            HookCell::new_active(hook_run_summary("hook-1"), /*animations_enabled*/ true);
-
-        assert_eq!(cell.transcript_animation_tick(), None);
-    }
-
-    #[test]
-    fn visible_hook_animates_transcript_when_animations_enabled() {
-        let mut cell =
-            HookCell::new_active(hook_run_summary("hook-1"), /*animations_enabled*/ true);
-        cell.reveal_running_runs_now_for_test();
-        cell.advance_time(Instant::now());
-
-        assert_eq!(cell.transcript_animation_tick(), Some(0));
-    }
-
-    #[test]
-    fn visible_hook_does_not_animate_transcript_when_animations_disabled() {
-        let mut cell = HookCell::new_active(
-            hook_run_summary("hook-1"),
-            /*animations_enabled*/ false,
-        );
-        cell.reveal_running_runs_now_for_test();
-        cell.advance_time(Instant::now());
-
-        assert_eq!(cell.transcript_animation_tick(), None);
-    }
-
-    #[test]
-    fn visible_hook_without_animations_omits_spinner() {
-        let mut cell = HookCell::new_active(
-            hook_run_summary("hook-1"),
-            /*animations_enabled*/ false,
-        );
-        cell.reveal_running_runs_now_for_test();
-        cell.advance_time(Instant::now());
-
-        let rendered: Vec<String> = cell
-            .display_lines(/*width*/ 80)
-            .iter()
-            .map(line_text)
-            .collect();
-
-        assert_eq!(
-            rendered,
-            vec!["Running PostToolUse hook: checking output policy".to_string()]
         );
     }
 
@@ -1050,7 +709,7 @@ mod tests {
         run.completed_at = Some(2);
         run.duration_ms = Some(1);
         run.entries = entries;
-        HookCell::new_completed(run, /*animations_enabled*/ false)
+        HookCell::new_completed(run)
     }
 
     fn line_texts(lines: &[Line<'_>]) -> Vec<String> {

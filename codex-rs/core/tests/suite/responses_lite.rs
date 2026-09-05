@@ -102,15 +102,18 @@ async fn responses_lite_uses_input_items_for_instructions_and_tools() -> Result<
     )
     .await;
 
-    let mut builder = test_codex()
-        .with_model_info_override("gpt-5.4", |model_info| {
-            model_info.use_responses_lite = true;
-            model_info.tool_mode = Some(ToolMode::CodeMode);
-        })
-        .with_config(|config| {
-            config.base_instructions = Some("test instructions".to_string());
-        });
-    let test = builder.build(&server).await?;
+    let builder = || {
+        test_codex()
+            .with_model_info_override("gpt-5.4", |model_info| {
+                model_info.use_responses_lite = true;
+                model_info.tool_mode = Some(ToolMode::CodeMode);
+            })
+            .with_config(|config| {
+                config.base_instructions = Some("test instructions".to_string());
+                config.code_mode.disable_in_process_fallback = true;
+            })
+    };
+    let test = builder().build(&server).await?;
 
     test.submit_turn("hello").await?;
 
@@ -123,15 +126,29 @@ async fn responses_lite_uses_input_items_for_instructions_and_tools() -> Result<
         .context("Responses request input should be an array")?;
     assert_eq!(input[0]["type"], "additional_tools");
     assert_eq!(input[0]["role"], "developer");
+    assert!(
+        input[0]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("at_"))
+    );
+    assert!(
+        input[1]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("msg_"))
+    );
     assert_eq!(
         input[1],
         serde_json::json!({
+            "id": input[1]["id"],
             "type": "message",
             "role": "developer",
             "content": [{
                 "type": "input_text",
                 "text": "test instructions",
             }],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["model.base_instructions"],
+            },
         })
     );
 
@@ -160,6 +177,15 @@ async fn responses_lite_uses_input_items_for_instructions_and_tools() -> Result<
 
     assert!(turn_metadata.get("tool_namespaces_info").is_none());
 
+    let followup = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![responses::ev_completed("resp-2")]),
+    )
+    .await;
+    let resumed = builder().restart(&server, &test).await?;
+    resumed.submit_turn("continue").await?;
+    assert_eq!(&followup.single_request().input()[..2], &input[..2]);
+
     Ok(())
 }
 
@@ -185,6 +211,7 @@ async fn responses_lite_includes_tool_namespaces_info_when_enabled() -> Result<(
             model_info.supports_search_tool = false;
         })
         .with_config(|config| {
+            config.code_mode.disable_in_process_fallback = true;
             config.tool_registry.turn_metadata_includes_tool_info = true;
         });
     let test = builder.build_with_auto_env(&server).await?;
@@ -266,6 +293,7 @@ async fn responses_lite_prepares_images() -> Result<()> {
     .await;
 
     let request = response_mock.single_request();
+    assert!(request.has_content_kinds(&["user.image", "images.preparation_error"]));
     let user_content = request
         .input()
         .into_iter()
@@ -365,7 +393,7 @@ async fn responses_lite_exposes_standalone_tools_for_actor_authorized_provider()
             config.model_provider.requires_openai_auth = false;
             config.model_provider.http_headers = Some(HashMap::from([(
                 "x-openai-actor-authorization".to_string(),
-                "test-actor-authorization".to_string(),
+                "test-actor-authorization".into(),
             )]));
         });
     let test = builder.build(&server).await?;
@@ -455,6 +483,7 @@ async fn responses_lite_does_not_expose_standalone_web_search_for_bedrock_provid
     );
     let body = request.body_json();
     assert!(body.get("tools").is_none());
+    assert!(!request.has_content_kinds(&["model.base_instructions"]));
     let tools = additional_tools(&body)?;
     assert!(!has_namespaced_tool(tools, "web", "run"));
     assert!(!has_hosted_tool(tools, "web_search"));

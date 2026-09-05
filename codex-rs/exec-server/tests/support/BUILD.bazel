@@ -2,6 +2,7 @@ load("//:defs.bzl", "codex_rust_crate")
 
 codex_rust_crate(
     name = "support",
+    compile_data = ["//codex-rs/exec-server:src/proto/codex.exec_server.relay.v1.rs"],
     crate_name = "codex_exec_server_test_support",
     crate_srcs = glob(["*.rs"]),
 )

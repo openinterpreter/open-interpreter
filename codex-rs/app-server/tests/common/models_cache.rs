@@ -36,6 +36,8 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
         default_service_tier: preset.default_service_tier.clone(),
         upgrade: preset.upgrade.as_ref().map(Into::into),
         model_messages: Some(ModelMessages {
+            persistent_instructions: None,
+            tools: None,
             instructions_template: Some("base instructions".to_string()),
             instructions_variables: None,
             approvals: None,
@@ -44,6 +46,8 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
+            guardian_v2: None,
         }),
         include_skills_usage_instructions: false,
         supports_reasoning_summaries: false,
@@ -74,6 +78,7 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: preset.multi_agent_version,
+        multi_agent_reasoning_effort: None,
     }
 }
 

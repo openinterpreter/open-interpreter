@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use codex_core_plugins::PluginCommandAttribution;
 use codex_plugin::PluginId;
+use codex_protocol::approvals::ExecApprovalKind;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
@@ -13,6 +15,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::tests::make_session_and_context_with_rx;
+use crate::session::step_context::StepContext;
 use crate::state::ActiveTurn;
 
 async fn wait_until_held(pause_state: &mut watch::Receiver<bool>) {
@@ -48,11 +51,12 @@ async fn command_approval_holds_an_elicitation_until_response() {
             session
                 .request_command_approval(
                     turn_context.as_ref(),
+                    ExecApprovalKind::Command,
                     "call-1".to_string(),
                     /*approval_id*/ None,
                     /*environment_id*/ None,
                     vec!["echo".to_string()],
-                    cwd,
+                    cwd.into(),
                     /*reason*/ None,
                     /*network_approval_context*/ None,
                     /*proposed_execpolicy_amendment*/ None,
@@ -126,7 +130,7 @@ async fn permission_request_holds_an_elicitation_until_response() {
                 .selection();
             session
                 .request_permissions_for_environment(
-                    &turn_context,
+                    &StepContext::for_test(Arc::clone(&turn_context)),
                     "call-1".to_string(),
                     RequestPermissionsArgs {
                         environment_id: None,

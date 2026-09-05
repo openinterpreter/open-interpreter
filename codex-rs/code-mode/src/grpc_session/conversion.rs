@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use codex_code_mode_protocol::CellId;
 use codex_code_mode_protocol::CodeModeNestedToolCall;
 use codex_code_mode_protocol::CodeModeToolKind;
@@ -89,6 +91,7 @@ pub(super) fn tool_call(call: grpc::ToolCall) -> Result<CodeModeNestedToolCall, 
 }
 
 pub(super) fn runtime_response(outcome: grpc::ExecutionOutcome) -> Result<RuntimeResponse, String> {
+    let code_mode_host_duration = Some(Duration::from_nanos(outcome.code_mode_host_duration_ns));
     super::validate_identifier(&outcome.cell_id, "cell ID")?;
     let cell_id = CellId::new(outcome.cell_id);
     let content_items = outcome
@@ -96,24 +99,28 @@ pub(super) fn runtime_response(outcome: grpc::ExecutionOutcome) -> Result<Runtim
         .into_iter()
         .map(content_item)
         .collect::<Result<Vec<_>, _>>()?;
-    match outcome
+    let response = match outcome
         .outcome
         .ok_or_else(|| "code-mode execution omitted its outcome".to_string())?
     {
-        grpc::execution_outcome::Outcome::Yielded(_) => Ok(RuntimeResponse::Yielded {
+        grpc::execution_outcome::Outcome::Yielded(_) => RuntimeResponse::Yielded {
             cell_id,
             content_items,
-        }),
-        grpc::execution_outcome::Outcome::Terminated(_) => Ok(RuntimeResponse::Terminated {
+            code_mode_host_duration,
+        },
+        grpc::execution_outcome::Outcome::Terminated(_) => RuntimeResponse::Terminated {
             cell_id,
             content_items,
-        }),
-        grpc::execution_outcome::Outcome::Completed(completed) => Ok(RuntimeResponse::Result {
+            code_mode_host_duration,
+        },
+        grpc::execution_outcome::Outcome::Completed(completed) => RuntimeResponse::Result {
             cell_id,
             content_items,
             error_text: completed.error_text,
-        }),
-    }
+            code_mode_host_duration,
+        },
+    };
+    Ok(response)
 }
 
 pub(super) fn wait_outcome(response: grpc::WaitResponse) -> Result<WaitOutcome, String> {

@@ -1,8 +1,8 @@
 use std::io;
 
+use codex_extension_api::Instructions;
 use codex_extension_api::LoadUserInstructionsFuture;
 use codex_extension_api::LoadedUserInstructions;
-use codex_extension_api::UserInstructions;
 use codex_extension_api::UserInstructionsProvider;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
@@ -52,7 +52,7 @@ impl CodexHomeUserInstructionsProvider {
             let trimmed = contents.trim();
             if !trimmed.is_empty() {
                 return LoadedUserInstructions {
-                    instructions: Some(UserInstructions {
+                    instructions: Some(Instructions {
                         text: trimmed.to_string(),
                         source: path,
                     }),

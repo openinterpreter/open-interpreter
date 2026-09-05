@@ -565,16 +565,29 @@ fn session_configured_event(model: &str) -> ThreadSessionState {
 
 #[test]
 fn unified_exec_interaction_cell_renders_input() {
-    let cell = new_unified_exec_interaction(Some("echo hello".to_string()), "ls\npwd".to_string());
-    let lines = render_transcript(&cell);
-    assert_eq!(
-        lines,
-        vec![
-            "↳ Interacted with background terminal · echo hello",
-            "  └ ls",
-            "    pwd",
-        ],
-    );
+    let input = (1..=16).map(|line| format!("line {line}\n")).collect();
+    let cell = new_unified_exec_interaction(Some("cat".to_string()), input);
+    let lines = render_lines(&cell.display_lines(/*width*/ 80));
+    assert_eq!(lines, render_transcript(&cell));
+    insta::assert_snapshot!(lines.join("\n"), @"
+    ↳ Interacted with background terminal · cat
+      └ line 1
+        line 2
+        line 3
+        line 4
+        line 5
+        line 6
+        line 7
+        line 8
+        line 9
+        line 10
+        line 11
+        line 12
+        line 13
+        line 14
+        line 15
+        line 16
+    ");
 }
 
 #[test]
@@ -752,7 +765,14 @@ fn ps_output_multiline_snapshot() {
 
 #[test]
 fn cyber_policy_error_event_snapshot() {
-    let cell = new_cyber_policy_error_event();
+    let cell = new_cyber_policy_error_event(/*plan_type*/ None);
+    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
+fn cyber_policy_error_event_individual_snapshot() {
+    let cell = new_cyber_policy_error_event(Some(PlanType::Pro));
     let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
     insta::assert_snapshot!(rendered);
 }
@@ -766,7 +786,7 @@ fn safety_access_block_event_snapshot() {
 
 #[test]
 fn cyber_policy_error_event_narrow_snapshot() {
-    let cell = new_cyber_policy_error_event();
+    let cell = new_cyber_policy_error_event(/*plan_type*/ None);
     let rendered = render_lines(&cell.display_lines(/*width*/ 36)).join("\n");
     insta::assert_snapshot!(rendered);
 }
@@ -964,6 +984,7 @@ async fn mcp_tools_output_lists_tools_for_hyphenated_server_names() {
 fn mcp_tools_output_from_statuses_renders_status_only_servers() {
     let statuses = vec![McpServerStatus {
         name: "plugin_docs".to_string(),
+        runtime_status: None,
         plugin_id: None,
         server_info: None,
         tools: HashMap::from([(
@@ -995,6 +1016,7 @@ fn mcp_tools_output_from_statuses_renders_status_only_servers() {
 fn mcp_tools_output_from_statuses_renders_verbose_inventory() {
     let statuses = vec![McpServerStatus {
         name: "plugin_docs".to_string(),
+        runtime_status: None,
         plugin_id: None,
         server_info: None,
         tools: HashMap::from([(
@@ -1217,6 +1239,17 @@ fn pnpm_update_available_history_cell_snapshot() {
 }
 
 #[test]
+fn vite_plus_update_available_history_cell_snapshot() {
+    let cell = UpdateAvailableHistoryCell::new(
+        "9.9.9".to_string(),
+        Some(UpdateAction::VitePlusGlobalLatest),
+    );
+    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
+
+    insta::assert_snapshot!(rendered);
+}
+
+#[test]
 fn web_search_history_cell_without_detail_snapshot() {
     let cell = new_web_search_call("call-1".to_string(), String::new(), WebSearchAction::Other);
     let rendered = render_lines(&cell.display_lines(/*width*/ 64)).join("\n");
@@ -1409,6 +1442,14 @@ fn mcp_inventory_loading_without_animations_is_stable() {
 
     assert_eq!(first, second);
     assert_eq!(first, vec!["• Loading MCP inventory…".to_string()]);
+}
+
+#[test]
+fn thread_recap_loading_without_animations_snapshot() {
+    let cell = ThreadRecapLoadingCell::new(/*animations_enabled*/ false);
+    let rendered = render_lines(&cell.display_lines(/*width*/ 80)).join("\n");
+
+    insta::assert_snapshot!(rendered, @"• Generating conversation recap…");
 }
 
 #[test]

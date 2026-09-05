@@ -92,6 +92,84 @@ fn resolves_chords_for_actions_in_different_contexts() {
 }
 
 #[test]
+fn default_vim_jump_top_uses_contextual_gg_chords() {
+    let runtime = RuntimeKeymap::defaults();
+    let g = key_event(key_hint::plain(KeyCode::Char('g')));
+
+    for (context, action, target) in [
+        (
+            KeymapContext::VimNormal,
+            "jump_top",
+            runtime.vim_normal.jump_top.as_slice(),
+        ),
+        (
+            KeymapContext::VimOperator,
+            "motion_jump_top",
+            runtime.vim_operator.motion_jump_top.as_slice(),
+        ),
+    ] {
+        let action_id = keymap_action_id(context.config_name(), action).expect("known Vim action");
+        assert!(runtime.chords.bindings.iter().any(|binding| {
+            binding.action == action_id
+                && binding.chord.prefix == key_hint::plain(KeyCode::Char('g'))
+                && binding.chord.completion == key_hint::plain(KeyCode::Char('g'))
+        }));
+        assert!(matches!(
+            runtime.primary_hint(context, action),
+            Some(crate::key_hint::ShortcutHint::Chord { .. })
+        ));
+
+        let mut matcher = KeyChordMatcher::default();
+        let contexts = KeymapContextSet::new(context);
+        assert!(matches!(
+            matcher.advance(g, &runtime.chords, contexts, Instant::now()),
+            KeyChordMatch::Pending(_)
+        ));
+        let KeyChordMatch::Completed(event) =
+            matcher.advance(g, &runtime.chords, contexts, Instant::now())
+        else {
+            panic!("gg must dispatch the active Vim jump action");
+        };
+        assert!(target.is_pressed(event));
+    }
+}
+
+#[test]
+fn default_vim_jump_chords_yield_to_configured_singles_and_chords() {
+    let mut config = TuiKeymap::default();
+    config.vim_normal.move_line_start = Some(binding("g g"));
+    config.vim_operator.motion_line_start = Some(binding("g"));
+
+    let runtime = RuntimeKeymap::from_config(&config).expect("configured legacy bindings win");
+
+    assert!(runtime.vim_normal.jump_top.is_empty());
+    assert!(runtime.vim_operator.motion_jump_top.is_empty());
+    assert!(
+        runtime
+            .vim_operator
+            .motion_line_start
+            .is_pressed(key_event(key_hint::plain(KeyCode::Char('g'))))
+    );
+}
+
+#[test]
+fn vim_jump_top_supports_single_and_custom_chord_remaps() {
+    let mut config = TuiKeymap::default();
+    config.vim_normal.jump_top = Some(binding("home"));
+    config.vim_operator.motion_jump_top = Some(binding("ctrl-x g"));
+
+    let runtime = RuntimeKeymap::from_config(&config).expect("custom Vim jumps are valid");
+
+    assert!(runtime.vim_normal.jump_top.is_pressed(KeyCode::Home.into()));
+    let action = keymap_action_id("vim_operator", "motion_jump_top").expect("known Vim action");
+    assert!(runtime.chords.bindings.iter().any(|binding| {
+        binding.action == action
+            && binding.chord.prefix == key_hint::ctrl(KeyCode::Char('x'))
+            && binding.chord.completion == key_hint::plain(KeyCode::Char('g'))
+    }));
+}
+
+#[test]
 fn composer_chord_inherits_global_fallback() {
     let mut config = TuiKeymap::default();
     config.global.submit = Some(binding("ctrl-x enter"));

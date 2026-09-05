@@ -11,6 +11,9 @@ const IS_MACOS: bool = cfg!(target_os = "macos");
 const IS_WINDOWS: bool = cfg!(target_os = "windows");
 
 const APP_TOOLTIP: &str = "Try the **Desktop app**. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true";
+const MACOS_APP_TOOLTIP: &str =
+    "Run `codex app` to open the Desktop app (it installs on macOS if needed).";
+const LINUX_APP_TOOLTIP: &str = "Try the **Desktop app** on Linux: install it from https://learn.chatgpt.com/docs/linux/linux-app and run 'chatgpt'.";
 const FAST_TOOLTIP: &str =
     "*New* Use **/fast** to enable our fastest inference with increased plan usage.";
 const OTHER_TOOLTIP: &str = "*New* Build faster with the **Desktop app**. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true";
@@ -18,20 +21,17 @@ const OTHER_TOOLTIP_NON_MAC: &str = "*New* Build faster with Codex.";
 const FREE_GO_TOOLTIP: &str =
     "*New* For a limited time, Codex is included in your plan for free – let’s build together.";
 
-const RAW_TOOLTIPS: &str = include_str!("../tooltips.txt");
+const RAW_TOOLTIPS: &str = include_str!("../assets/tooltips.txt");
 
 lazy_static! {
     static ref TOOLTIPS: Vec<&'static str> = RAW_TOOLTIPS
         .lines()
         .map(str::trim)
-        .filter(|line| {
-            if line.is_empty() || line.starts_with('#') {
-                return false;
-            }
-            if !IS_MACOS && !IS_WINDOWS && line.contains("codex app") {
-                return false;
-            }
-            true
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .chain(if IS_MACOS {
+            Some(MACOS_APP_TOOLTIP)
+        } else {
+            linux_app_tooltip(LinuxDesktopSession::current())
         })
         .collect();
     static ref ALL_TOOLTIPS: Vec<&'static str> = {
@@ -98,11 +98,41 @@ fn tooltip_for_product(tooltip: &str, product: Product) -> String {
         .replace("Codex", product.short_display_name())
 }
 
+struct LinuxDesktopSession {
+    has_display: bool,
+    is_wsl: bool,
+}
+
+impl LinuxDesktopSession {
+    fn current() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            Self {
+                has_display: std::env::var_os("DISPLAY").is_some_and(|value| !value.is_empty())
+                    || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty()),
+                is_wsl: crate::clipboard_paste::is_probably_wsl(),
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self {
+                has_display: false,
+                is_wsl: false,
+            }
+        }
+    }
+}
+
+fn linux_app_tooltip(session: LinuxDesktopSession) -> Option<&'static str> {
+    (session.has_display && !session.is_wsl).then_some(LINUX_APP_TOOLTIP)
+}
+
 fn paid_app_tooltip() -> Option<&'static str> {
     if IS_MACOS || IS_WINDOWS {
         Some(APP_TOOLTIP)
     } else {
-        None
+        linux_app_tooltip(LinuxDesktopSession::current())
     }
 }
 
@@ -335,6 +365,7 @@ pub(crate) mod announcement {
 mod tests {
     use super::*;
     use crate::tooltips::announcement::parse_announcement_tip_toml;
+    use pretty_assertions::assert_eq;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
@@ -366,6 +397,54 @@ mod tests {
         assert_eq!(
             tooltip_for_product(tooltip, Product::OpenInterpreter),
             "You can resume a previous conversation by running `interpreter resume`"
+        );
+    }
+
+    #[test]
+    fn desktop_app_tooltip_uses_supported_platform_launcher() {
+        let tooltip = TOOLTIPS
+            .iter()
+            .copied()
+            .find(|tip| tip.contains("Desktop app"));
+
+        if linux_app_tooltip(LinuxDesktopSession::current()).is_some() {
+            let tooltip = tooltip.expect("Linux should advertise the desktop app");
+            assert_eq!(paid_app_tooltip(), Some(tooltip));
+        } else if IS_MACOS {
+            let tooltip = tooltip.expect("macOS should advertise the desktop app");
+            insta::assert_snapshot!(tooltip, @"Run `codex app` to open the Desktop app (it installs on macOS if needed).");
+            assert_eq!(paid_app_tooltip(), Some(APP_TOOLTIP));
+        } else if IS_WINDOWS {
+            assert_eq!(tooltip, None);
+            assert_eq!(paid_app_tooltip(), Some(APP_TOOLTIP));
+        } else {
+            assert_eq!(tooltip, None);
+            assert_eq!(paid_app_tooltip(), None);
+        }
+    }
+
+    #[test]
+    fn linux_desktop_app_tooltip_requires_graphical_native_session() {
+        let tooltip = linux_app_tooltip(LinuxDesktopSession {
+            has_display: true,
+            is_wsl: false,
+        })
+        .expect("graphical native Linux should advertise the desktop app");
+        insta::assert_snapshot!(tooltip, @"Try the **Desktop app** on Linux: install it from https://learn.chatgpt.com/docs/linux/linux-app and run 'chatgpt'.");
+
+        assert_eq!(
+            linux_app_tooltip(LinuxDesktopSession {
+                has_display: false,
+                is_wsl: false,
+            }),
+            None
+        );
+        assert_eq!(
+            linux_app_tooltip(LinuxDesktopSession {
+                has_display: true,
+                is_wsl: true,
+            }),
+            None
         );
     }
 

@@ -1,0 +1,28 @@
+---
+source: tui/src/app/tests/disconnect_tests.rs
+expression: "render_bottom_popup(&app.chat_widget, 100)"
+---
+  Agent command center
+  Reconnecting — agent list is stale
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+  New task › task draft!
+  ctrl+c quit · actions paused until the list is refreshed

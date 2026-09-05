@@ -568,6 +568,7 @@ fn format_network_constraints(network: &NetworkConstraints) -> String {
         managed_allowed_domains_only,
         unix_sockets,
         allow_local_binding,
+        header_injections,
     } = network;
 
     if let Some(enabled) = enabled {
@@ -614,6 +615,19 @@ fn format_network_constraints(network: &NetworkConstraints) -> String {
     }
     if let Some(allow_local_binding) = allow_local_binding {
         parts.push(format!("allow_local_binding={allow_local_binding}"));
+    }
+    if let Some(header_injections) = header_injections {
+        let hosts = header_injections
+            .iter()
+            .map(|rule| rule.host.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!(
+            "header_injections={} hosts={{{hosts}}}",
+            header_injections.len()
+        ));
     }
 
     join_or_empty(parts)
@@ -675,6 +689,7 @@ mod tests {
     use codex_config::NetworkConstraints;
     use codex_config::NetworkDomainPermissionToml;
     use codex_config::NetworkDomainPermissionsToml;
+    use codex_config::NetworkHeaderInjectionToml;
     use codex_config::NetworkUnixSocketPermissionToml;
     use codex_config::NetworkUnixSocketPermissionsToml;
     use codex_config::RequirementSource;
@@ -914,6 +929,15 @@ interrupt_message = false
                             NetworkDomainPermissionToml::Allow,
                         )]),
                     }),
+                    header_injections: Some(vec![NetworkHeaderInjectionToml {
+                        host: "api.example.com".to_string(),
+                        methods: vec!["POST".to_string()],
+                        path_prefixes: vec!["/v1".to_string()],
+                        headers: BTreeMap::from([(
+                            "x-managed-source".to_string(),
+                            "secret-looking-value".to_string(),
+                        )]),
+                    }]),
                     ..Default::default()
                 },
                 RequirementSource::LegacyManagedConfigTomlFromMdm,
@@ -933,6 +957,8 @@ interrupt_message = false
         let requirements_toml = ConfigRequirementsToml {
             allowed_login_methods: None,
             allowed_chatgpt_workspaces: None,
+            cli_auth_credentials_store: None,
+            chatgpt_base_url: None,
             sqlite_home: Some(sqlite_home),
             log_dir: Some(log_dir),
             model_catalog_json: Some(model_catalog_json),
@@ -951,12 +977,15 @@ interrupt_message = false
             allow_managed_hooks_only: Some(true),
             allow_appshots: Some(false),
             allow_remote_control: Some(false),
+            allow_browser_and_computer_use: None,
             computer_use: None,
             browser_use: None,
+            in_app_browser: None,
             windows: Some(WindowsRequirementsToml {
                 allowed_sandbox_implementations: None,
                 sandbox_private_desktop: Some(false),
             }),
+            additional_developer_instructions: None,
             guardian_policy_config: Some("Use the managed guardian policy.".to_string()),
             feature_requirements: Some(FeatureRequirementsToml {
                 entries: BTreeMap::from([("guardian_approval".to_string(), true)]),
@@ -1042,8 +1071,9 @@ interrupt_message = false
             "enforce_residency: us (source: {requirements_source})"
         )));
         assert!(rendered.contains(&format!(
-            "experimental_network: enabled=true, domains={{example.com=allow}} (source: {requirements_source})"
+            "experimental_network: enabled=true, domains={{example.com=allow}}, header_injections=1 hosts={{api.example.com}} (source: {requirements_source})"
         )));
+        assert!(!rendered.contains("secret-looking-value"));
         assert!(
             rendered.contains(
                 format!(

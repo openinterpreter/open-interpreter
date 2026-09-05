@@ -40,6 +40,7 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
                     TurnStatus::Completed
                 },
                 error: event.error.as_ref().map(|error| TurnError {
+                    misalignment: error.misalignment.clone().map(Into::into),
                     message: error.message.clone(),
                     codex_error_info: error.codex_error_info.clone().map(Into::into),
                     additional_details: None,
@@ -81,7 +82,9 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
+        | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::WorldState(_)
+        | RolloutItem::RealtimeItem(_)
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::EventMsg(_) => ThreadHistoryChangeSet::default(),
     }

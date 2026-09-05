@@ -1,3 +1,4 @@
+mod audio;
 #[cfg(feature = "v8-runtime")]
 mod callbacks;
 #[cfg(feature = "v8-runtime")]

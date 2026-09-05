@@ -255,6 +255,63 @@ fn multi_agent_v2_cli_overrides_preserve_boolean_and_nested_configuration() {
     }
 }
 
+#[test]
+fn sleep_tool_overrides_preserve_disabled_state_and_mode() {
+    for feature_path in ["features", "profiles.work.features"] {
+        let disabled = (
+            format!("{feature_path}.sleep_tool"),
+            TomlValue::Boolean(false),
+        );
+        let mode = (
+            format!("{feature_path}.sleep_tool.mode"),
+            TomlValue::String("always_on".to_string()),
+        );
+        let expected = parse_toml(&format!(
+            "[{feature_path}.sleep_tool]\nenabled = false\nmode = \"always_on\"\n",
+        ));
+        for overrides in [vec![disabled.clone(), mode.clone()], vec![mode, disabled]] {
+            assert_eq!(crate::build_cli_overrides_layer(&overrides), expected);
+        }
+
+        let boolean_layer = parse_toml(&format!("[{feature_path}]\nsleep_tool = false\n"));
+        let table_layer = parse_toml(&format!(
+            "[{feature_path}.sleep_tool]\nmode = \"always_on\"\n",
+        ));
+        for (mut base, overlay) in [
+            (boolean_layer.clone(), table_layer.clone()),
+            (table_layer, boolean_layer),
+        ] {
+            merge_toml_values(&mut base, &overlay);
+            assert_eq!(base, expected);
+        }
+    }
+}
+
+#[test]
+fn network_proxy_feature_overrides_preserve_credential_broker_configuration() {
+    let enabled = (
+        "features.network_proxy".to_string(),
+        TomlValue::Boolean(true),
+    );
+    let broker = (
+        "features.network_proxy.credential_broker".to_string(),
+        TomlValue::Boolean(true),
+    );
+    let expected =
+        parse_toml("[features.network_proxy]\nenabled = true\ncredential_broker = true\n");
+
+    for overrides in [vec![enabled.clone(), broker.clone()], vec![broker, enabled]] {
+        assert_eq!(crate::build_cli_overrides_layer(&overrides), expected);
+    }
+
+    let mut base = parse_toml("[features]\nnetwork_proxy = true\n");
+    merge_toml_values(
+        &mut base,
+        &parse_toml("[features.network_proxy]\ncredential_broker = true\n"),
+    );
+    assert_eq!(base, expected);
+}
+
 /// Repeated opaque desktop overrides continue to replace their previous value.
 #[test]
 fn multi_agent_v2_cli_compatibility_excludes_opaque_desktop_paths() {

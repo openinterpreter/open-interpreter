@@ -349,16 +349,21 @@ fn build_messages_for_session(
         match item {
             ResponseItem::FunctionCallOutput {
                 call_id, output, ..
-            } => pending_tool_results.push(PendingToolResult {
-                order: tool_order_by_call_id
-                    .get(call_id)
-                    .copied()
-                    .unwrap_or(usize::MAX),
-                call_id: call_id.clone(),
-                output: output.clone(),
-                tool_result_cache_control: trailing_tool_result_range
-                    .is_some_and(|(first_index, count)| count == 1 && index >= first_index),
-            }),
+            } => {
+                let Some(call_id) = call_id.as_ref() else {
+                    continue;
+                };
+                pending_tool_results.push(PendingToolResult {
+                    order: tool_order_by_call_id
+                        .get(call_id)
+                        .copied()
+                        .unwrap_or(usize::MAX),
+                    call_id: call_id.clone(),
+                    output: output.clone(),
+                    tool_result_cache_control: trailing_tool_result_range
+                        .is_some_and(|(first_index, count)| count == 1 && index >= first_index),
+                });
+            }
             ResponseItem::Message { role, content, .. } => {
                 flush_pending_tool_results(
                     &mut messages,
@@ -1908,7 +1913,9 @@ mod tests {
             });
             items.push(ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: format!("read_{index}"),
+                call_id: Some(format!("read_{index}")),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(format!("{index}\tcontent")),
                 internal_chat_message_metadata_passthrough: None,
             });
@@ -1930,7 +1937,9 @@ mod tests {
         for index in 9..=10 {
             items.push(ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: format!("read_{index}"),
+                call_id: Some(format!("read_{index}")),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(format!("{index}\tcontent")),
                 internal_chat_message_metadata_passthrough: None,
             });
@@ -2026,7 +2035,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "todo_1".to_string(),
+                call_id: Some("todo_1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("todos updated".to_string()),
                 internal_chat_message_metadata_passthrough: None,
             },
@@ -2048,7 +2059,9 @@ mod tests {
             });
             items.push(ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: format!("edit_{index}"),
+                call_id: Some(format!("edit_{index}")),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(format!("edit {index} done")),
                 internal_chat_message_metadata_passthrough: None,
             });
@@ -2119,7 +2132,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "todo_1".to_string(),
+                call_id: Some("todo_1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("todos updated".to_string()),
                 internal_chat_message_metadata_passthrough: None,
             },
@@ -2148,7 +2163,9 @@ mod tests {
             });
             items.push(ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: format!("bash_{index}"),
+                call_id: Some(format!("bash_{index}")),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(format!("bash {index} done")),
                 internal_chat_message_metadata_passthrough: None,
             });
@@ -2212,7 +2229,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "read_large".to_string(),
+                call_id: Some("read_large".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(format!(
                     "{}File content (61680 tokens) exceeds maximum allowed tokens (25000). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file.",
                     crate::tools::handlers::HARNESS_NO_TRUNCATE_PREFIX
@@ -2268,7 +2287,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "todo_1".to_string(),
+                call_id: Some("todo_1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("todos updated".to_string()),
                 internal_chat_message_metadata_passthrough: None,
             },
@@ -2297,7 +2318,9 @@ mod tests {
             });
             items.push(ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: format!("read_{index}"),
+                call_id: Some(format!("read_{index}")),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(format!("{index}\tcontent")),
                 internal_chat_message_metadata_passthrough: None,
             });
@@ -2354,7 +2377,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "agent_1".to_string(),
+                call_id: Some("agent_1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("Agent report.".to_string()),
                 internal_chat_message_metadata_passthrough: None,
             },
@@ -2403,7 +2428,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "agent_1".to_string(),
+                call_id: Some("agent_1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("Agent report.".to_string()),
                 internal_chat_message_metadata_passthrough: None,
             },
@@ -2461,7 +2488,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "todo_1".to_string(),
+                call_id: Some("todo_1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("todos updated".to_string()),
                 internal_chat_message_metadata_passthrough: None,
             },
@@ -2536,7 +2565,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "todo_1".to_string(),
+                call_id: Some("todo_1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("todos updated".to_string()),
                 internal_chat_message_metadata_passthrough: None,
             },
@@ -2572,7 +2603,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "read_1".to_string(),
+                call_id: Some("read_1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("notes".to_string()),
                 internal_chat_message_metadata_passthrough: None,
             },

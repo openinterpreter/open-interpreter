@@ -66,5 +66,12 @@ Update [Models](/docs/models), [Providers](/docs/providers), or
 
 ## Security
 
-Do not report vulnerabilities in public issue threads. Use the security contact
-listed by the Open Interpreter project or repository.
+Do not report vulnerabilities in public issue threads. Follow the repository's
+[security policy](../SECURITY.md) instead.
+
+## Community values
+
+- Be kind and inclusive, and treat other contributors with respect.
+- Assume good intent when written communication is ambiguous.
+- Share reproduction details and technical findings so the whole community can
+  benefit.

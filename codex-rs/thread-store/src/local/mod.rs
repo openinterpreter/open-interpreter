@@ -7,6 +7,8 @@ mod live_writer;
 mod model_context;
 mod move_thread_to_section;
 mod paginated_fork;
+mod pending_thread_metadata;
+mod projects;
 mod read_thread;
 mod revert_thread;
 mod rollout_migration;
@@ -22,6 +24,9 @@ mod unarchive_thread;
 mod update_thread_metadata;
 mod writer_lock;
 
+#[cfg(test)]
+#[path = "pending_thread_metadata_tests.rs"]
+mod pending_thread_metadata_tests;
 #[cfg(test)]
 mod test_support;
 
@@ -44,21 +49,28 @@ use tokio::sync::RwLock;
 use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::ArchiveThreadsParams;
+use crate::CreateProjectParams;
 use crate::CreateThreadParams;
 use crate::CreateThreadSectionParams;
+use crate::CreatedProject;
 use crate::DeleteThreadParams;
 use crate::DeleteThreadSectionParams;
 use crate::DeleteThreadsParams;
+use crate::DeletedProject;
 use crate::ItemPage;
 use crate::ListItemsParams;
+use crate::ListProjectsParams;
 use crate::ListThreadSectionsParams;
 use crate::ListThreadsParams;
+use crate::ListTimelineParams;
 use crate::ListTurnsParams;
 use crate::LoadThreadHistoryParams;
+use crate::MoveProjectParams;
 use crate::MoveThreadToSectionParams;
 use crate::PersistContext;
 use crate::PrepareForkParams;
 use crate::PreparedFork;
+use crate::ProjectMoveOutcome;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
 use crate::RenameThreadSectionParams;
@@ -67,10 +79,13 @@ use crate::RevertThreadParams;
 use crate::SearchThreadOccurrencesParams;
 use crate::SearchThreadsParams;
 use crate::StoredModelContext;
+use crate::StoredProject;
+use crate::StoredProjectsPage;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::StoredThreadSection;
 use crate::StoredThreadSectionsPage;
+use crate::ThreadMetadataPatch;
 use crate::ThreadOccurrenceSearchPage;
 use crate::ThreadPage;
 use crate::ThreadSearchPage;
@@ -78,11 +93,15 @@ use crate::ThreadStore;
 use crate::ThreadStoreError;
 use crate::ThreadStoreFuture;
 use crate::ThreadStoreResult;
+use crate::TimelinePage;
 use crate::TurnPage;
+use crate::UpdateProjectParams;
 use crate::UpdateThreadMetadataParams;
+use crate::UpdatedProject;
 use crate::local::writer_lock::WriterLockCoordinator;
 use crate::local::writer_lock::WriterLockGuard;
 
+pub use rollout_migration::RolloutMigrationFailureReason;
 pub use rollout_migration::RolloutMigrationMode;
 pub use rollout_migration::RolloutMigrationOptions;
 pub use rollout_migration::RolloutMigrationOutcome;
@@ -107,6 +126,7 @@ pub use rollout_migration::RolloutMigrationStatus;
 pub struct LocalThreadStore {
     pub(super) config: LocalThreadStoreConfig,
     live_recorders: Arc<Mutex<HashMap<ThreadId, LiveRecorderEntry>>>,
+    pending_thread_metadata: pending_thread_metadata::PendingThreadMetadataRegistry,
     live_writer_locks: Arc<LiveWriterLocks>,
     writer_lock_coordinator: Arc<WriterLockCoordinator>,
     state_db: Option<StateDbHandle>,
@@ -218,6 +238,8 @@ impl LocalThreadStore {
         Self {
             config,
             live_recorders: Arc::new(Mutex::new(HashMap::new())),
+            pending_thread_metadata:
+                pending_thread_metadata::PendingThreadMetadataRegistry::default(),
             live_writer_locks: Arc::new(LiveWriterLocks::default()),
             writer_lock_coordinator,
             state_db,
@@ -383,6 +405,14 @@ impl LocalThreadStore {
         thread_history::list_items(self, params).await
     }
 
+    /// Lists bounded ordinary and realtime items from the rollout projection.
+    pub async fn list_timeline(
+        &self,
+        params: ListTimelineParams,
+    ) -> ThreadStoreResult<TimelinePage> {
+        thread_history::list_timeline(self, params).await
+    }
+
     /// Searches projection-backed visible messages within one paginated thread.
     pub async fn search_thread_occurrences(
         &self,
@@ -399,6 +429,33 @@ impl ThreadStore for LocalThreadStore {
 
     fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move { live_writer::create_thread(self, params).await })
+    }
+
+    fn stage_pending_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+        patch: ThreadMetadataPatch,
+    ) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            if self.state_db.is_none() {
+                return Err(ThreadStoreError::InvalidRequest {
+                    message: "pending thread metadata requires a state db".to_string(),
+                });
+            }
+            if patch.rollout_path.is_some() {
+                return Err(ThreadStoreError::InvalidRequest {
+                    message: "pending thread metadata cannot set rollout_path".to_string(),
+                });
+            }
+            self.pending_thread_metadata.stage(thread_id, patch).await
+        })
+    }
+
+    fn remove_pending_thread_metadata(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.pending_thread_metadata.remove(thread_id).await;
+            Ok(())
+        })
     }
 
     fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
@@ -500,6 +557,43 @@ impl ThreadStore for LocalThreadStore {
         Box::pin(async move { thread_sections::delete_thread_section(self, params).await })
     }
 
+    fn supports_projects(&self) -> bool {
+        self.state_db.is_some()
+    }
+
+    fn list_projects(
+        &self,
+        params: ListProjectsParams,
+    ) -> ThreadStoreFuture<'_, StoredProjectsPage> {
+        Box::pin(async move { projects::list_projects(self, params).await })
+    }
+
+    fn read_project(&self, project_id: String) -> ThreadStoreFuture<'_, Option<StoredProject>> {
+        Box::pin(async move { projects::read_project(self, project_id).await })
+    }
+
+    fn create_project(&self, params: CreateProjectParams) -> ThreadStoreFuture<'_, CreatedProject> {
+        Box::pin(async move { projects::create_project(self, params).await })
+    }
+
+    fn update_project(
+        &self,
+        params: UpdateProjectParams,
+    ) -> ThreadStoreFuture<'_, Option<UpdatedProject>> {
+        Box::pin(async move { projects::update_project(self, params).await })
+    }
+
+    fn move_project(
+        &self,
+        params: MoveProjectParams,
+    ) -> ThreadStoreFuture<'_, Option<ProjectMoveOutcome>> {
+        Box::pin(async move { projects::move_project(self, params).await })
+    }
+
+    fn delete_project(&self, project_id: String) -> ThreadStoreFuture<'_, Option<DeletedProject>> {
+        Box::pin(async move { projects::delete_project(self, project_id).await })
+    }
+
     fn supports_paginated_history_lists(&self) -> bool {
         self.state_db.is_some()
     }
@@ -510,6 +604,10 @@ impl ThreadStore for LocalThreadStore {
 
     fn list_items(&self, params: ListItemsParams) -> ThreadStoreFuture<'_, ItemPage> {
         Box::pin(LocalThreadStore::list_items(self, params))
+    }
+
+    fn list_timeline(&self, params: ListTimelineParams) -> ThreadStoreFuture<'_, TimelinePage> {
+        Box::pin(LocalThreadStore::list_timeline(self, params))
     }
 
     fn search_threads(
@@ -835,6 +933,7 @@ mod tests {
         let turn_context = |model: &str, approval_policy| {
             RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
+                root_turn_id: None,
                 cwd: serde_json::from_value(serde_json::json!(cwd)).expect("absolute cwd"),
                 workspace_roots: None,
                 current_date: None,
@@ -843,6 +942,7 @@ mod tests {
                 approvals_reviewer: None,
                 sandbox_policy: SandboxPolicy::DangerFullAccess,
                 permission_profile: None,
+                active_permission_profile: None,
                 network: None,
                 file_system_sandbox_policy: None,
                 model: model.to_string(),
@@ -852,6 +952,7 @@ mod tests {
                 multi_agent_version: None,
                 multi_agent_mode: None,
                 realtime_active: None,
+                cyber_access_program: None,
                 effort: None,
                 summary: ReasoningSummary::Auto,
             })
@@ -941,11 +1042,15 @@ mod tests {
                     message: "commentary".to_string(),
                     phase: Some(MessagePhase::Commentary),
                     memory_citation: None,
+                    delivery: None,
+                    questions: None,
                 })),
                 RolloutItem::ResponseItem(
                     ResponseItem::FunctionCallOutput {
                         id: None,
-                        call_id: "call-1".to_string(),
+                        call_id: Some("call-1".to_string()),
+                        name: None,
+                        namespace: None,
                         output: FunctionCallOutputPayload::from_text("tool output".to_string()),
                         internal_chat_message_metadata_passthrough: None,
                     }

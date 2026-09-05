@@ -2,19 +2,29 @@
 #![allow(clippy::expect_used)]
 
 mod common;
+#[cfg(target_os = "linux")]
+#[path = "common/fake_bwrap.rs"]
+mod fake_bwrap;
 
 #[path = "file_system/shared.rs"]
 mod shared;
 #[path = "file_system/support.rs"]
 mod support;
 
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::MetadataExt;
-#[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
+use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -24,12 +34,15 @@ use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::Environment;
 use codex_exec_server::FileMetadata;
 use codex_exec_server::FileSystemSandboxContext;
+use codex_exec_server::GetMetadataOptions;
 use codex_exec_server::ReadDirectoryEntry;
+use codex_exec_server::ReadFileOptions;
 use codex_exec_server::RemoveOptions;
 use codex_exec_server::WalkEntry;
 use codex_exec_server::WalkEntryKind;
 use codex_exec_server::WalkOptions;
 use codex_exec_server::WalkOutcome;
+use codex_exec_server::WriteFileOptions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -41,9 +54,12 @@ use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use test_case::test_case;
+use tokio::time::timeout;
 
 #[cfg(target_os = "linux")]
 use crate::common::exec_server::exec_server_with_env;
+#[cfg(target_os = "linux")]
+use crate::fake_bwrap::write_fake_bwrap;
 
 use crate::support::FileSystemImplementation;
 use crate::support::create_file_system_context;
@@ -106,55 +122,6 @@ fn create_directory_symlink(target: &Path, alias: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn write_fake_bwrap(bin_dir: &Path) -> Result<PathBuf> {
-    std::fs::create_dir_all(bin_dir)?;
-    let fake_bwrap = bin_dir.join("bwrap");
-    std::fs::write(
-        &fake_bwrap,
-        r#"#!/bin/bash
-set -euo pipefail
-
-for arg in "$@"; do
-  if [[ "${arg}" == "--help" ]]; then
-    echo "Usage: bwrap --argv0 --perms --as-pid-1"
-    exit 0
-  fi
-done
-
-printf '%s\n' "$*" >> "${0}.log"
-
-args=("$@")
-argv0=""
-command_start=-1
-for i in "${!args[@]}"; do
-  if [[ "${args[$i]}" == "--argv0" && $((i + 1)) -lt ${#args[@]} ]]; then
-    argv0="${args[$((i + 1))]}"
-  fi
-  if [[ "${args[$i]}" == "--" ]]; then
-    command_start=$((i + 1))
-    break
-  fi
-done
-
-if [[ "${command_start}" -lt 0 || "${command_start}" -ge "${#args[@]}" ]]; then
-  echo "fake bwrap did not find an inner command" >&2
-  exit 125
-fi
-
-cmd=("${args[@]:$command_start}")
-if [[ -n "${argv0}" ]]; then
-  exec -a "${argv0}" "${cmd[@]}"
-fi
-exec "${cmd[@]}"
-"#,
-    )?;
-    let mut permissions = std::fs::metadata(&fake_bwrap)?.permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_bwrap, permissions)?;
-    Ok(fake_bwrap)
-}
-
 #[test_case(FileSystemImplementation::Local ; "local")]
 #[test_case(FileSystemImplementation::Remote ; "remote")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -163,6 +130,388 @@ async fn file_system_canonicalize_resolves_directory_symlink(
 ) -> Result<()> {
     shared::assert_canonicalize_resolves_directory_alias(implementation, create_directory_symlink)
         .await
+}
+
+#[test_case(FileSystemImplementation::Local ; "local")]
+#[test_case(FileSystemImplementation::Remote ; "remote")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_system_operations_can_reject_symlinks_in_any_path_component(
+    implementation: FileSystemImplementation,
+) -> Result<()> {
+    let context = create_file_system_context(implementation).await?;
+    let tmp = TempDir::new()?;
+    let tmp_path = tmp.path().canonicalize()?;
+    let real = tmp_path.join("real");
+    std::fs::create_dir(&real)?;
+    let existing = real.join("existing.txt");
+    std::fs::write(&existing, "unchanged")?;
+    let removable = real.join("removable.txt");
+    std::fs::write(&removable, "keep")?;
+    let directory_link = tmp_path.join("directory-link");
+    symlink(&real, &directory_link)?;
+    let file_link = tmp_path.join("file-link");
+    symlink(&existing, &file_link)?;
+
+    let no_follow_read = ReadFileOptions {
+        follow_symlinks: false,
+    };
+    let no_follow_write = WriteFileOptions {
+        follow_symlinks: false,
+    };
+    let no_follow_metadata = GetMetadataOptions {
+        follow_symlinks: false,
+    };
+    let no_follow_create = CreateDirectoryOptions {
+        recursive: true,
+        follow_symlinks: false,
+    };
+    let no_follow_remove = RemoveOptions {
+        recursive: false,
+        force: false,
+        follow_symlinks: false,
+    };
+    let uri = |path: &Path| PathUri::from_host_native_path(path);
+    #[cfg(target_os = "linux")]
+    let strict_sandbox = workspace_write_sandbox(tmp_path);
+    #[cfg(target_os = "linux")]
+    let sandboxes = [None, Some(&strict_sandbox)];
+    #[cfg(not(target_os = "linux"))]
+    let sandboxes: [Option<&FileSystemSandboxContext>; 1] = [None];
+
+    for sandbox in sandboxes {
+        assert!(
+            context
+                .file_system
+                .read_file(&uri(&file_link)?, no_follow_read, sandbox)
+                .await
+                .is_err()
+        );
+        assert!(
+            context
+                .file_system
+                .read_file(
+                    &uri(&directory_link.join("existing.txt"))?,
+                    no_follow_read,
+                    sandbox,
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            context
+                .file_system
+                .write_file(
+                    &uri(&file_link)?,
+                    b"changed".to_vec(),
+                    no_follow_write,
+                    sandbox,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&existing)?, "unchanged");
+        assert!(
+            context
+                .file_system
+                .write_file(
+                    &uri(&directory_link.join("existing.txt"))?,
+                    b"changed".to_vec(),
+                    no_follow_write,
+                    sandbox,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&existing)?, "unchanged");
+        assert!(
+            context
+                .file_system
+                .get_metadata(&uri(&file_link)?, no_follow_metadata, sandbox)
+                .await
+                .is_err()
+        );
+        let directory_metadata = context
+            .file_system
+            .get_metadata(&uri(&real)?, no_follow_metadata, sandbox)
+            .await?;
+        assert!(directory_metadata.is_directory);
+        assert!(
+            context
+                .file_system
+                .create_directory(
+                    &uri(&directory_link.join("created"))?,
+                    no_follow_create,
+                    sandbox,
+                )
+                .await
+                .is_err()
+        );
+        assert!(!real.join("created").exists());
+        assert!(
+            context
+                .file_system
+                .remove(
+                    &uri(&directory_link.join("removable.txt"))?,
+                    no_follow_remove,
+                    sandbox,
+                )
+                .await
+                .is_err()
+        );
+        assert!(removable.exists());
+        assert!(
+            context
+                .file_system
+                .remove(&uri(&file_link)?, no_follow_remove, sandbox)
+                .await
+                .is_err()
+        );
+        assert!(file_link.symlink_metadata()?.file_type().is_symlink());
+    }
+
+    Ok(())
+}
+
+#[test_case(FileSystemImplementation::Local ; "local")]
+#[test_case(FileSystemImplementation::Remote ; "remote")]
+#[tokio::test]
+async fn file_system_no_follow_non_recursive_root_creation_fails(
+    implementation: FileSystemImplementation,
+) -> Result<()> {
+    let context = create_file_system_context(implementation).await?;
+    let result = context
+        .file_system
+        .create_directory(
+            &PathUri::from_host_native_path(Path::new("/"))?,
+            CreateDirectoryOptions {
+                recursive: false,
+                follow_symlinks: false,
+            },
+            /*sandbox*/ None,
+        )
+        .await;
+
+    assert!(result.is_err());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test_case(FileSystemImplementation::Local ; "local")]
+#[test_case(FileSystemImplementation::Remote ; "remote")]
+#[tokio::test]
+async fn file_system_no_follow_metadata_preserves_linux_birthtime(
+    implementation: FileSystemImplementation,
+) -> Result<()> {
+    let context = create_file_system_context(implementation).await?;
+    let tmp = TempDir::new()?;
+    let file = tmp.path().join("created.txt");
+    std::fs::write(&file, "created")?;
+    let expected = match std::fs::metadata(&file)?.created() {
+        Ok(created) => Some(i64::try_from(
+            created.duration_since(UNIX_EPOCH)?.as_millis(),
+        )?),
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => None,
+        Err(error) => return Err(error.into()),
+    };
+
+    let metadata = context
+        .file_system
+        .get_metadata(
+            &PathUri::from_host_native_path(&file)?,
+            GetMetadataOptions {
+                follow_symlinks: false,
+            },
+            /*sandbox*/ None,
+        )
+        .await?;
+
+    if let Some(expected) = expected {
+        assert!(expected > 0);
+        assert_eq!(metadata.created_at_ms, expected);
+    } else {
+        assert_eq!(metadata.created_at_ms, 0);
+    }
+    Ok(())
+}
+
+#[test_case(FileSystemImplementation::Local ; "local")]
+#[test_case(FileSystemImplementation::Remote ; "remote")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_system_no_follow_operations_support_search_only_ancestors(
+    implementation: FileSystemImplementation,
+) -> Result<()> {
+    let context = create_file_system_context(implementation).await?;
+    let tmp = TempDir::new()?;
+    let root = tmp.path().canonicalize()?;
+    let search_only = root.join("search-only");
+    std::fs::create_dir(&search_only)?;
+    let existing = search_only.join("existing.txt");
+    std::fs::write(&existing, "before")?;
+    let unreadable = search_only.join("unreadable.txt");
+    std::fs::write(&unreadable, "metadata only")?;
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))?;
+    let socket_path = search_only.join("socket");
+    let _socket = UnixListener::bind(&socket_path)?;
+    let removable = search_only.join("removable.txt");
+    std::fs::write(&removable, "remove")?;
+    std::fs::set_permissions(&search_only, std::fs::Permissions::from_mode(0o300))?;
+
+    let uri = |path: &Path| PathUri::from_host_native_path(path);
+    let result: Result<()> = async {
+        let root_metadata = context
+            .file_system
+            .get_metadata(
+                &uri(Path::new("/"))?,
+                GetMetadataOptions {
+                    follow_symlinks: false,
+                },
+                /*sandbox*/ None,
+            )
+            .await?;
+        assert!(root_metadata.is_directory);
+
+        assert_eq!(
+            context
+                .file_system
+                .read_file(
+                    &uri(&existing)?,
+                    ReadFileOptions {
+                        follow_symlinks: false,
+                    },
+                    /*sandbox*/ None,
+                )
+                .await?,
+            b"before"
+        );
+        context
+            .file_system
+            .write_file(
+                &uri(&existing)?,
+                b"after".to_vec(),
+                WriteFileOptions {
+                    follow_symlinks: false,
+                },
+                /*sandbox*/ None,
+            )
+            .await?;
+        assert_eq!(std::fs::read_to_string(&existing)?, "after");
+
+        for metadata_path in [&unreadable, &socket_path] {
+            context
+                .file_system
+                .get_metadata(
+                    &uri(metadata_path)?,
+                    GetMetadataOptions {
+                        follow_symlinks: false,
+                    },
+                    /*sandbox*/ None,
+                )
+                .await?;
+        }
+
+        let nested = search_only.join("created").join("nested");
+        context
+            .file_system
+            .create_directory(
+                &uri(&nested)?,
+                CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: false,
+                },
+                /*sandbox*/ None,
+            )
+            .await?;
+        assert!(nested.is_dir());
+
+        context
+            .file_system
+            .remove(
+                &uri(&removable)?,
+                RemoveOptions {
+                    recursive: false,
+                    force: false,
+                    follow_symlinks: false,
+                },
+                /*sandbox*/ None,
+            )
+            .await?;
+        assert!(!removable.exists());
+        Ok(())
+    }
+    .await;
+
+    std::fs::set_permissions(&search_only, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600))?;
+    result
+}
+
+#[test_case(FileSystemImplementation::Local ; "local")]
+#[test_case(FileSystemImplementation::Remote ; "remote")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_system_no_follow_write_rejects_fifo_without_blocking(
+    implementation: FileSystemImplementation,
+) -> Result<()> {
+    let context = create_file_system_context(implementation).await?;
+    let tmp = TempDir::new()?;
+    let fifo = tmp.path().canonicalize()?.join("fifo");
+    let fifo_c = CString::new(fifo.as_os_str().as_bytes())?;
+    if unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let result = timeout(
+        Duration::from_secs(1),
+        context.file_system.write_file(
+            &PathUri::from_host_native_path(&fifo)?,
+            b"must not be written".to_vec(),
+            WriteFileOptions {
+                follow_symlinks: false,
+            },
+            /*sandbox*/ None,
+        ),
+    )
+    .await
+    .context("strict FIFO write must not block")?;
+    assert!(result.is_err());
+    assert!(fifo.symlink_metadata()?.file_type().is_fifo());
+    Ok(())
+}
+
+#[test_case(FileSystemImplementation::Local ; "local")]
+#[test_case(FileSystemImplementation::Remote ; "remote")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn file_system_no_follow_recursive_mkdir_handles_concurrent_creators(
+    implementation: FileSystemImplementation,
+) -> Result<()> {
+    let context = create_file_system_context(implementation).await?;
+    let tmp = TempDir::new()?;
+    let path = tmp.path().canonicalize()?.join("shared").join("nested");
+    let path_uri = PathUri::from_host_native_path(&path)?;
+    let barrier = Arc::new(tokio::sync::Barrier::new(16));
+    let mut tasks = Vec::new();
+    for _ in 0..16 {
+        let file_system = Arc::clone(&context.file_system);
+        let path_uri = path_uri.clone();
+        let barrier = Arc::clone(&barrier);
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            file_system
+                .create_directory(
+                    &path_uri,
+                    CreateDirectoryOptions {
+                        recursive: true,
+                        follow_symlinks: false,
+                    },
+                    /*sandbox*/ None,
+                )
+                .await
+        }));
+    }
+    for task in tasks {
+        task.await??;
+    }
+    assert!(path.is_dir());
+    Ok(())
 }
 
 #[test_case(FileSystemImplementation::Local ; "local")]
@@ -202,6 +551,7 @@ async fn sandboxed_file_system_helper_finds_bwrap_on_preserved_path() -> Result<
         .write_file(
             &PathUri::from_host_native_path(&file_path)?,
             b"written through fs helper".to_vec(),
+            Default::default(),
             Some(&sandbox),
         )
         .await?;
@@ -248,6 +598,7 @@ async fn remote_read_file_materializes_environment_workspace_roots() -> Result<(
         file_system
             .read_file(
                 &PathUri::from_host_native_path(&workspace_file)?,
+                Default::default(),
                 Some(&sandbox),
             )
             .await?,
@@ -256,6 +607,7 @@ async fn remote_read_file_materializes_environment_workspace_roots() -> Result<(
     let error = file_system
         .read_file(
             &PathUri::from_host_native_path(&excluded_file)?,
+            Default::default(),
             Some(&sandbox),
         )
         .await
@@ -287,7 +639,11 @@ async fn remote_read_file_preserves_empty_workspace_roots() -> Result<()> {
     sandbox.workspace_roots.clear();
 
     let error = file_system
-        .read_file(&PathUri::from_host_native_path(&file)?, Some(&sandbox))
+        .read_file(
+            &PathUri::from_host_native_path(&file)?,
+            Default::default(),
+            Some(&sandbox),
+        )
         .await
         .expect_err("empty workspace roots should not grant cwd access");
     assert_sandbox_denied(&error);
@@ -312,6 +668,7 @@ async fn file_system_metadata_and_directory_listing_follow_symlinks(
     let symlink_metadata = file_system
         .get_metadata(
             &PathUri::from_host_native_path(&symlink_path)?,
+            Default::default(),
             /*sandbox*/ None,
         )
         .await
@@ -336,6 +693,7 @@ async fn file_system_metadata_and_directory_listing_follow_symlinks(
     let dir_symlink_metadata = file_system
         .get_metadata(
             &PathUri::from_host_native_path(&dir_symlink_path)?,
+            Default::default(),
             /*sandbox*/ None,
         )
         .await
@@ -357,6 +715,7 @@ async fn file_system_metadata_and_directory_listing_follow_symlinks(
     let error = file_system
         .get_metadata(
             &PathUri::from_host_native_path(&dangling_symlink_path)?,
+            Default::default(),
             /*sandbox*/ None,
         )
         .await
@@ -412,14 +771,105 @@ async fn file_system_walk_handles_directory_symlinks(
     std::fs::write(&target_file, "target")?;
     symlink(&target, &target_link)?;
     symlink(&root, &root_link)?;
+    symlink(&target_file, root.join("file-link"))?;
+    symlink(root.join("missing"), root.join("broken-link"))?;
 
-    let outcome = file_system
+    for root in [&root, &root_link] {
+        let target_link = root.join("target-link");
+
+        let outcome = file_system
+            .walk(
+                &PathUri::from_host_native_path(root)?,
+                WalkOptions {
+                    max_depth: 2,
+                    max_directories: 4,
+                    max_entries: 8,
+                    follow_directory_symlinks: false,
+                    prune_hidden_directories: false,
+                },
+                /*sandbox*/ None,
+            )
+            .await
+            .with_context(|| format!("mode={implementation}"))?;
+        assert_eq!(
+            outcome,
+            WalkOutcome {
+                entries: Vec::new(),
+                errors: Vec::new(),
+                truncated: false,
+            }
+        );
+
+        let outcome = file_system
+            .walk(
+                &PathUri::from_host_native_path(root)?,
+                WalkOptions {
+                    max_depth: 2,
+                    max_directories: 4,
+                    max_entries: 8,
+                    follow_directory_symlinks: true,
+                    prune_hidden_directories: false,
+                },
+                /*sandbox*/ None,
+            )
+            .await
+            .with_context(|| format!("mode={implementation}"))?;
+        assert_eq!(
+            outcome,
+            WalkOutcome {
+                entries: vec![
+                    WalkEntry {
+                        path: PathUri::from_host_native_path(&target_link)?,
+                        kind: WalkEntryKind::Directory,
+                    },
+                    WalkEntry {
+                        path: PathUri::from_host_native_path(target_link.join("note.txt"))?,
+                        kind: WalkEntryKind::File,
+                    },
+                    WalkEntry {
+                        path: PathUri::from_host_native_path(target_link.join("root-link"))?,
+                        kind: WalkEntryKind::Directory,
+                    },
+                ],
+                errors: Vec::new(),
+                truncated: false,
+            }
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test_case(FileSystemImplementation::Local ; "local")]
+#[test_case(FileSystemImplementation::Remote ; "remote")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_system_walk_reports_non_utf8_names(
+    implementation: FileSystemImplementation,
+) -> Result<()> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    use codex_exec_server::WalkError;
+
+    let context = create_file_system_context(implementation).await?;
+    let tmp = TempDir::new()?;
+    std::fs::write(
+        tmp.path()
+            .join(OsString::from_vec(b"invalid-\xff".to_vec())),
+        "contents",
+    )?;
+    let lossy_path = tmp.path().join("invalid-\u{fffd}");
+    let error =
+        std::fs::symlink_metadata(&lossy_path).expect_err("the lossy filename must not exist");
+    let outcome = context
+        .file_system
         .walk(
-            &PathUri::from_host_native_path(&root)?,
+            &PathUri::from_host_native_path(tmp.path())?,
             WalkOptions {
-                max_depth: 2,
-                max_directories: 4,
-                max_entries: 8,
+                max_depth: 0,
+                max_directories: 1,
+                max_entries: 1,
                 follow_directory_symlinks: false,
                 prune_hidden_directories: false,
             },
@@ -431,47 +881,13 @@ async fn file_system_walk_handles_directory_symlinks(
         outcome,
         WalkOutcome {
             entries: Vec::new(),
-            errors: Vec::new(),
+            errors: vec![WalkError {
+                path: PathUri::from_host_native_path(lossy_path)?,
+                message: error.to_string(),
+            }],
             truncated: false,
         }
     );
-
-    let outcome = file_system
-        .walk(
-            &PathUri::from_host_native_path(&root)?,
-            WalkOptions {
-                max_depth: 2,
-                max_directories: 4,
-                max_entries: 8,
-                follow_directory_symlinks: true,
-                prune_hidden_directories: false,
-            },
-            /*sandbox*/ None,
-        )
-        .await
-        .with_context(|| format!("mode={implementation}"))?;
-    assert_eq!(
-        outcome,
-        WalkOutcome {
-            entries: vec![
-                WalkEntry {
-                    path: PathUri::from_host_native_path(&target_link)?,
-                    kind: WalkEntryKind::Directory,
-                },
-                WalkEntry {
-                    path: PathUri::from_host_native_path(target_link.join("note.txt"))?,
-                    kind: WalkEntryKind::File,
-                },
-                WalkEntry {
-                    path: PathUri::from_host_native_path(target_link.join("root-link"))?,
-                    kind: WalkEntryKind::Directory,
-                },
-            ],
-            errors: Vec::new(),
-            truncated: false,
-        }
-    );
-
     Ok(())
 }
 
@@ -554,6 +970,7 @@ async fn file_system_sandboxed_write_rejects_unwritable_path(
         .write_file(
             &PathUri::from_host_native_path(&blocked_path)?,
             b"nope".to_vec(),
+            Default::default(),
             Some(&sandbox),
         )
         .await
@@ -590,6 +1007,7 @@ async fn file_system_sandboxed_write_allows_explicit_alias_roots(
         .write_file(
             &PathUri::from_host_native_path(&file_path)?,
             b"created".to_vec(),
+            Default::default(),
             Some(&sandbox),
         )
         .await
@@ -621,6 +1039,7 @@ async fn file_system_sandboxed_read_rejects_symlink_escape(
     let error = match file_system
         .read_file(
             &PathUri::from_host_native_path(&requested_path)?,
+            Default::default(),
             Some(&sandbox),
         )
         .await
@@ -664,7 +1083,10 @@ async fn file_system_sandboxed_read_rejects_symlink_parent_dotdot_escape(
     let requested_path =
         PathUri::from_host_native_path(allowed_dir.join("link").join("..").join("secret.txt"))?;
     let sandbox = read_only_sandbox(allowed_dir);
-    let error = match file_system.read_file(&requested_path, Some(&sandbox)).await {
+    let error = match file_system
+        .read_file(&requested_path, Default::default(), Some(&sandbox))
+        .await
+    {
         Ok(_) => anyhow::bail!("read should fail after path normalization"),
         Err(error) => error,
     };
@@ -700,6 +1122,7 @@ async fn file_system_sandboxed_write_rejects_symlink_escape(
         .write_file(
             &PathUri::from_host_native_path(&requested_path)?,
             b"nope".to_vec(),
+            Default::default(),
             Some(&sandbox),
         )
         .await
@@ -738,6 +1161,7 @@ async fn file_system_sandboxed_write_preserves_existing_hard_link(
         .write_file(
             &PathUri::from_host_native_path(&hard_link)?,
             b"updated through existing hard link\n".to_vec(),
+            Default::default(),
             Some(&sandbox),
         )
         .await
@@ -783,7 +1207,10 @@ async fn file_system_create_directory_rejects_symlink_escape(
     let error = match file_system
         .create_directory(
             &PathUri::from_host_native_path(&requested_path)?,
-            CreateDirectoryOptions { recursive: false },
+            CreateDirectoryOptions {
+                recursive: false,
+                follow_symlinks: true,
+            },
             Some(&sandbox),
         )
         .await
@@ -894,6 +1321,7 @@ async fn file_system_remove_removes_symlink_not_target(
             RemoveOptions {
                 recursive: false,
                 force: false,
+                follow_symlinks: true,
             },
             Some(&sandbox),
         )
@@ -971,6 +1399,7 @@ async fn file_system_remove_rejects_symlink_escape(
             RemoveOptions {
                 recursive: false,
                 force: false,
+                follow_symlinks: true,
             },
             Some(&sandbox),
         )

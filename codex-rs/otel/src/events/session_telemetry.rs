@@ -23,6 +23,7 @@ use crate::metrics::STARTUP_PHASE_DURATION_METRIC;
 use crate::metrics::SessionMetricTagValues;
 use crate::metrics::TOOL_CALL_COUNT_METRIC;
 use crate::metrics::TOOL_CALL_DURATION_METRIC;
+use crate::metrics::TURN_COST_MICROUSD_METRIC;
 use crate::metrics::TURN_TTFT_DURATION_METRIC;
 use crate::metrics::WEBSOCKET_EVENT_COUNT_METRIC;
 use crate::metrics::WEBSOCKET_EVENT_DURATION_METRIC;
@@ -32,11 +33,16 @@ use crate::metrics::runtime_metrics::RuntimeMetricsSummary;
 use crate::metrics::timer::Timer;
 use crate::provider::OtelProvider;
 use crate::sanitize_metric_tag_value;
+use crate::tool_result::ToolResultEvent;
+use crate::tool_result::emit_tool_result;
 use codex_api::AgentIdentityTelemetry;
 use codex_api::ApiError;
 use codex_api::ResponseEvent;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::ToolName;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::ToolResultLogConfig;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
@@ -50,7 +56,6 @@ use eventsource_stream::EventStreamError as StreamError;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
 use reqwest::Error;
 use reqwest::Response;
-use std::borrow::Cow;
 use std::future::Future;
 use std::time::Duration;
 use std::time::Instant;
@@ -87,6 +92,9 @@ pub struct AuthEnvTelemetryMetadata {
 #[derive(Debug, Clone)]
 pub struct SessionTelemetryMetadata {
     pub(crate) conversation_id: ThreadId,
+    // Full canonical path when available; legacy nickname or thread ID otherwise.
+    // Keep this potentially user-chosen label on detailed logs, not trace-safe events.
+    pub(crate) agent_name: String,
     pub(crate) auth_mode: Option<String>,
     pub(crate) auth_env: AuthEnvTelemetryMetadata,
     pub(crate) account_id: Option<String>,
@@ -105,12 +113,18 @@ pub struct SessionTelemetryMetadata {
 
 #[derive(Debug, Clone)]
 pub struct SessionTelemetry {
+    tool_result_log_config: ToolResultLogConfig,
     pub(crate) metadata: SessionTelemetryMetadata,
     pub(crate) metrics: Option<MetricsClient>,
     pub(crate) metrics_use_metadata_tags: bool,
 }
 
 impl SessionTelemetry {
+    pub fn with_tool_result_log_config(mut self, config: ToolResultLogConfig) -> Self {
+        self.tool_result_log_config = config;
+        self
+    }
+
     pub fn with_auth_env(mut self, auth_env: AuthEnvTelemetryMetadata) -> Self {
         self.metadata.auth_env = auth_env;
         self
@@ -260,6 +274,64 @@ impl SessionTelemetry {
         );
     }
 
+    pub fn record_turn_cost(
+        &self,
+        turn_id: &str,
+        estimated_usd: &str,
+        interrupted: bool,
+        speed: Option<&str>,
+        reasoning_effort: Option<&str>,
+    ) {
+        let (dollars, fractional) = estimated_usd.split_once('.').unwrap_or((estimated_usd, ""));
+        let fractional = fractional.as_bytes();
+        let fractional_precision = 6_usize;
+        let estimated_microusd = dollars.parse::<u64>().ok().and_then(|dollars| {
+            if !fractional.iter().all(u8::is_ascii_digit) {
+                return None;
+            }
+            let fractional_microusd = fractional
+                .iter()
+                .take(fractional_precision)
+                .fold(0_u64, |value, digit| value * 10 + u64::from(digit - b'0'))
+                * 10_u64.pow(fractional_precision.saturating_sub(fractional.len()) as u32);
+            let round_up = fractional
+                .get(fractional_precision)
+                .is_some_and(|digit| *digit >= b'5');
+            let estimated_microusd = dollars
+                .checked_mul(1_000_000)?
+                .checked_add(fractional_microusd)?
+                .checked_add(u64::from(round_up))?;
+            i64::try_from(estimated_microusd).ok()
+        });
+        if let Some(estimated_microusd) = estimated_microusd {
+            let conversation_id = self.metadata.conversation_id.to_string();
+            let mut tags = vec![
+                ("turn.id", turn_id),
+                ("conversation.id", conversation_id.as_str()),
+                (
+                    "turn.interrupted",
+                    if interrupted { "true" } else { "false" },
+                ),
+            ];
+            if let Some(speed) = speed {
+                tags.push(("speed", speed));
+            }
+            if let Some(reasoning_effort) = reasoning_effort {
+                tags.push(("reasoning_effort", reasoning_effort));
+            }
+            self.counter(TURN_COST_MICROUSD_METRIC, estimated_microusd, &tags);
+        }
+        log_event!(
+            self,
+            event.name = "codex.turn_cost",
+            turn.id = turn_id,
+            usage.estimated_usd = estimated_usd,
+            turn.interrupted = interrupted,
+            speed = speed,
+            reasoning_effort = reasoning_effort,
+        );
+    }
+
     /// Records the moment a plugin or connector install elicitation is dispatched.
     pub fn record_plugin_install_elicitation_sent(
         &self,
@@ -406,9 +478,22 @@ impl SessionTelemetry {
         terminal_type: String,
         session_source: SessionSource,
     ) -> SessionTelemetry {
+        let agent_name = session_source
+            .get_agent_path()
+            .map(|path| path.to_string())
+            .or_else(|| session_source.get_nickname())
+            .unwrap_or_else(|| {
+                if session_source.is_non_root_agent() {
+                    conversation_id.to_string()
+                } else {
+                    AgentPath::ROOT.to_string()
+                }
+            });
         Self {
+            tool_result_log_config: ToolResultLogConfig::default(),
             metadata: SessionTelemetryMetadata {
                 conversation_id,
+                agent_name,
                 auth_mode: auth_mode.map(|m| m.to_string()),
                 auth_env: AuthEnvTelemetryMetadata::default(),
                 account_id,
@@ -989,16 +1074,18 @@ impl SessionTelemetry {
 
     pub fn tool_decision(
         &self,
-        tool_name: &str,
+        tool_name: &ToolName,
         call_id: &str,
         decision: &ReviewDecision,
         source: Option<ToolDecisionSource>,
     ) {
+        let tool_namespace = crate::events::shared::tool_namespace(tool_name);
         match source {
             Some(source) => log_event!(
                 self,
                 event.name = "codex.tool_decision",
-                tool_name = %tool_name,
+                tool_name = %tool_name.name,
+                tool_namespace = %tool_namespace,
                 call_id = %call_id,
                 decision = %decision.to_opaque_string(),
                 source = %source.to_string(),
@@ -1006,7 +1093,8 @@ impl SessionTelemetry {
             None => log_event!(
                 self,
                 event.name = "codex.tool_decision",
-                tool_name = %tool_name,
+                tool_name = %tool_name.name,
+                tool_namespace = %tool_namespace,
                 call_id = %call_id,
                 decision = %decision.to_opaque_string(),
             ),
@@ -1044,19 +1132,22 @@ impl SessionTelemetry {
         );
     }
 
+    /// Records a diagnostic representation and returns the original result. The temporary
+    /// output string is truncated and released before the caller resumes async work.
     #[allow(clippy::too_many_arguments)]
-    pub async fn log_tool_result_with_tags<F, Fut, E>(
+    pub async fn log_tool_result_with_tags<T, F, Fut, E>(
         &self,
-        tool_name: &str,
+        tool_name: &ToolName,
         call_id: &str,
         arguments: &str,
         extra_tags: &[(&str, &str)],
         extra_trace_fields: &[(&str, &str)],
         f: F,
-    ) -> Result<(String, bool), E>
+        log_output: impl FnOnce(&T) -> (String, bool),
+    ) -> Result<T, E>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<(String, bool), E>>,
+        Fut: Future<Output = Result<T, E>>,
         E: std::fmt::Display,
     {
         let start = Instant::now();
@@ -1064,8 +1155,8 @@ impl SessionTelemetry {
         let duration = start.elapsed();
 
         let (output, success) = match &result {
-            Ok((preview, success)) => (Cow::Borrowed(preview.as_str()), *success),
-            Err(error) => (Cow::Owned(error.to_string()), false),
+            Ok(result) => log_output(result),
+            Err(error) => (error.to_string(), false),
         };
 
         self.tool_result_with_tags(
@@ -1074,7 +1165,7 @@ impl SessionTelemetry {
             arguments,
             duration,
             success,
-            output.as_ref(),
+            &output,
             extra_tags,
             extra_trace_fields,
         );
@@ -1082,34 +1173,10 @@ impl SessionTelemetry {
         result
     }
 
-    pub fn log_tool_failed(&self, tool_name: &str, error: &str) {
-        log_event!(
-            self,
-            event.name = "codex.tool_result",
-            tool_name = %tool_name,
-            duration_ms = %Duration::ZERO.as_millis(),
-            success = %false,
-            output = %error,
-            mcp_server = "",
-            mcp_server_origin = "",
-        );
-        trace_event!(
-            self,
-            event.name = "codex.tool_result",
-            tool_name = %tool_name,
-            duration_ms = %Duration::ZERO.as_millis(),
-            success = %false,
-            output_length = error.len() as i64,
-            output_line_count = error.lines().count() as i64,
-            tool_origin = %"builtin",
-            error.message = %error,
-        );
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn tool_result_with_tags(
         &self,
-        tool_name: &str,
+        tool_name: &ToolName,
         call_id: &str,
         arguments: &str,
         duration: Duration,
@@ -1118,9 +1185,10 @@ impl SessionTelemetry {
         extra_tags: &[(&str, &str)],
         extra_trace_fields: &[(&str, &str)],
     ) {
+        let flat_tool_name = tool_name.to_string();
         let success_str = if success { "true" } else { "false" };
         let mut tags = Vec::with_capacity(2 + extra_tags.len());
-        tags.push(("tool", tool_name));
+        tags.push(("tool", flat_tool_name.as_str()));
         tags.push(("success", success_str));
         tags.extend_from_slice(extra_tags);
         self.counter(TOOL_CALL_COUNT_METRIC, /*inc*/ 1, &tags);
@@ -1128,30 +1196,19 @@ impl SessionTelemetry {
         let mcp_server = trace_field_value(extra_trace_fields, "mcp_server").unwrap_or("");
         let mcp_server_origin =
             trace_field_value(extra_trace_fields, "mcp_server_origin").unwrap_or("");
-        log_event!(
+        emit_tool_result(
             self,
-            event.name = "codex.tool_result",
-            tool_name = %tool_name,
-            call_id = %call_id,
-            arguments = %arguments,
-            duration_ms = %duration.as_millis(),
-            success = %success_str,
-            output = %output,
-            mcp_server = %mcp_server,
-            mcp_server_origin = %mcp_server_origin,
-        );
-        trace_event!(
-            self,
-            event.name = "codex.tool_result",
-            tool_name = %tool_name,
-            call_id = %call_id,
-            duration_ms = %duration.as_millis(),
-            success = %success_str,
-            arguments_length = arguments.len() as i64,
-            output_length = output.len() as i64,
-            output_line_count = output.lines().count() as i64,
-            tool_origin = if mcp_server.is_empty() { "builtin" } else { "mcp" },
-            mcp_tool = !mcp_server.is_empty(),
+            self.tool_result_log_config,
+            ToolResultEvent {
+                tool_name,
+                call_id,
+                arguments,
+                mcp_server,
+                mcp_server_origin,
+                duration,
+                success,
+                output,
+            },
         );
     }
 

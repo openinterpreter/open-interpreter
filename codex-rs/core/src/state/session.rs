@@ -13,16 +13,21 @@ use super::auto_compact_window::AutoCompactWindow;
 use super::auto_compact_window::AutoCompactWindowIds;
 use super::auto_compact_window::AutoCompactWindowSnapshot;
 use crate::context_manager::ContextManager;
+use crate::context_manager::HistoryReplacement;
 use crate::session::PreviousTurnSettings;
 use crate::session::session::SessionConfiguration;
 use crate::session::time_reminder::CurrentTimeReminderState;
 use crate::session_startup_prewarm::SessionStartupPrewarmHandle;
 use codex_history::ResponseItemEnvelope;
+use codex_protocol::SessionId;
+use codex_protocol::ThreadId;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
+use codex_protocol::protocol::TokenUsageRecord;
 use codex_protocol::protocol::TurnContextItem;
 use codex_utils_output_truncation::TruncationPolicy;
+use tokio_util::task::AbortOnDropHandle;
 
 /// Persistent, session-scoped state previously stored directly on `Session`.
 pub(crate) struct SessionState {
@@ -31,6 +36,7 @@ pub(crate) struct SessionState {
     pub(crate) base_instructions_provenance: Option<BaseInstructionsProvenance>,
     pub(crate) history: ContextManager,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
+    pub(crate) latest_token_usage_record: Option<TokenUsageRecord>,
     pub(crate) server_reasoning_included: bool,
     pub(crate) mcp_dependency_prompted: HashSet<String>,
     pub(crate) additional_context: AdditionalContextStore,
@@ -42,6 +48,8 @@ pub(crate) struct SessionState {
     auto_compact_window: AutoCompactWindow,
     /// Startup prewarmed session prepared during session initialization.
     pub(crate) startup_prewarm: Option<SessionStartupPrewarmHandle>,
+    /// Retained after completion so later turns do not repeat speculative captures.
+    pub(crate) shell_snapshot_prewarm: Option<AbortOnDropHandle<()>>,
     pub(crate) current_time_reminder: CurrentTimeReminderState,
     pub(crate) active_connector_selection: HashSet<String>,
     pub(crate) pending_session_start_sources: VecDeque<codex_hooks::SessionStartSource>,
@@ -69,12 +77,14 @@ impl SessionState {
             base_instructions_provenance: None,
             history,
             latest_rate_limits: None,
+            latest_token_usage_record: None,
             server_reasoning_included: false,
             mcp_dependency_prompted: HashSet::new(),
             additional_context: AdditionalContextStore::default(),
             previous_turn_settings: None,
             auto_compact_window: AutoCompactWindow::new_with_ids(auto_compact_window_ids),
             startup_prewarm: None,
+            shell_snapshot_prewarm: None,
             current_time_reminder: CurrentTimeReminderState::default(),
             active_connector_selection: HashSet::new(),
             pending_session_start_sources: VecDeque::new(),
@@ -132,8 +142,12 @@ impl SessionState {
         &mut self,
         items: Vec<ResponseItemEnvelope>,
         reference_context_item: Option<TurnContextItem>,
+        replacement: HistoryReplacement,
     ) {
-        self.history.replace_annotated(items);
+        match replacement {
+            HistoryReplacement::Compaction => self.history.replace_compacted(items),
+            HistoryReplacement::Reset => self.history.replace_annotated(items),
+        }
         self.history
             .set_reference_context_item(reference_context_item);
         self.auto_compact_window.clear_prefill();
@@ -141,6 +155,44 @@ impl SessionState {
 
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
         self.history.set_token_info(info);
+    }
+
+    pub(crate) fn record_token_usage(
+        &mut self,
+        thread_id: ThreadId,
+        turn_id: &str,
+        session_id: SessionId,
+        root_turn_id: String,
+        response_id: String,
+        usage: &TokenUsage,
+    ) -> TokenUsageRecord {
+        let mut turn_token_usage = self
+            .latest_token_usage_record
+            .as_ref()
+            .filter(|record| record.turn_id == turn_id)
+            .map_or_else(TokenUsage::default, |record| {
+                record.turn_token_usage.clone()
+            });
+        turn_token_usage.add_assign(usage);
+        let mut thread_token_usage = self
+            .latest_token_usage_record
+            .as_ref()
+            .map_or_else(TokenUsage::default, |record| {
+                record.thread_token_usage.clone()
+            });
+        thread_token_usage.add_assign(usage);
+        let record = TokenUsageRecord {
+            thread_id,
+            turn_id: turn_id.to_string(),
+            session_id,
+            root_turn_id,
+            response_id,
+            usage: usage.clone(),
+            turn_token_usage,
+            thread_token_usage,
+        };
+        self.latest_token_usage_record = Some(record.clone());
+        record
     }
 
     pub(crate) fn set_reference_context_item(&mut self, item: Option<TurnContextItem>) {

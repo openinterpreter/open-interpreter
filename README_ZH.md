@@ -1,4 +1,4 @@
-<!-- README translation source: README.md sha256=1b75430c73f72e6925f46a696dae97c046d4ecc43cc0a9d1efb294a29a2f85c4 -->
+<!-- README translation source: README.md sha256=dce3ab30ea9298b1e7ed4ac9d31186ae2fa55c2d46b856f032a1ad00a3e4a5c6 -->
 
 <h1 align="center">Open Interpreter</h1>
 
@@ -88,6 +88,8 @@ Open Interpreter 内置 QA 技能，让任何模型都能操作和测试界面�
 
 - 在 macOS、Linux 和 Windows 上通过原生沙箱执行命令。
 - 在 TUI 中使用 `/model` 切换模型服务商和模型。
+- 通过 Chat Completions 运行任何兼容 OpenAI 的模型服务商：
+  `interpreter --chat-completions` 或 `interpreter exec --chat-completions`。
 - 使用 `/harness` 查看或切换 Rust 原生的模型框架。
 - 通过内置 QA 技能测试 Web 应用和原生应用。
 - 通过 `interpreter acp` 作为编辑器的 [Agent Client Protocol](https://agentclientprotocol.com/) 智能体运行。

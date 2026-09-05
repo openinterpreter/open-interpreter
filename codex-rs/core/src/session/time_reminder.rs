@@ -1,14 +1,40 @@
 use chrono::DateTime;
 use chrono::Utc;
 use codex_features::CurrentTimeReminderDeliveryMode;
+use codex_features::Feature;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 
 use super::session::Session;
 use super::turn_context::TurnContext;
+use crate::config::Config;
+use crate::config::CurrentTimeReminderConfig;
 use crate::context::ContextualUserFragment;
 use crate::context_manager::is_user_turn_boundary;
+
+pub(super) fn apply_persistent_defaults(config: &mut Config) {
+    if config.current_time_reminder.is_some()
+        || config
+            .config_layer_stack
+            .effective_config()
+            .get("features")
+            .and_then(|features| features.get("current_time_reminder"))
+            .is_some()
+    {
+        return;
+    }
+
+    // Apply defaults only to this turn; explicit settings and managed policy win.
+    if config.features.enable(Feature::CurrentTimeReminder).is_ok()
+        && config.features.enabled(Feature::CurrentTimeReminder)
+    {
+        config.current_time_reminder = Some(CurrentTimeReminderConfig {
+            sleep_tool: true,
+            ..CurrentTimeReminderConfig::default()
+        });
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct CurrentTimeReminderState {
@@ -73,6 +99,13 @@ pub(super) async fn maybe_record_current_time_reminder(
     turn_context: &TurnContext,
     window_id: &str,
 ) -> CodexResult<()> {
+    if !turn_context
+        .config
+        .features
+        .enabled(Feature::CurrentTimeReminder)
+    {
+        return Ok(());
+    }
     let Some(config) = turn_context.config.current_time_reminder else {
         return Ok(());
     };

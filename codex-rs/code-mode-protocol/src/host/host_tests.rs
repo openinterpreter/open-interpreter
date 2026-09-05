@@ -22,7 +22,6 @@ use super::ProtocolVersion;
 use super::RequestId;
 use super::SessionId;
 use super::SupportedProtocolVersions;
-use super::TransportLane;
 use super::WireCellId;
 use super::WireContentItem;
 use super::WireExecuteRequest;
@@ -73,130 +72,6 @@ where
         serde_json::from_value::<T>(encoded).expect("deserialize"),
         message
     );
-}
-
-#[test]
-fn dual_websocket_hello_preserves_the_pairing_token() {
-    assert_wire_round_trip(
-        HostToClient::HostHello(
-            HostHello::new(
-                ProtocolVersion::V1,
-                CapabilitySet::try_new([capability("dual-websocket-v1")])
-                    .expect("valid capabilities"),
-            )
-            .with_bulk_connection_token("pairing-token".to_string()),
-        ),
-        json!({
-            "type": "connection/ready",
-            "selectedVersion": 1,
-            "capabilities": ["dual-websocket-v1"],
-            "bulkConnectionToken": "pairing-token",
-        }),
-    );
-}
-
-#[test]
-fn message_families_use_dedicated_transport_lanes() {
-    for (message, lane) in [
-        (
-            ClientToHost::CancelRequest {
-                id: request_id(/*value*/ 1),
-            },
-            TransportLane::Control,
-        ),
-        (
-            ClientToHost::DelegateResponse {
-                id: delegate_request_id(/*value*/ 1),
-                result: WireResult::Ok {
-                    value: DelegateResponse::NotificationDelivered,
-                },
-            },
-            TransportLane::Control,
-        ),
-        (
-            ClientToHost::DelegateResponse {
-                id: delegate_request_id(/*value*/ 2),
-                result: WireResult::Ok {
-                    value: DelegateResponse::ToolResult {
-                        result: json!({ "value": "tool result" }),
-                    },
-                },
-            },
-            TransportLane::Bulk,
-        ),
-        (
-            ClientToHost::DelegateResponse {
-                id: delegate_request_id(/*value*/ 3),
-                result: WireResult::Err {
-                    message: "delegate failed".to_string(),
-                },
-            },
-            TransportLane::Bulk,
-        ),
-    ] {
-        assert_eq!(message.transport_lane(), lane);
-        assert!(message.allows_transport_lane(lane));
-        assert!(!message.allows_transport_lane(match lane {
-            TransportLane::Control => TransportLane::Bulk,
-            TransportLane::Bulk => TransportLane::Control,
-        }));
-    }
-
-    for (message, lane) in [
-        (
-            HostToClient::Response {
-                id: request_id(/*value*/ 1),
-                result: WireResult::Err {
-                    message: "x".repeat(128 * 1024),
-                },
-            },
-            TransportLane::Control,
-        ),
-        (
-            HostToClient::DelegateRequest {
-                id: delegate_request_id(/*value*/ 1),
-                session_id: session_id(),
-                request: DelegateRequest::Notify {
-                    call_id: "call-1".to_string(),
-                    cell_id: cell_id("cell-1"),
-                    text: "important".to_string(),
-                },
-            },
-            TransportLane::Control,
-        ),
-        (
-            HostToClient::DelegateRequest {
-                id: delegate_request_id(/*value*/ 2),
-                session_id: session_id(),
-                request: DelegateRequest::InvokeTool {
-                    invocation: WireNestedToolCall {
-                        cell_id: cell_id("cell-1"),
-                        runtime_tool_call_id: "runtime-call-1".to_string(),
-                        tool_name: WireToolName {
-                            name: "tool".to_string(),
-                            namespace: None,
-                        },
-                        tool_kind: WireToolKind::Function,
-                        input: None,
-                    },
-                },
-            },
-            TransportLane::Bulk,
-        ),
-        (
-            HostToClient::CancelDelegateRequest {
-                id: delegate_request_id(/*value*/ 1),
-            },
-            TransportLane::Bulk,
-        ),
-    ] {
-        assert_eq!(message.transport_lane(), lane);
-        assert!(message.allows_transport_lane(lane));
-        assert!(!message.allows_transport_lane(match lane {
-            TransportLane::Control => TransportLane::Bulk,
-            TransportLane::Bulk => TransportLane::Control,
-        }));
-    }
 }
 
 fn execute_request() -> WireExecuteRequest {
@@ -588,6 +463,7 @@ fn host_to_client_v1_variants_are_pinned() {
             request_id(/*value*/ 3),
             HostResponse::WaitCompleted {
                 outcome: WireWaitOutcome::LiveCell(WireRuntimeResponse::Yielded {
+                    code_mode_host_duration_ns: 0,
                     cell_id: cell_id("cell-1"),
                     content_items: content_items(),
                 }),
@@ -599,6 +475,7 @@ fn host_to_client_v1_variants_are_pinned() {
                         "Yielded": {
                             "cell_id": "cell-1",
                             "content_items": content_items_json(),
+                            "code_mode_host_duration_ns": 0,
                         },
                     },
                 },
@@ -608,6 +485,7 @@ fn host_to_client_v1_variants_are_pinned() {
             request_id(/*value*/ 4),
             HostResponse::WaitCompleted {
                 outcome: WireWaitOutcome::MissingCell(WireRuntimeResponse::Result {
+                    code_mode_host_duration_ns: 0,
                     cell_id: cell_id("missing-cell"),
                     content_items: Vec::new(),
                     error_text: Some("cell not found".to_string()),
@@ -621,6 +499,7 @@ fn host_to_client_v1_variants_are_pinned() {
                             "cell_id": "missing-cell",
                             "content_items": [],
                             "error_text": "cell not found",
+                            "code_mode_host_duration_ns": 0,
                         },
                     },
                 },
@@ -665,6 +544,7 @@ fn host_to_client_v1_variants_are_pinned() {
             id: request_id(/*value*/ 7),
             result: WireResult::Ok {
                 value: WireRuntimeResponse::Terminated {
+                    code_mode_host_duration_ns: 0,
                     cell_id: cell_id("cell-1"),
                     content_items: Vec::new(),
                 },
@@ -676,7 +556,11 @@ fn host_to_client_v1_variants_are_pinned() {
             "result": {
                 "status": "ok",
                 "value": {
-                    "Terminated": { "cell_id": "cell-1", "content_items": [] },
+                    "Terminated": {
+                        "cell_id": "cell-1",
+                        "content_items": [],
+                        "code_mode_host_duration_ns": 0,
+                    },
                 },
             },
         }),
@@ -923,6 +807,7 @@ fn every_nested_v1_object_rejects_unknown_fields() {
             "Yielded": {
                 "cell_id": "cell-1",
                 "content_items": [],
+                "code_mode_host_duration_ns": 0,
                 "unexpected": true,
             },
         }))

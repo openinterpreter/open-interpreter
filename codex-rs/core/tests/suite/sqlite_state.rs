@@ -28,6 +28,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::user_input::UserInput;
+use codex_thread_store::ThreadMetadataPatch;
 use codex_web_search_extension::install as install_web_search_extension;
 use core_test_support::responses;
 use core_test_support::responses::ev_completed;
@@ -110,6 +111,65 @@ async fn new_thread_is_recorded_in_state_db() -> Result<()> {
         rollout_path.exists(),
         "rollout should be materialized after first user message"
     );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_metadata_is_persisted_on_first_turn() -> Result<()> {
+    let server = start_mock_server().await;
+    let _mock = mount_sse_once(
+        &server,
+        responses::sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::Sqlite)
+            .expect("test config should allow feature update");
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    let thread_id = test.thread_manager.reserve_thread_id();
+    test.thread_store
+        .stage_pending_thread_metadata(
+            thread_id,
+            ThreadMetadataPatch {
+                name: Some(Some("staged-name".to_string())),
+                model_provider: Some("staged-provider".to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let mut options = StartThreadOptions::new(test.config.clone());
+    options.reserved_thread_id = Some(thread_id);
+    let started = test.thread_manager.start_thread(options).await?;
+
+    started
+        .thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "persist staged metadata".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&started.thread, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let db = test.codex.state_db().expect("state db enabled");
+    let metadata = db
+        .get_thread(started.thread_id)
+        .await?
+        .expect("thread should exist in state db");
+    let thread = started
+        .thread
+        .read_thread(
+            /*include_archived*/ false, /*include_history*/ false,
+        )
+        .await?;
+    assert_eq!(thread.name.as_deref(), Some("staged-name"));
+    assert_eq!(metadata.model_provider, test.config.model_provider_id);
 
     Ok(())
 }
@@ -357,6 +417,7 @@ async fn backfill_scans_existing_rollouts() -> Result<()> {
                     session_id: thread_id.into(),
                     id: thread_id,
                     forked_from_id: None,
+                    forked_from_ordinal_exclusive: None,
                     parent_thread_id: None,
                     timestamp: "2026-01-27T12:00:00Z".to_string(),
                     cwd: codex_home.to_path_buf(),
@@ -754,8 +815,8 @@ async fn tool_call_logs_include_thread_id() -> Result<()> {
     let server = start_mock_server().await;
     let call_id = "call-1";
     let args = json!({
-        "command": "echo hello",
-        "timeout_ms": 1_000,
+        "cmd": "echo hello",
+        "yield_time_ms": 1_000,
         "login": false,
     });
     let args_json = serde_json::to_string(&args)?;
@@ -764,7 +825,7 @@ async fn tool_call_logs_include_thread_id() -> Result<()> {
         vec![
             responses::sse(vec![
                 ev_response_created("resp-1"),
-                ev_function_call(call_id, "shell_command", &args_json),
+                ev_function_call(call_id, "exec_command", &args_json),
                 ev_completed("resp-1"),
             ]),
             responses::sse(vec![ev_completed("resp-2")]),
@@ -790,7 +851,7 @@ async fn tool_call_logs_include_thread_id() -> Result<()> {
     tracing::dispatcher::with_default(&dispatch, || {
         let span = tracing::info_span!("test_log_span", thread_id = %expected_thread_id);
         let _entered = span.enter();
-        tracing::info!("ToolCall: shell_command {{\"command\":\"echo hello\"}}");
+        tracing::info!("ToolCall: exec_command {{\"cmd\":\"echo hello\"}}");
     });
     log_db_layer.flush().await;
 

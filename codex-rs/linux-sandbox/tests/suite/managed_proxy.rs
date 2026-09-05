@@ -1,7 +1,13 @@
+//! Linux managed-proxy integration tests exercise the real sandbox with isolated environments.
+//! Handoff must preserve routing and attribution without leaking privileged sockets; cancellation
+//! must close active routes while filesystem and network restrictions remain enforced.
+
 #![cfg(target_os = "linux")]
 #![allow(clippy::unwrap_used)]
 
 use codex_core::exec_env::create_env;
+use codex_network_proxy::PROXY_ATTRIBUTION_TOKEN_ENV_KEY;
+use codex_network_proxy::write_attribution_frame;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -16,17 +22,24 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::io::Write;
 use std::net::Ipv4Addr;
+use std::net::Shutdown;
 use std::net::TcpListener;
+use std::net::TcpStream;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::Output;
 use std::process::Stdio;
 use std::time::Duration;
+use std::time::Instant;
 use tempfile::NamedTempFile;
 use tokio::process::Command;
+use url::Url;
 
 const BWRAP_UNAVAILABLE_ERR: &str = "bubblewrap is unavailable: no system bwrap was found";
 const NETWORK_TIMEOUT_MS: u64 = 4_000;
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 8);
+const SANDBOX_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 60);
 const MANAGED_PROXY_PERMISSION_ERR_SNIPPETS: &[&str] = &[
     "loopback: Failed RTM_NEWADDR",
     "loopback: Failed RTM_NEWLINK",
@@ -690,4 +703,270 @@ async fn managed_proxy_mode_denies_af_unix_socket_but_allows_socketpair() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Runs as the model-controlled command, after the trusted listener handoff.
+#[test]
+#[ignore = "invoked inside the managed proxy sandbox"]
+fn handoff_client() {
+    let Ok(label) = std::env::var("CODEX_TEST_HANDOFF_LABEL") else {
+        return;
+    };
+    assert!(std::env::var_os(PROXY_ATTRIBUTION_TOKEN_ENV_KEY).is_none());
+    let inherited_sockets = std::fs::read_dir("/proc/self/fd")
+        .expect("enumerate inherited descriptors")
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let target = std::fs::read_link(entry.path()).ok()?;
+            target
+                .to_string_lossy()
+                .starts_with("socket:")
+                .then(|| (entry.file_name(), target))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inherited_sockets, Vec::new(), "privileged socket leaked");
+
+    let shared = std::env::var("CODEX_TEST_HANDOFF_SHARED").expect("shared directory");
+    let shared = Path::new(&shared);
+    let peer = std::env::var("CODEX_TEST_HANDOFF_PEER").expect("peer label");
+    std::fs::write(shared.join(&label), b"ready").expect("announce sandbox readiness");
+    let deadline = Instant::now() + OPERATION_TIMEOUT;
+    while !shared.join(&peer).exists() {
+        assert!(Instant::now() < deadline, "peer sandbox did not start");
+        std::thread::sleep(Duration::from_millis(/*millis*/ 10));
+    }
+
+    let http =
+        Url::parse(&std::env::var("HTTP_PROXY").expect("HTTP proxy")).expect("parse HTTP proxy");
+    let https =
+        Url::parse(&std::env::var("HTTPS_PROXY").expect("HTTPS proxy")).expect("parse HTTPS proxy");
+    let other =
+        Url::parse(&std::env::var("ALL_PROXY").expect("other proxy")).expect("parse other proxy");
+    for (route, proxy) in [("http", http), ("https", https), ("all", other)] {
+        let endpoint = (
+            proxy.host_str().expect("proxy host"),
+            proxy.port().expect("proxy port"),
+        );
+        let mut stream = TcpStream::connect(endpoint).expect("connect through handoff listener");
+        stream
+            .set_read_timeout(Some(OPERATION_TIMEOUT))
+            .expect("read timeout");
+        stream
+            .set_write_timeout(Some(OPERATION_TIMEOUT))
+            .expect("write timeout");
+        let expected = format!("{label}/{route}");
+        stream
+            .write_all(expected.as_bytes())
+            .expect("send route marker");
+        stream.shutdown(Shutdown::Write).expect("finish request");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read routed reply");
+        assert_eq!(response, expected);
+    }
+    println!("handoff routes verified for {label}");
+}
+
+/// Both filesystem policies must preserve route identity across concurrent launches.
+#[tokio::test]
+async fn handoff_isolates_concurrent_endpoints_and_closes_privileged_descriptors() {
+    if let Some(reason) = managed_proxy_skip_reason().await {
+        eprintln!("skipping managed proxy test: {reason}");
+        return;
+    }
+
+    let shared = tempfile::tempdir_in("/tmp").expect("shared writable test directory");
+    let test_executable = std::env::current_exe().expect("integration test executable");
+    let test_executable = test_executable.to_str().expect("UTF-8 executable path");
+    // Libtest selectors include the module path but omit the integration crate name.
+    let (_, test_module) = module_path!()
+        .split_once("::")
+        .expect("handoff tests live in an integration test module");
+    let client_test = format!("{test_module}::handoff_client");
+    let mut commands = Vec::new();
+    let mut servers = Vec::new();
+    for (label, peer, profile) in [
+        ("first", "second", PermissionProfile::workspace_write()),
+        ("second", "first", PermissionProfile::Disabled),
+    ] {
+        let mut env = create_env_from_core_vars();
+        strip_proxy_env(&mut env);
+        env.insert(
+            PROXY_ATTRIBUTION_TOKEN_ENV_KEY.to_string(),
+            format!("handoff-{label}"),
+        );
+        env.insert("CODEX_TEST_HANDOFF_LABEL".to_string(), label.to_string());
+        env.insert("CODEX_TEST_HANDOFF_PEER".to_string(), peer.to_string());
+        env.insert(
+            "CODEX_TEST_HANDOFF_SHARED".to_string(),
+            shared.path().to_string_lossy().into_owned(),
+        );
+
+        for (routes, keys) in [
+            (&["http", "https"][..], &["HTTP_PROXY", "HTTPS_PROXY"][..]),
+            (&["all"][..], &["ALL_PROXY"][..]),
+        ] {
+            let listener =
+                TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("local proxy listener");
+            let endpoint = listener.local_addr().expect("proxy endpoint");
+            for key in keys {
+                env.insert((*key).to_string(), format!("http://{endpoint}"));
+            }
+            listener
+                .set_nonblocking(/*nonblocking*/ true)
+                .expect("bounded accept");
+            servers.push(std::thread::spawn(move || {
+                for route in routes {
+                    let deadline = Instant::now() + OPERATION_TIMEOUT;
+                    let (mut stream, _) = loop {
+                        match listener.accept() {
+                            Ok(connection) => break connection,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                assert!(Instant::now() < deadline, "proxy request timed out");
+                                std::thread::sleep(Duration::from_millis(/*millis*/ 10));
+                            }
+                            Err(error) => panic!("accept proxy request: {error}"),
+                        }
+                    };
+                    stream
+                        .set_read_timeout(Some(OPERATION_TIMEOUT))
+                        .expect("read timeout");
+                    stream
+                        .set_write_timeout(Some(OPERATION_TIMEOUT))
+                        .expect("write timeout");
+                    let marker = format!("{label}/{route}");
+                    let mut expected = Vec::new();
+                    write_attribution_frame(&mut expected, &format!("handoff-{label}"))
+                        .expect("expected attribution frame");
+                    expected.extend_from_slice(marker.as_bytes());
+                    let mut request = Vec::new();
+                    stream
+                        .read_to_end(&mut request)
+                        .expect("read attributed marker");
+                    assert_eq!(request, expected);
+                    stream
+                        .write_all(marker.as_bytes())
+                        .expect("reply with route marker");
+                }
+            }));
+        }
+
+        let mut command = linux_sandbox_command(
+            &[
+                test_executable,
+                "--exact",
+                &client_test,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ],
+            &profile,
+            /*allow_network_for_proxy*/ true,
+            env,
+        );
+        command.kill_on_drop(true);
+        commands.push(command);
+    }
+
+    let mut second = commands.pop().expect("second sandbox command");
+    let mut first = commands.pop().expect("first sandbox command");
+    let outputs = tokio::time::timeout(SANDBOX_TIMEOUT, async {
+        tokio::join!(first.output(), second.output())
+    })
+    .await
+    .expect("concurrent sandboxes should finish and release output");
+    for (label, output) in [("first", outputs.0), ("second", outputs.1)] {
+        let output = output.expect("run sandbox");
+        assert_eq!(
+            output.status.success(),
+            true,
+            "{label} sandbox failed; stdout={}; stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains(&format!("handoff routes verified for {label}"))
+        );
+    }
+    for server in servers {
+        server.join().expect("proxy responder should succeed");
+    }
+}
+
+#[tokio::test]
+async fn cancelling_sandbox_closes_active_proxy_connection() {
+    if let Some(reason) = managed_proxy_skip_reason().await {
+        eprintln!("skipping managed proxy test: {reason}");
+        return;
+    }
+
+    for profile in [
+        PermissionProfile::workspace_write(),
+        PermissionProfile::Disabled,
+    ] {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("local proxy listener");
+        listener
+            .set_nonblocking(/*nonblocking*/ true)
+            .expect("bounded accept");
+        let mut env = create_env_from_core_vars();
+        strip_proxy_env(&mut env);
+        env.remove(PROXY_ATTRIBUTION_TOKEN_ENV_KEY);
+        env.insert(
+            "HTTP_PROXY".to_string(),
+            format!("http://{}", listener.local_addr().expect("proxy endpoint")),
+        );
+        let mut command = linux_sandbox_command(
+            &[
+                "bash",
+                "-c",
+                concat!(
+                    "set -eu; proxy=${HTTP_PROXY#*://}; ",
+                    "exec 3<>/dev/tcp/${proxy%:*}/${proxy##*:}; ",
+                    "printf ready >&3; IFS= read -r response <&3",
+                ),
+            ],
+            &profile,
+            /*allow_network_for_proxy*/ true,
+            env,
+        );
+        command.kill_on_drop(true);
+        let mut child = command.spawn().expect("launch sandbox");
+        let (mut upstream, _) = tokio::time::timeout(OPERATION_TIMEOUT, async {
+            loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+                    }
+                    Err(error) => panic!("accept proxy connection: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("sandbox should establish its proxy connection");
+        upstream
+            .set_read_timeout(Some(OPERATION_TIMEOUT))
+            .expect("bounded read");
+        let mut ready = [0; 5];
+        upstream
+            .read_exact(&mut ready)
+            .expect("read client readiness");
+        assert_eq!(ready, *b"ready");
+
+        child.start_kill().expect("cancel sandbox");
+        let output = tokio::time::timeout(OPERATION_TIMEOUT, child.wait_with_output())
+            .await
+            .expect("cancelled sandbox should release output")
+            .expect("wait for cancelled sandbox");
+        assert_eq!(output.status.success(), false);
+        assert_eq!(
+            upstream
+                .read(&mut [0])
+                .expect("host bridge should close its active connection"),
+            0,
+            "cancelling the sandbox must stop its host bridge"
+        );
+    }
 }

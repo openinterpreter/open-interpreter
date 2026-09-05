@@ -136,7 +136,7 @@ impl GoalToolExecutor {
     }
 }
 
-impl ToolExecutor<ToolCall> for GoalToolExecutor {
+impl<'call> ToolExecutor<ToolCall<'call>> for GoalToolExecutor {
     fn tool_name(&self) -> ToolName {
         ToolName::plain(match self.kind {
             GoalToolKind::Get => GET_GOAL_TOOL_NAME,
@@ -153,7 +153,13 @@ impl ToolExecutor<ToolCall> for GoalToolExecutor {
         }
     }
 
-    fn handle(&self, invocation: ToolCall) -> codex_extension_api::ToolExecutorFuture<'_> {
+    fn handle<'a>(
+        &'a self,
+        invocation: ToolCall<'call>,
+    ) -> codex_extension_api::ToolExecutorFuture<'a>
+    where
+        'call: 'a,
+    {
         Box::pin(async move {
             match self.kind {
                 GoalToolKind::Get => self.handle_get(invocation).await,
@@ -167,7 +173,7 @@ impl ToolExecutor<ToolCall> for GoalToolExecutor {
 impl GoalToolExecutor {
     async fn handle_get(
         &self,
-        invocation: ToolCall,
+        invocation: ToolCall<'_>,
     ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
         let _ = invocation.function_arguments()?;
         let goal = self
@@ -184,7 +190,7 @@ impl GoalToolExecutor {
 
     async fn handle_create(
         &self,
-        invocation: ToolCall,
+        invocation: ToolCall<'_>,
     ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
         let mut request: CreateGoalRequest = parse_arguments(invocation.function_arguments()?)?;
         request.objective = request.objective.trim().to_string();
@@ -227,7 +233,7 @@ impl GoalToolExecutor {
 
     async fn handle_update(
         &self,
-        invocation: ToolCall,
+        invocation: ToolCall<'_>,
     ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
         let args: UpdateGoalArgs = parse_arguments(invocation.function_arguments()?)?;
         if !matches!(
@@ -299,7 +305,7 @@ impl GoalToolExecutor {
 
     fn emit_goal_updated_from_tool_call(
         &self,
-        invocation: &ToolCall,
+        invocation: &ToolCall<'_>,
         turn_id: Option<String>,
         goal: ThreadGoal,
     ) {

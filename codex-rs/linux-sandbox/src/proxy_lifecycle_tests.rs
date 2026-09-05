@@ -1,91 +1,124 @@
-use super::PROXY_SOCKET_DIR_PREFIX;
-use super::cleanup_proxy_socket_dir;
-use super::cleanup_stale_proxy_socket_dirs_in;
-use super::is_pid_alive_in_proc_root;
-use super::is_pid_alive_raw;
-use super::parse_proxy_socket_dir_owner_pid;
+//! Verify listener ownership, handoff validation, and descriptor cleanup on rejection.
+
+use super::LISTENER_MESSAGE;
+use super::receive_listener;
+use super::send_listener;
 use pretty_assertions::assert_eq;
-use std::process::Command;
+use rustix::io::FdFlags;
+use rustix::io::fcntl_getfd;
+use rustix::net::SendAncillaryBuffer;
+use rustix::net::SendAncillaryMessage;
+use rustix::net::SendFlags;
+use std::io;
+use std::io::IoSlice;
+use std::io::Read;
+use std::io::Write;
+use std::mem::MaybeUninit;
+use std::net::Ipv4Addr;
+use std::net::TcpListener;
+use std::net::TcpStream;
+use std::os::fd::AsFd;
+use std::os::fd::BorrowedFd;
+use std::os::unix::net::UnixStream;
 use std::time::Duration;
-use std::time::Instant;
+use test_case::test_case;
 
 #[test]
-fn cleanup_proxy_socket_dir_removes_bridge_artifacts() {
-    let root = tempfile::tempdir().expect("tempdir should create");
-    let socket_dir = root.path().join("codex-linux-sandbox-proxy-test");
-    std::fs::create_dir(&socket_dir).expect("socket dir should create");
-    let marker = socket_dir.join("bridge.sock");
-    std::fs::write(&marker, b"test").expect("marker should write");
+fn transferred_listener_survives_sender_close_and_is_cloexec() -> io::Result<()> {
+    let (sender, receiver) = UnixStream::pair()?;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let address = listener.local_addr()?;
+    send_listener(&sender, &listener)?;
+    drop(listener);
+    drop(sender);
 
-    cleanup_proxy_socket_dir(socket_dir.as_path()).expect("cleanup should succeed");
-
-    assert_eq!(socket_dir.exists(), false);
-}
-
-#[test]
-fn parse_proxy_socket_dir_owner_pid_reads_owner_pid() {
+    let listener = receive_listener(&receiver)?;
+    let flags = fcntl_getfd(&listener)?;
     assert_eq!(
-        parse_proxy_socket_dir_owner_pid("codex-linux-sandbox-proxy-1234-0"),
-        Some(1234)
+        (listener.local_addr()?, flags & FdFlags::CLOEXEC),
+        (address, FdFlags::CLOEXEC)
     );
-    assert_eq!(
-        parse_proxy_socket_dir_owner_pid("codex-linux-sandbox-proxy-1234-1000-0"),
-        Some(1234)
-    );
-    assert_eq!(
-        parse_proxy_socket_dir_owner_pid("codex-linux-sandbox-proxy-x"),
-        None
-    );
-    assert_eq!(parse_proxy_socket_dir_owner_pid("not-a-proxy-dir"), None);
+    let mut client = TcpStream::connect(address)?;
+    client.write_all(b"proxy")?;
+    let (mut accepted, _) = listener.accept()?;
+    let mut bytes = [0; 5];
+    accepted.read_exact(&mut bytes)?;
+    assert_eq!(bytes, *b"proxy");
+    Ok(())
 }
 
-#[test]
-fn cleanup_stale_proxy_socket_dirs_removes_dead_pid_directories() {
-    let root = tempfile::tempdir().expect("tempdir should create");
-    let dead_dir = root
-        .path()
-        .join(format!("{PROXY_SOCKET_DIR_PREFIX}{}-0", u32::MAX));
-    std::fs::create_dir(&dead_dir).expect("dead dir should create");
-
-    let alive_dir = root
-        .path()
-        .join(format!("{PROXY_SOCKET_DIR_PREFIX}{}-1", std::process::id()));
-    std::fs::create_dir(&alive_dir).expect("alive dir should create");
-
-    let unrelated_dir = root.path().join("unrelated-proxy-dir");
-    std::fs::create_dir(&unrelated_dir).expect("unrelated dir should create");
-
-    cleanup_stale_proxy_socket_dirs_in(root.path()).expect("stale cleanup should succeed");
-
-    assert_eq!(dead_dir.exists(), false);
-    assert_eq!(alive_dir.exists(), true);
-    assert_eq!(unrelated_dir.exists(), true);
-}
-
-#[test]
-fn missing_procfs_keeps_live_process_alive() {
-    let root = tempfile::tempdir().expect("tempdir should create");
-    let missing_proc_root = root.path().join("missing-proc");
-    let pid = libc::pid_t::try_from(std::process::id()).expect("current pid should fit");
-
-    assert_eq!(is_pid_alive_in_proc_root(pid, &missing_proc_root), true);
-}
-
-#[test]
-fn zombie_process_is_not_alive() {
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg("exit 0")
-        .spawn()
-        .expect("child should spawn");
-    let pid = libc::pid_t::try_from(child.id()).expect("child pid should fit");
-    let deadline = Instant::now() + Duration::from_secs(5);
-
-    while is_pid_alive_raw(pid) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
+#[test_case(1; "non_listener")]
+#[test_case(2; "extra_descriptors")]
+// Eight descriptors exceed the receive buffer even with alignment headroom.
+#[test_case(8; "truncated_control_message")]
+fn malformed_handoff_closes_all_received_descriptors(count: usize) -> io::Result<()> {
+    let (sender, receiver) = UnixStream::pair()?;
+    let mut peers = Vec::new();
+    let mut passed = Vec::new();
+    for _ in 0..count {
+        let (peer, descriptor) = UnixStream::pair()?;
+        peer.set_read_timeout(Some(Duration::from_secs(/*secs*/ 1)))?;
+        peers.push(peer);
+        passed.push(descriptor);
     }
-    let zombie_was_recognized = !is_pid_alive_raw(pid);
-    child.wait().expect("child should be reaped");
+    let descriptors = passed.iter().map(AsFd::as_fd).collect::<Vec<_>>();
+    send_descriptors(&sender, LISTENER_MESSAGE, &descriptors)?;
+    drop(passed);
+    assert!(receive_listener(&receiver).is_err());
+    for mut peer in peers {
+        assert_eq!(peer.read(&mut [0])?, 0);
+    }
+    Ok(())
+}
 
-    assert_eq!(zombie_was_recognized, true);
+#[test]
+fn rejects_missing_descriptors_and_invalid_payloads() -> io::Result<()> {
+    let (mut sender, receiver) = UnixStream::pair()?;
+    sender.write_all(&[LISTENER_MESSAGE])?;
+    assert!(receive_listener(&receiver).is_err());
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    send_descriptors(&sender, /*payload*/ 0, &[listener.as_fd()])?;
+    assert!(receive_listener(&receiver).is_err());
+    Ok(())
+}
+
+#[test_case(2; "extra_descriptors")]
+#[test_case(8; "truncated_control_message")]
+fn rejects_extra_descriptors_even_when_first_is_a_listener(count: usize) -> io::Result<()> {
+    let (sender, receiver) = UnixStream::pair()?;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    send_descriptors(&sender, LISTENER_MESSAGE, &vec![listener.as_fd(); count])?;
+    assert!(receive_listener(&receiver).is_err());
+    Ok(())
+}
+
+#[test]
+fn rejects_listener_bound_to_all_interfaces() -> io::Result<()> {
+    let (sender, receiver) = UnixStream::pair()?;
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    send_listener(&sender, &listener)?;
+    assert!(receive_listener(&receiver).is_err());
+    Ok(())
+}
+
+fn send_descriptors(
+    channel: &UnixStream,
+    payload: u8,
+    descriptors: &[BorrowedFd<'_>],
+) -> io::Result<()> {
+    let message = SendAncillaryMessage::ScmRights(descriptors);
+    let mut space = vec![MaybeUninit::uninit(); message.size()];
+    let mut control = SendAncillaryBuffer::new(&mut space);
+    assert!(control.push(message));
+    let sent = rustix::io::retry_on_intr(|| {
+        rustix::net::sendmsg(
+            channel,
+            &[IoSlice::new(&[payload])],
+            &mut control,
+            SendFlags::NOSIGNAL,
+        )
+    })?;
+    assert_eq!(sent, 1);
+    Ok(())
 }

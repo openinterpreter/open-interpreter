@@ -19,6 +19,7 @@ use crate::legacy_core::config::resolve_profile_v2_config_path;
 use crate::named_session_lookup::NamedSessionCandidates;
 use crate::named_session_lookup::SessionCollection;
 use crate::named_session_lookup::SessionNameLookupMode;
+use crate::named_session_lookup::current_name_is_compatible;
 use codex_app_server_protocol::Thread as AppServerThread;
 use codex_arg0::Arg0DispatchPaths;
 use codex_config::CloudConfigBundleLoader;
@@ -55,6 +56,12 @@ pub struct SessionArchiveCommandOptions {
     pub explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SessionNameMatch {
+    First,
+    FirstIncludingNonInteractive,
+}
+
 fn success_message(
     action: SessionArchiveAction,
     session_id: ThreadId,
@@ -85,7 +92,7 @@ pub async fn run_session_archive_command(
     let codex_home =
         find_codex_home().wrap_err_with(|| format!("failed to find {product_name} home"))?;
     let mut app_server =
-        start_app_server_for_archive_command(options, codex_home.to_path_buf()).await?;
+        start_app_server_for_session_command(options, codex_home.to_path_buf()).await?;
     run_session_archive_action_with_app_server(
         &mut app_server,
         codex_home.as_path(),
@@ -162,8 +169,14 @@ async fn resolve_session_target(
         SessionArchiveAction::Unarchive => ("archived", &[true]),
     };
     for &archived in archived_values {
-        if let Some(thread) =
-            lookup_session_by_exact_name(app_server, codex_home, target, archived).await?
+        if let Some(thread) = lookup_session_by_exact_name(
+            app_server,
+            codex_home,
+            target,
+            archived,
+            SessionNameMatch::First,
+        )
+        .await?
         {
             return session_target_from_app_server_thread(thread);
         }
@@ -173,11 +186,12 @@ async fn resolve_session_target(
     ))
 }
 
-async fn lookup_session_by_exact_name(
+pub(super) async fn lookup_session_by_exact_name(
     app_server: &mut AppServerSession,
     codex_home: &Path,
     name: &str,
     archived: bool,
+    match_policy: SessionNameMatch,
 ) -> Result<Option<AppServerThread>> {
     // Remote workspaces stay on their existing server-side path. Local workspaces trust SQLite
     // names, then scan and repair only after a miss or an unusable rollout path.
@@ -189,26 +203,73 @@ async fn lookup_session_by_exact_name(
             SessionNameLookupMode::ScanAndRepair,
         ][..]
     };
+    let source_kind_filters = if match_policy == SessionNameMatch::FirstIncludingNonInteractive {
+        // An empty filter includes Atlas/ChatGPT sessions; explicit kinds additionally include exec.
+        vec![
+            super::resume_source_kinds(/*include_non_interactive*/ true),
+            Vec::new(),
+        ]
+    } else {
+        vec![super::resume_source_kinds(
+            /*include_non_interactive*/ false,
+        )]
+    };
     for &lookup_mode in lookup_modes {
+        let sort_by_recency = lookup_mode == SessionNameLookupMode::StateDbOnly
+            && app_server.uses_embedded_app_server();
         // Search is the fast path, but legacy stores attach renamed titles after filtering.
         for search_term in [Some(name), None] {
-            let mut candidates = NamedSessionCandidates::new(
-                name,
-                codex_home,
-                if archived {
-                    SessionCollection::Archived
-                } else {
-                    SessionCollection::Active
-                },
-                lookup_mode,
-                search_term,
-            );
-            if let Some(candidate) = candidates
-                .next(app_server)
-                .await
-                .wrap_err("failed to list sessions while resolving session name")?
-            {
-                return Ok(Some(candidate.thread));
+            let mut first_match: Option<AppServerThread> = None;
+            for source_kinds in &source_kind_filters {
+                let mut candidates = NamedSessionCandidates::new(
+                    name,
+                    codex_home,
+                    if archived {
+                        SessionCollection::Archived
+                    } else {
+                        SessionCollection::Active
+                    },
+                    lookup_mode,
+                    search_term,
+                    source_kinds.clone(),
+                );
+                while let Some(candidate) = candidates
+                    .next(app_server)
+                    .await
+                    .wrap_err("failed to list sessions while resolving session name")?
+                {
+                    let thread = if match_policy == SessionNameMatch::FirstIncludingNonInteractive
+                        && lookup_mode == SessionNameLookupMode::ScanAndRepair
+                        && !app_server.uses_remote_workspace()
+                    {
+                        let thread = app_server
+                            .thread_read(
+                                ThreadId::from_string(&candidate.thread.id)?,
+                                /*include_turns*/ false,
+                            )
+                            .await?;
+                        if !current_name_is_compatible(&thread, name) {
+                            continue;
+                        }
+                        thread
+                    } else {
+                        candidate.thread
+                    };
+                    if first_match.as_ref().is_none_or(|existing| {
+                        if sort_by_recency {
+                            thread.recency_at.unwrap_or(thread.updated_at)
+                                > existing.recency_at.unwrap_or(existing.updated_at)
+                        } else {
+                            thread.updated_at > existing.updated_at
+                        }
+                    }) {
+                        first_match = Some(thread);
+                    }
+                    break;
+                }
+            }
+            if first_match.is_some() {
+                return Ok(first_match);
             }
         }
     }
@@ -253,7 +314,7 @@ fn confirm_session_delete(target: &ResolvedSessionTarget) -> Result<bool> {
     Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
 }
 
-async fn start_app_server_for_archive_command(
+pub(super) async fn start_app_server_for_session_command(
     options: SessionArchiveCommandOptions,
     codex_home: PathBuf,
 ) -> Result<AppServerSession> {

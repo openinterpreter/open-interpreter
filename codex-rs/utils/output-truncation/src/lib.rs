@@ -1,6 +1,8 @@
-//! Helpers for truncating tool and exec output using [`TruncationPolicy`](codex_protocol::protocol::TruncationPolicy).
+//! Shared byte/token truncation for tool and exec output.
 
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 pub use codex_utils_string::approx_bytes_for_tokens;
 pub use codex_utils_string::approx_token_count;
 pub use codex_utils_string::approx_tokens_from_byte_count;
@@ -26,6 +28,24 @@ pub fn truncate_text(content: &str, policy: TruncationPolicy) -> String {
     match policy {
         TruncationPolicy::Bytes(bytes) => truncate_middle_chars(content, bytes),
         TruncationPolicy::Tokens(tokens) => truncate_middle_with_token_budget(content, tokens).0,
+    }
+}
+
+/// Applies the existing byte/token budget without changing success metadata or media ordering.
+pub fn truncate_function_output_payload(
+    output: &mut FunctionCallOutputPayload,
+    policy: TruncationPolicy,
+    estimate_audio_token_count: impl Fn(&str) -> usize,
+) {
+    match &mut output.body {
+        FunctionCallOutputBody::Text(text) => *text = truncate_text(text, policy),
+        FunctionCallOutputBody::ContentItems(items) => {
+            *items = truncate_function_output_items_with_policy(
+                items,
+                policy,
+                estimate_audio_token_count,
+            );
+        }
     }
 }
 
@@ -109,6 +129,10 @@ pub fn truncate_function_output_items_with_policy(
     for item in items {
         match item {
             FunctionCallOutputContentItem::InputText { text } => {
+                // Empty text contributes no model content but still consumes an API array slot.
+                if text.is_empty() {
+                    continue;
+                }
                 if remaining_budget == 0 {
                     omitted_text_items += 1;
                     continue;

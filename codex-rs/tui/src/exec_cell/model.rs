@@ -133,6 +133,14 @@ impl ExecCell {
     }
 
     pub(crate) fn should_flush(&self) -> bool {
+        if self.calls.iter().any(|call| {
+            call.output
+                .as_ref()
+                .is_some_and(|output| output.exit_code != 0)
+        }) {
+            return !self.is_active();
+        }
+
         !self.is_exploring_cell() && self.calls.iter().all(|c| c.duration.is_some())
     }
 

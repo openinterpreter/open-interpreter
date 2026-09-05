@@ -141,9 +141,18 @@ def test_root_fmt_recipes_use_shared_formatter_driver() -> None:
 
 def test_root_format_driver_covers_all_formatter_groups(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """The shared driver should retain every formatter in both modes."""
     script = _load_root_format_script_module()
+    for name in (
+        "bazel/rules/example.rs",
+        "codex-rs/src/lib.rs",
+        "codex-rs/new file.rs",
+    ):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("")
     git_ls_files_args = [
         "git",
         "ls-files",
@@ -153,11 +162,18 @@ def test_root_format_driver_covers_all_formatter_groups(
         "--exclude-standard",
     ]
 
+    # The Python SDK CI image has no Git; keep discovery mocked at the process boundary.
     def fake_check_output(args, *, cwd):
+        assert cwd == tmp_path
+        if args == git_ls_files_args + ["--", "*.rs"]:
+            return (
+                b"codex-rs/src/lib.rs\0bazel/rules/example.rs\0"
+                b"codex-rs/new file.rs\0codex-rs/deleted.rs\0"
+            )
         assert args == git_ls_files_args
-        assert cwd == script.REPO_ROOT
         return b"MODULE.bazel\0README.md\0third_party/v8/libcxx.BUILD.bazel\0"
 
+    monkeypatch.setattr(script, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(script.subprocess, "check_output", fake_check_output)
     formatters = script.formatter_groups(check=False)
     checks = script.formatter_groups(check=True)
@@ -215,20 +231,25 @@ def test_root_format_driver_covers_all_formatter_groups(
     )
     assert formatters[0].commands[-1].args == ("just", "--unstable", "--fmt")
     assert checks[0].commands[-1].args == ("just", "--unstable", "--fmt", "--check")
-    assert formatters[1].commands[-1].args == (
-        "cargo",
-        "fmt",
-        "--",
+    rustfmt_args = (
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--config-path",
+        str(tmp_path / "codex-rs/rustfmt.toml"),
         "--config",
-        "imports_granularity=Item",
+        "imports_granularity=Item,skip_children=true",
     )
-    assert checks[1].commands[-1].args == (
-        "cargo",
-        "fmt",
-        "--",
-        "--config",
-        "imports_granularity=Item",
-        "--check",
+    rust_files = (
+        os.path.join("..", "bazel", "rules", "example.rs"),
+        "new file.rs",
+        os.path.join("src", "lib.rs"),
+    )
+    assert formatters[1].commands == (
+        script.Command(rustfmt_args + rust_files, tmp_path / "codex-rs"),
+    )
+    assert checks[1].commands == (
+        script.Command(rustfmt_args + ("--check",) + rust_files, tmp_path / "codex-rs"),
     )
     format_buildifier_args = formatters[2].commands[-1].args
     check_buildifier_args = checks[2].commands[-1].args
@@ -251,11 +272,11 @@ def test_root_format_driver_covers_all_formatter_groups(
     )
     assert [group.commands[-1].args[-3:] for group in formatters[3:]] == [
         ("ruff", "format", "sdk/python"),
-        ("ruff", "format", "scripts"),
+        ("ruff", "format", "."),
     ]
     assert [group.commands[-1].args[-4:] for group in checks[3:]] == [
         ("ruff", "format", "--check", "sdk/python"),
-        ("ruff", "format", "--check", "scripts"),
+        ("ruff", "format", "--check", "."),
     ]
 
 
@@ -377,17 +398,17 @@ def test_schema_normalization_only_flattens_string_literal_oneofs(
         if isinstance(definition, dict) and script._flatten_string_enum_one_of(definition.copy())
     ]
 
-    assert flattened == [
-        "MessagePhase",
-        "TurnItemsView",
+    assert sorted(flattened) == [
         "AuthMode",
-        "PluginAvailability",
-        "InputModality",
-        "ExperimentalFeatureStage",
-        "ProcessOutputStream",
+        "AutoCompactTokenLimitScope",
         "CommandExecOutputStream",
         "ConsumeAccountRateLimitResetCreditOutcome",
-        "AutoCompactTokenLimitScope",
+        "ExperimentalFeatureStage",
+        "InputModality",
+        "MessagePhase",
+        "PluginAvailability",
+        "ProcessOutputStream",
+        "TurnItemsView",
     ]
 
 
@@ -515,10 +536,10 @@ def test_source_sdk_template_pins_published_runtime() -> None:
         "dependencies": pyproject["project"]["dependencies"],
     } == {
         "sdk_template_version": "0.0.0-dev",
-        "runtime_pin": "0.144.4",
+        "runtime_pin": "0.147.0",
         "dependencies": [
             "pydantic>=2.12",
-            "openai-codex-cli-bin==0.144.4",
+            "openai-codex-cli-bin==0.147.0",
         ],
     }
 
@@ -592,7 +613,7 @@ def test_runtime_setup_reads_independent_runtime_pin_and_release_tags() -> None:
     } == {
         "package_name": "openai-codex-cli-bin",
         "sdk_template_version": "0.0.0-dev",
-        "runtime_pin": "0.144.4",
+        "runtime_pin": "0.147.0",
         "normalized_release_version": "0.116.0a1",
         "normalized_alpha_hotfix_version": "0.116.0a1.post2",
         "release_tag": "rust-v0.116.0-alpha.1",
@@ -841,7 +862,7 @@ def test_stage_sdk_release_preserves_reviewed_runtime_pin(tmp_path: Path) -> Non
     script = _load_update_script_module()
     staged = script.stage_python_sdk_package(
         tmp_path / "sdk-stage",
-        "0.144.4",
+        "0.147.0",
     )
 
     pyproject = tomllib.loads((staged / "pyproject.toml").read_text())
@@ -851,18 +872,18 @@ def test_stage_sdk_release_preserves_reviewed_runtime_pin(tmp_path: Path) -> Non
         "dependencies": pyproject["project"]["dependencies"],
     } == {
         "name": "openai-codex",
-        "version": "0.144.4",
+        "version": "0.147.0",
         "dependencies": [
             "pydantic>=2.12",
-            "openai-codex-cli-bin==0.144.4",
+            "openai-codex-cli-bin==0.147.0",
         ],
     }
     assert (
-        '__version__ = "0.144.4"'
+        '__version__ = "0.147.0"'
         not in (staged / "src" / "openai_codex" / "__init__.py").read_text()
     )
     assert (
-        'client_version: str = "0.144.4"'
+        'client_version: str = "0.147.0"'
         not in (staged / "src" / "openai_codex" / "client.py").read_text()
     )
     assert not any((staged / "src" / "openai_codex").glob("bin/**"))
@@ -875,7 +896,7 @@ def test_stage_sdk_release_replaces_existing_staging_dir(tmp_path: Path) -> None
     old_file.parent.mkdir(parents=True)
     old_file.write_text("stale")
 
-    staged = script.stage_python_sdk_package(staging_dir, "0.144.4")
+    staged = script.stage_python_sdk_package(staging_dir, "0.147.0")
 
     assert staged == staging_dir
     assert not old_file.exists()
@@ -887,11 +908,11 @@ def test_sdk_release_matches_stable_runtime(tmp_path: Path) -> None:
 
     sdk_stage = script.stage_python_sdk_package(
         tmp_path / "sdk-stage",
-        "0.144.4",
+        "0.147.0",
     )
     runtime_stage = script.stage_python_runtime_package(
         tmp_path / "runtime-stage",
-        "0.144.4",
+        "0.147.0",
         package_archive,
     )
 
@@ -903,11 +924,11 @@ def test_sdk_release_matches_stable_runtime(tmp_path: Path) -> None:
         "runtime_version": runtime_pyproject["project"]["version"],
         "sdk_dependencies": sdk_pyproject["project"]["dependencies"],
     } == {
-        "sdk_version": "0.144.4",
-        "runtime_version": "0.144.4",
+        "sdk_version": "0.147.0",
+        "runtime_version": "0.147.0",
         "sdk_dependencies": [
             "pydantic>=2.12",
-            "openai-codex-cli-bin==0.144.4",
+            "openai-codex-cli-bin==0.147.0",
         ],
     }
 
@@ -920,7 +941,7 @@ def test_stage_sdk_runs_type_generation_before_staging(tmp_path: Path) -> None:
             "stage-sdk",
             str(tmp_path / "sdk-stage"),
             "--sdk-version",
-            "0.144.4",
+            "0.147.0",
         ]
     )
 
@@ -951,7 +972,7 @@ def test_stage_sdk_runs_type_generation_before_staging(tmp_path: Path) -> None:
 
     script.run_command(args, ops)
 
-    assert calls == ["generate_types", "stage_sdk:0.144.4"]
+    assert calls == ["generate_types", "stage_sdk:0.147.0"]
 
 
 def test_stage_runtime_stages_package_without_type_generation(tmp_path: Path) -> None:

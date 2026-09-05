@@ -11,6 +11,7 @@ use codex_core_plugins::marketplace_add::is_local_marketplace_source;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::migration_source::MarketplaceImportSource;
 use crate::model::MigrationDetails;
@@ -26,16 +27,18 @@ impl ExternalAgentConfigService {
         &self,
         cwd: Option<&Path>,
     ) -> io::Result<BTreeMap<String, MarketplaceImportSource>> {
-        let Some(scope) = MigrationScope::from_cwd(cwd)? else {
-            return Ok(BTreeMap::new());
-        };
-        let source_root = scope
-            .repo_root()
-            .unwrap_or(self.external_agent_home.as_path());
+        // Plugin installs are user-global. Only missing or empty `cwd` values
+        // denote home scope; a project scope must not select executable content.
+        if cwd.is_some_and(|cwd| !cwd.as_os_str().is_empty()) {
+            return Err(invalid_data_error(
+                "repository-scoped plugin migration is not allowed".to_string(),
+            ));
+        }
+        let scope = MigrationScope::home();
         let source_settings = self.source_settings(&scope);
         self.source.marketplace_import_sources(
             self.external_agent_home.as_path(),
-            source_root,
+            self.external_agent_home.as_path(),
             &source_settings,
         )
     }
@@ -85,11 +88,13 @@ impl ExternalAgentConfigService {
         cwd: Option<&Path>,
         details: Option<MigrationDetails>,
     ) -> io::Result<PluginImportOutcome> {
+        let cwd = cwd.filter(|cwd| !cwd.as_os_str().is_empty());
         let Some(MigrationDetails { plugins, .. }) = details else {
             return Err(invalid_data_error(
                 "plugins migration item is missing details".to_string(),
             ));
         };
+        let import_sources = self.marketplace_import_sources(cwd)?;
         let config = ConfigBuilder::default()
             .codex_home(self.codex_home.clone())
             .fallback_cwd(Some(
@@ -101,7 +106,7 @@ impl ExternalAgentConfigService {
             .map_err(|err| io::Error::other(format!("failed to load config: {err}")))?;
         let requirements = config.config_layer_stack.requirements().clone();
         let mut outcome = PluginImportOutcome::default();
-        let plugins_manager = plugins_manager_for_config(&config, self.auth_mode)
+        let plugins_manager = plugins_manager_for_config(&config, Arc::clone(&self.auth_manager))
             .with_plugin_install_source(PluginInstallSource::ExternalAgentMigration);
         if let Some(analytics_events_client) = self.analytics_events_client.clone() {
             plugins_manager.set_analytics_events_client(analytics_events_client);
@@ -119,7 +124,6 @@ impl ExternalAgentConfigService {
             .into_iter()
             .map(|marketplace| (marketplace.name, marketplace.path))
             .collect::<BTreeMap<_, _>>();
-        let import_sources = self.marketplace_import_sources(cwd)?;
         for plugin_group in plugins {
             let marketplace_name = plugin_group.marketplace_name.clone();
             let plugin_names = plugin_group.plugin_names;
@@ -219,7 +223,7 @@ impl ExternalAgentConfigService {
             for plugin_name in plugin_names {
                 match plugins_manager
                     .install_plugin(
-                        &install_config.config_layer_stack,
+                        &install_config.plugins_config_input(),
                         PluginInstallRequest {
                             plugin_name: plugin_name.clone(),
                             marketplace_path: marketplace_path.clone(),

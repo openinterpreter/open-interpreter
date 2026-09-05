@@ -13,6 +13,8 @@ use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SortDirection;
+use codex_app_server_protocol::ThreadForkParams;
+use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItemsListParams;
 use codex_app_server_protocol::ThreadItemsListResponse;
@@ -34,11 +36,188 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::EventMsg;
+use codex_rollout::RolloutItem;
+use codex_rollout::RolloutLine;
+use codex_rollout::read_session_meta_line;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[tokio::test]
+async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    let updated_workspace = TempDir::new()?;
+    let saved_cwd = AbsolutePathBuf::from_absolute_path(updated_workspace.path().canonicalize()?)?
+        .into_path_buf();
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    // This fixture checks host-native cwd restoration across fork and revert.
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    initialize_experimental(&mut mcp).await?;
+    let ThreadStartResponse { thread: parent, .. } = mcp
+        .request(|request_id| ClientRequest::ThreadStart {
+            request_id,
+            params: ThreadStartParams {
+                history_mode: Some(ThreadHistoryMode::Paginated),
+                ..Default::default()
+            },
+        })
+        .await?;
+    let mut parent_turns = Vec::new();
+    for text in ["parent first", "parent second"] {
+        let completed = mcp
+            .start_turn_and_wait_for_completion(TurnStartParams {
+                thread_id: parent.id.clone(),
+                cwd: Some(parent.cwd.as_path().to_path_buf()),
+                input: vec![UserInput::Text {
+                    text: text.to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            })
+            .await?;
+        parent_turns.push(completed.turn.id);
+    }
+    let ThreadForkResponse { thread: child, .. } = mcp
+        .request(|request_id| ClientRequest::ThreadFork {
+            request_id,
+            params: ThreadForkParams {
+                thread_id: parent.id.clone(),
+                cwd: Some(codex_home.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        })
+        .await?;
+    let child_meta = read_session_meta_line(child.path.as_ref().expect("child rollout"))
+        .await?
+        .meta;
+    let fork_cutoff = child_meta
+        .history_base
+        .expect("fork history base")
+        .end_ordinal_exclusive;
+    assert_eq!(child_meta.forked_from_ordinal_exclusive, Some(fork_cutoff));
+    let inherited_revert_cutoff =
+        std::fs::read_to_string(parent.path.as_ref().expect("parent rollout"))?
+            .lines()
+            .map(serde_json::from_str::<RolloutLine>)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .find_map(|line| match line.item {
+                RolloutItem::EventMsg(EventMsg::TurnStarted(turn))
+                    if turn.turn_id == parent_turns[1] =>
+                {
+                    line.ordinal
+                }
+                _ => None,
+            })
+            .expect("inherited turn start ordinal");
+    let mut child_turns = Vec::new();
+    for text in ["child first", "child second"] {
+        let completed = mcp
+            .start_turn_and_wait_for_completion(TurnStartParams {
+                thread_id: child.id.clone(),
+                cwd: Some(saved_cwd.clone()),
+                input: vec![UserInput::Text {
+                    text: text.to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            })
+            .await?;
+        child_turns.push(completed.turn.id);
+    }
+
+    // First revert within the child, then revert into its inherited parent history.
+    for (before_turn_id, expected_cutoff) in [
+        (child_turns[1].clone(), fork_cutoff),
+        (parent_turns[1].clone(), inherited_revert_cutoff),
+    ] {
+        let ThreadRevertResponse {
+            thread: reverted, ..
+        } = mcp
+            .request(|request_id| ClientRequest::ThreadRevert {
+                request_id,
+                params: ThreadRevertParams {
+                    thread_id: child.id.clone(),
+                    before_turn_id,
+                },
+            })
+            .await?;
+        let meta = read_session_meta_line(reverted.path.as_ref().expect("reverted rollout"))
+            .await?
+            .meta;
+        assert_eq!(meta.forked_from_ordinal_exclusive, Some(expected_cutoff));
+        if expected_cutoff == fork_cutoff {
+            assert!(
+                meta.history_base
+                    .expect("child revert base")
+                    .end_ordinal_exclusive
+                    > fork_cutoff
+            );
+        }
+
+        mcp.shutdown_gracefully().await?;
+        mcp = TestAppServer::builder()
+            .with_codex_home(codex_home.path())
+            .without_auto_env()
+            .build()
+            .await?;
+        initialize_experimental(&mut mcp).await?;
+        let ThreadResumeResponse { cwd, .. } = mcp
+            .request(|request_id| ClientRequest::ThreadResume {
+                request_id,
+                params: ThreadResumeParams {
+                    thread_id: child.id.clone(),
+                    ..Default::default()
+                },
+            })
+            .await?;
+        if expected_cutoff == fork_cutoff {
+            assert_eq!(cwd.as_path(), saved_cwd);
+        } else {
+            // Only parent-owned snapshots remain after reverting into inherited history.
+            assert_eq!(cwd.as_path(), child_meta.cwd);
+        }
+        mcp.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: child.id.clone(),
+            input: vec![UserInput::Text {
+                text: "continue after revert and cold resume".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+        let requests = server.received_requests().await.expect("response requests");
+        let body = requests
+            .iter()
+            .rev()
+            .find(|request| request.url.path().ends_with("/responses"))
+            .expect("resumed model request")
+            .body_json::<Value>()?;
+        let metadata: Value = serde_json::from_str(
+            body["client_metadata"]["x-codex-turn-metadata"]
+                .as_str()
+                .expect("turn metadata"),
+        )?;
+        assert_eq!(
+            (
+                metadata["forked_from_thread_id"].as_str(),
+                metadata["forked_from_ordinal_exclusive"].as_u64()
+            ),
+            (Some(parent.id.as_str()), Some(expected_cutoff))
+        );
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {

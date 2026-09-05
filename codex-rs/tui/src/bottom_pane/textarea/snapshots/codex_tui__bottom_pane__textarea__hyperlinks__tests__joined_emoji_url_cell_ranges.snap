@@ -1,0 +1,16 @@
+---
+source: tui/src/bottom_pane/textarea/hyperlinks_tests.rs
+expression: "snapshots.join(\"\\n\")"
+---
+width 64, row 0, columns 3..=27: https://example.test/path
+width 24, row 0, columns 3..=23: https://example.test/
+width 24, row 1, columns 0..=3: path
+width 16, row 0, columns 3..=10: https://
+width 16, row 1, columns 0..=12: example.test/
+width 16, row 2, columns 0..=3: path
+width 64, row 0, columns 3..=30: https://example.test/👩‍💻/path
+width 24, row 0, columns 3..=23: https://example.test/
+width 24, row 1, columns 0..=6: 👩‍💻/path
+width 16, row 0, columns 3..=10: https://
+width 16, row 1, columns 0..=15: example.test/👩‍💻/
+width 16, row 2, columns 0..=3: path

@@ -1,5 +1,7 @@
 use super::*;
+use crate::mcp::tests::test_elicitation_config;
 use async_channel::Receiver;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::GranularApprovalConfig;
 use pretty_assertions::assert_eq;
 use rmcp::model::ElicitRequestParams;
@@ -75,9 +77,16 @@ fn elicitation_fixture(
             LifecycleRegistration(active_elicitations.clone())
         })
     });
-    let manager = ElicitationRequestManager::new(
+    let mut config = test_elicitation_config(
+        "independent-mcp",
         approval_policy,
-        permission_profile,
+        permission_profile.clone(),
+    );
+    Arc::make_mut(&mut config)
+        .server_permission_profiles
+        .insert("another-independent-mcp".to_string(), permission_profile);
+    let manager = ElicitationRequestManager::new(
+        config,
         reviewer.map(|reviewer| reviewer as Arc<dyn ElicitationReviewer>),
         lifecycle,
         ElicitationRequestRouter::default(),
@@ -132,8 +141,11 @@ fn closed_event_channel_immediately_cleans_up_pending_elicitation() {
         /*reviewer*/ None,
     );
     assert!(manager.update(
-        AskForApproval::OnRequest,
-        PermissionProfile::Disabled,
+        test_elicitation_config(
+            "independent-mcp",
+            AskForApproval::OnRequest,
+            PermissionProfile::Disabled
+        ),
         /*reviewer*/ None,
         Some(lifecycle),
     ));
@@ -228,6 +240,35 @@ async fn strict_auto_review_respects_explicit_elicitation_denials() {
 }
 
 #[tokio::test]
+async fn strict_auto_review_preserves_guardian_denials_and_cancellations() {
+    for response in [
+        ElicitationResponse {
+            action: ElicitationAction::Decline,
+            content: None,
+            meta: Some(json!({
+                "approvals_reviewer": "auto_review",
+                "message": "The user has not authorized sending this data. Ask the user for approval.",
+            })),
+        },
+        ElicitationResponse {
+            action: ElicitationAction::Cancel,
+            content: None,
+            meta: Some(json!({ "approvals_reviewer": "auto_review" })),
+        },
+    ] {
+        let reviewer = RecordingReviewer::new(Ok(Some(response.clone())));
+        let (_, events, sender) = elicitation_fixture(
+            AskForApproval::Never,
+            PermissionProfile::Disabled,
+            Some(reviewer.clone()),
+        );
+        assert_eq!(send_elicitation(&sender, Some(json!(true))).await, response);
+        assert_eq!(reviewer.calls.load(Relaxed), 1);
+        assert!(events.is_empty(), "strict review must not emit an event");
+    }
+}
+
+#[tokio::test]
 async fn strict_auto_review_fails_closed_without_a_canonical_decision() {
     for marker in ["null", "\"true\"", "1", "{}", "[true]"] {
         let marker = serde_json::from_str(marker).expect("valid malformed marker");
@@ -253,4 +294,107 @@ async fn strict_auto_review_fails_closed_without_a_canonical_decision() {
         assert_declined(json!(true), Some(Ok(Some(response)))).await;
     }
     assert_declined(json!(true), /*response*/ None).await;
+}
+
+#[tokio::test]
+async fn reused_elicitation_senders_follow_each_servers_latest_permission_authority() {
+    let mut config = crate::mcp::tests::test_mcp_config(std::env::temp_dir());
+    config.approval_policy = codex_config::Constrained::allow_any(AskForApproval::Never);
+    config.permission_profile = PermissionProfile::Disabled;
+    config.apps_enabled = true;
+    let auth = codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing();
+
+    let hosted_server = crate::codex_apps_mcp_server_config(
+        "https://example.com",
+        /*apps_mcp_product_sku*/ None,
+        /*originator*/ None,
+    );
+    let mut attached_server = hosted_server.clone();
+    attached_server.environment_id = "attached".to_string();
+    let mut catalog = crate::ResolvedMcpCatalog::builder();
+    catalog.register(crate::McpServerRegistration::from_config(
+        "attached".to_string(),
+        attached_server,
+    ));
+    catalog.register(crate::McpServerRegistration::from_hosted_apps(
+        "host",
+        /*contribution_order*/ 0,
+        hosted_server,
+    ));
+    config.mcp_server_catalog = catalog.build();
+    let servers = crate::effective_mcp_servers(&config, Some(&auth));
+    config.set_server_permission_profiles(
+        &servers,
+        [("attached".to_string(), PermissionProfile::read_only())],
+    );
+
+    let manager = ElicitationRequestManager::new(
+        Arc::new(config.clone()),
+        /*reviewer*/ None,
+        /*lifecycle*/ None,
+        ElicitationRequestRouter::default(),
+    );
+    let attached = manager.make_sender("attached".to_string(), /*tx_event*/ None);
+    let hosted = manager.make_sender(
+        crate::CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        /*tx_event*/ None,
+    );
+
+    assert_eq!(
+        send_elicitation(&attached, /*marker*/ None).await.action,
+        ElicitationAction::Decline
+    );
+    assert_eq!(
+        send_elicitation(&hosted, /*marker*/ None).await.action,
+        ElicitationAction::Accept
+    );
+
+    config.set_server_permission_profiles(
+        &servers,
+        [("attached".to_string(), PermissionProfile::Disabled)],
+    );
+    assert!(manager.update(
+        Arc::new(config.clone()),
+        /*reviewer*/ None,
+        /*lifecycle*/ None,
+    ));
+    assert_eq!(
+        send_elicitation(&attached, /*marker*/ None).await.action,
+        ElicitationAction::Accept
+    );
+
+    let mut configured_servers = config.mcp_server_catalog.configured_servers();
+    configured_servers
+        .get_mut("attached")
+        .expect("attached server should be registered")
+        .enabled = false;
+    config.mcp_server_catalog = config
+        .mcp_server_catalog
+        .with_materialized_servers(configured_servers);
+    let servers = crate::effective_mcp_servers(&config, Some(&auth));
+    config.set_server_permission_profiles(
+        &servers,
+        [("attached".to_string(), PermissionProfile::Disabled)],
+    );
+    assert!(manager.update(
+        Arc::new(config.clone()),
+        /*reviewer*/ None,
+        /*lifecycle*/ None,
+    ));
+    assert_eq!(
+        send_elicitation(&attached, /*marker*/ None).await.action,
+        ElicitationAction::Decline
+    );
+
+    let servers = crate::effective_mcp_servers(&config, /*auth*/ None);
+    config.set_server_permission_profiles(&servers, std::iter::empty());
+    assert!(manager.update(
+        Arc::new(config.clone()),
+        /*reviewer*/ None,
+        /*lifecycle*/ None,
+    ));
+    assert_eq!(
+        send_elicitation(&hosted, /*marker*/ None).await.action,
+        ElicitationAction::Decline
+    );
 }

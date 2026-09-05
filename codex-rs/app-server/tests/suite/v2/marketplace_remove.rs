@@ -9,17 +9,18 @@ use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::RequestId;
 use codex_config::MarketplaceConfigUpdate;
 use codex_config::record_user_marketplace;
+use codex_core::config::set_project_trust_level;
 use codex_core_plugins::installed_marketplaces::marketplace_install_root;
+use codex_protocol::config_types::TrustLevel;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::time::timeout;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn configured_marketplace_update() -> MarketplaceConfigUpdate<'static> {
     MarketplaceConfigUpdate {
-        last_updated: "2026-04-13T00:00:00Z",
-        last_revision: None,
         source_type: "git",
         source: "https://github.com/owner/repo.git",
         ref_name: Some("main"),
@@ -45,16 +46,19 @@ fn canonicalize_path_with_existing_parent(path: &std::path::Path) -> Result<std:
     Ok(parent.canonicalize()?.join(file_name))
 }
 
+#[test_case(false; "snapshot only")]
+#[test_case(true; "user entry and snapshot")]
 #[tokio::test]
-async fn marketplace_remove_deletes_config_and_installed_root() -> Result<()> {
+async fn marketplace_remove_deletes_config_and_installed_root(user_entry: bool) -> Result<()> {
     let codex_home = TempDir::new()?;
-    record_user_marketplace(codex_home.path(), "debug", &configured_marketplace_update())?;
+    if user_entry {
+        record_user_marketplace(codex_home.path(), "debug", &configured_marketplace_update())?;
+    }
     write_installed_marketplace(codex_home.path(), "debug")?;
     let installed_root = marketplace_install_root(codex_home.path()).join("debug");
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
-        .without_auto_env()
         .build_initialized()
         .await?;
     let response: MarketplaceRemoveResponse = mcp
@@ -74,8 +78,13 @@ async fn marketplace_remove_deletes_config_and_installed_root() -> Result<()> {
         canonicalize_path_with_existing_parent(&installed_root)?,
     );
 
-    let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
-    assert!(!config.contains("[marketplaces.debug]"));
+    let config_path = codex_home.path().join("config.toml");
+    if user_entry {
+        let config = std::fs::read_to_string(config_path)?;
+        assert!(!config.contains("[marketplaces.debug]"));
+    } else {
+        assert!(!config_path.exists());
+    }
     assert!(
         !marketplace_install_root(codex_home.path())
             .join("debug")
@@ -111,5 +120,56 @@ async fn marketplace_remove_rejects_unknown_marketplace() -> Result<()> {
         err.error.message,
         "marketplace `debug` is not configured or installed",
     );
+    Ok(())
+}
+
+#[test_case(false; "project only")]
+#[test_case(true; "project and user")]
+#[tokio::test]
+async fn marketplace_remove_preserves_project_marketplace(user_entry: bool) -> Result<()> {
+    let codex_home = TempDir::new()?;
+    if user_entry {
+        record_user_marketplace(codex_home.path(), "debug", &configured_marketplace_update())?;
+    }
+    // TestAppServer starts in CODEX_HOME, so make it a trusted project as well.
+    std::fs::create_dir_all(codex_home.path().join(".git"))?;
+    std::fs::create_dir_all(codex_home.path().join(".codex"))?;
+    let project_config_path = codex_home.path().join(".codex/config.toml");
+    let project_config = "[marketplaces.debug]\nsource_type = \"git\"\nsource = \"https://github.com/owner/repo.git\"\n";
+    std::fs::write(&project_config_path, project_config)?;
+    set_project_trust_level(codex_home.path(), codex_home.path(), TrustLevel::Trusted)?;
+    write_installed_marketplace(codex_home.path(), "debug")?;
+    let snapshot_path =
+        marketplace_install_root(codex_home.path()).join("debug/.agents/plugins/marketplace.json");
+    let user_config_path = codex_home.path().join("config.toml");
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let user_config = std::fs::read_to_string(&user_config_path)?;
+    let request_id = mcp
+        .send_marketplace_remove_request(MarketplaceRemoveParams {
+            marketplace_name: "debug".to_string(),
+        })
+        .await?;
+    let err = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(err.error.code, -32600);
+    assert!(
+        err.error
+            .message
+            .starts_with("marketplace `debug` is configured in project (")
+    );
+    assert_eq!(std::fs::read_to_string(user_config_path)?, user_config);
+    assert_eq!(
+        std::fs::read_to_string(project_config_path)?,
+        project_config
+    );
+    assert_eq!(std::fs::read_to_string(snapshot_path)?, "{}");
     Ok(())
 }

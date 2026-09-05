@@ -2,10 +2,15 @@ mod client;
 pub(crate) mod types;
 
 pub use client::AddCreditsNudgeCreditType;
+pub use client::ChatgptThreadTurnCosts;
+pub use client::ChatgptTurnCost;
 pub use client::Client;
 pub use client::RequestError;
 pub use client::ThreadUsage;
 pub use client::ThreadUsageBreakdownGroup;
+pub use client::turn_usage::ApiKeyResponseCost;
+pub use client::turn_usage::ApiKeyTurnCost;
+pub use client::turn_usage::ApiKeyTurnCostStatus;
 pub use types::AccountEntry;
 pub use types::AccountsCheckResponse;
 pub use types::CodeTaskDetailsResponse;

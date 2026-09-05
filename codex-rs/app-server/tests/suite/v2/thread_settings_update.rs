@@ -8,6 +8,7 @@ use app_test_support::write_models_cache;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxPolicy;
+use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadSettingsUpdateParams;
@@ -15,14 +16,23 @@ use codex_app_server_protocol::ThreadSettingsUpdateResponse;
 use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadUnsubscribeParams;
+use codex_app_server_protocol::ThreadUnsubscribeResponse;
+use codex_app_server_protocol::ThreadUnsubscribeStatus;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_core::test_support::all_model_presets;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+use codex_protocol::config_types::Settings;
+use codex_protocol::openai_models::ReasoningEffort;
+use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
+use serde_json::json;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -50,7 +60,14 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
         &mut mcp,
         ThreadSettingsUpdateParams {
             thread_id: thread.id.clone(),
-            model: Some(model_id.clone()),
+            collaboration_mode: Some(CollaborationMode {
+                mode: ModeKind::Default,
+                settings: Settings {
+                    model: model_id.clone(),
+                    reasoning_effort: None,
+                    developer_instructions: None,
+                },
+            }),
             service_tier: Some(Some(service_tier_id.clone())),
             ..Default::default()
         },
@@ -77,8 +94,65 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
     )
     .await??;
 
-    let read = read_thread_with_turns(&mut mcp, &thread.id).await?;
-    assert_eq!(read.thread.turns.len(), 1);
+    // Loaded metadata must come from live settings, even if stored metadata is stale.
+    let state_db = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let mut stored = state_db
+        .get_thread(codex_protocol::ThreadId::from_string(&thread.id)?)
+        .await?
+        .expect("completed thread should be persisted");
+    stored.model = Some("stored-model".to_string());
+    stored.reasoning_effort = Some(ReasoningEffort::Low);
+    state_db.upsert_thread(&stored).await?;
+
+    let unsubscribe_id = mcp
+        .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
+            thread_id: thread.id.clone(),
+        })
+        .await?;
+    let unsubscribed: ThreadUnsubscribeResponse =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(unsubscribe_id)).await??;
+    assert_eq!(unsubscribed.status, ThreadUnsubscribeStatus::Unsubscribed);
+
+    for include_turns in [false, true] {
+        let read_id = mcp
+            .send_thread_read_request(ThreadReadParams {
+                thread_id: thread.id.clone(),
+                include_turns,
+            })
+            .await?;
+        let read: ThreadReadResponse =
+            timeout(DEFAULT_TIMEOUT, mcp.read_response(read_id)).await??;
+        assert_eq!(read.thread.turns.len(), usize::from(include_turns));
+        assert_eq!(
+            (read.thread.model.as_deref(), read.thread.reasoning_effort),
+            (Some(model_id.as_str()), None)
+        );
+    }
+    let list_id = mcp
+        .send_raw_request("thread/list", Some(json!({ "useStateDbOnly": true })))
+        .await?;
+    let listed: ThreadListResponse = timeout(DEFAULT_TIMEOUT, mcp.read_response(list_id)).await??;
+    let listed = listed
+        .data
+        .iter()
+        .find(|listed| listed.id == thread.id)
+        .expect("loaded thread should be listed");
+    assert_eq!(
+        (listed.model.as_deref(), listed.reasoning_effort.clone()),
+        (Some(model_id.as_str()), None)
+    );
+    let unsubscribe_id = mcp
+        .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
+            thread_id: thread.id.clone(),
+        })
+        .await?;
+    let unsubscribed: ThreadUnsubscribeResponse =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(unsubscribe_id)).await??;
+    assert_eq!(unsubscribed.status, ThreadUnsubscribeStatus::NotSubscribed);
 
     let request_bodies = received_response_bodies(&server).await?;
     assert!(
@@ -393,19 +467,6 @@ async fn start_thread(mcp: &mut TestAppServer) -> Result<ThreadStartResponse> {
         .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
             ..Default::default()
-        })
-        .await?;
-    timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await?
-}
-
-async fn read_thread_with_turns(
-    mcp: &mut TestAppServer,
-    thread_id: &str,
-) -> Result<ThreadReadResponse> {
-    let request_id = mcp
-        .send_thread_read_request(ThreadReadParams {
-            thread_id: thread_id.to_string(),
-            include_turns: true,
         })
         .await?;
     timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await?

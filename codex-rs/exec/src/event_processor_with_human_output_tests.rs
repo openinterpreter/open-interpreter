@@ -21,11 +21,22 @@ use pretty_assertions::assert_eq;
 
 use super::EventProcessorWithHumanOutput;
 use super::config_summary_entries;
+use super::config_summary_header;
 use super::final_message_from_turn_items;
 use super::reasoning_text;
 use super::should_print_final_message_to_stdout;
 use super::should_print_final_message_to_tty;
 use crate::event_processor::EventProcessor;
+
+#[test]
+fn config_summary_header_uses_selected_product_identity() {
+    let interpreter = config_summary_header(codex_product_info::Product::OpenInterpreter);
+    assert!(interpreter.starts_with("Open Interpreter v"));
+    assert!(!interpreter.contains("Codex"));
+
+    let codex = config_summary_header(codex_product_info::Product::Codex);
+    assert!(codex.starts_with("OpenAI Codex v"));
+}
 
 #[test]
 fn suppresses_final_stdout_message_when_both_streams_are_terminals() {
@@ -141,13 +152,13 @@ fn summarizes_managed_workspace_write_permission_profile() {
     let profile = PermissionProfile::from_runtime_permissions(
         &FileSystemSandboxPolicy::restricted(vec![
             FileSystemSandboxEntry {
-                path: FileSystemPath::Path { path: cwd.clone() },
+                path: cwd.clone().into(),
                 access: FileSystemAccessMode::Write,
                 missing_path_behavior: None,
             },
             FileSystemSandboxEntry {
                 path: FileSystemPath::Path {
-                    path: cache_root.clone(),
+                    path: cache_root.clone().into(),
                 },
                 access: FileSystemAccessMode::Write,
                 missing_path_behavior: None,
@@ -250,6 +261,8 @@ fn final_message_from_turn_items_uses_latest_agent_message() {
             text: "first".to_string(),
             phase: None,
             memory_citation: None,
+            delivery: None,
+            questions: None,
         },
         ThreadItem::Plan {
             id: "plan-1".to_string(),
@@ -260,6 +273,8 @@ fn final_message_from_turn_items_uses_latest_agent_message() {
             text: "second".to_string(),
             phase: None,
             memory_citation: None,
+            delivery: None,
+            questions: None,
         },
     ]);
 
@@ -318,6 +333,8 @@ fn turn_completed_recovers_final_message_from_turn_items() {
                     text: "final answer".to_string(),
                     phase: None,
                     memory_citation: None,
+                    delivery: None,
+                    questions: None,
                 }],
                 status: TurnStatus::Completed,
                 error: None,
@@ -366,6 +383,8 @@ fn turn_completed_overwrites_stale_final_message_from_turn_items() {
                     text: "final answer".to_string(),
                     phase: None,
                     memory_citation: None,
+                    delivery: None,
+                    questions: None,
                 }],
                 status: TurnStatus::Completed,
                 error: None,

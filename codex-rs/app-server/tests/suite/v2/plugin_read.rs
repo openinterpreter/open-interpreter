@@ -959,18 +959,11 @@ async fn plugin_read_rejects_invalid_remote_plugin_name() -> Result<()> {
 #[tokio::test]
 async fn plugin_read_returns_canonical_openai_curated_marketplace_name() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let repo_root = TempDir::new()?;
-    write_plugin_marketplace(
-        repo_root.path(),
-        "openai-curated",
-        "demo-plugin",
-        "./demo-plugin",
-    )?;
-    std::fs::create_dir_all(repo_root.path().join("demo-plugin/.codex-plugin"))?;
+    let repo_root = codex_home.path().join(".tmp/plugins");
+    write_plugin_marketplace(&repo_root, "openai-curated", "demo-plugin", "./demo-plugin")?;
+    std::fs::create_dir_all(repo_root.join("demo-plugin/.codex-plugin"))?;
     std::fs::write(
-        repo_root
-            .path()
-            .join("demo-plugin/.codex-plugin/plugin.json"),
+        repo_root.join("demo-plugin/.codex-plugin/plugin.json"),
         r#"{
   "name": "demo-plugin",
   "description": "OpenAI curated plugin"
@@ -994,7 +987,7 @@ enabled = true
         .await?;
 
     let marketplace_path =
-        AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
+        AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json"))?;
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
             marketplace_path: Some(marketplace_path.clone()),
@@ -1432,6 +1425,14 @@ async fn plugin_read_agent_plugin_excludes_nested_skills() -> Result<()> {
 #[tokio::test]
 async fn plugin_read_returns_plugin_details_with_bundle_contents() -> Result<()> {
     let codex_home = TempDir::new()?;
+    write_chatgpt_auth(
+        codex_home.path(),
+        ChatGptAuthFixture::new("chatgpt-token")
+            .account_id("account-123")
+            .chatgpt_user_id("user-123")
+            .chatgpt_account_id("account-123"),
+        AuthCredentialsStoreMode::File,
+    )?;
     let repo_root = TempDir::new()?;
     let plugin_root = repo_root.path().join("plugins/demo-plugin");
     std::fs::create_dir_all(repo_root.path().join(".git"))?;

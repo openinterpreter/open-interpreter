@@ -1,0 +1,39 @@
+# All native build consumers must receive the same pinned source manifest.
+filegroup(
+    name = "source_inputs",
+    srcs = [
+        "prepare_sources.py",
+        "sources.json",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# Fetch and unpack only when this source target is requested by a build.
+filegroup(
+    name = "sources",
+    srcs = [
+        "@voice_glib//:sources",
+        "@voice_gst_plugins_base//:sources",
+        "@voice_gst_plugins_good//:sources",
+        "@voice_gstreamer//:sources",
+        "@voice_libffi//:sources",
+        "@voice_meson//:sources",
+        "@voice_ninja//:sources",
+        "@voice_opus//:sources",
+        "@voice_pcre2//:sources",
+        "@voice_proxy_libintl//:sources",
+        "@voice_zlib//:sources",
+    ],
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "build_inputs",
+    srcs = [
+        "assemble_package.py",
+        "build_native.py",
+        ":source_inputs",
+    ],
+    visibility = ["//visibility:public"],
+)

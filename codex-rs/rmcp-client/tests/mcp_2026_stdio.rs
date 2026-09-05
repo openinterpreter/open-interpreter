@@ -39,18 +39,39 @@ async fn exercise_stdio_server(
     } else {
         Arc::new(LocalStdioServerLauncher::new(std::env::current_dir()?))
     };
-    let env = opt_in.then(|| {
-        HashMap::from([(
+    let mut env = HashMap::new();
+    if opt_in {
+        env.insert(
             OsString::from("CODEX_MCP_PROTOCOL_VERSION"),
             OsString::from("2026-07-28"),
-        )])
-    });
+        );
+    }
+    let cwd = std::env::current_dir()?;
+    #[cfg(unix)]
+    let root = tempfile::tempdir()?;
+    #[cfg(unix)]
+    let (server, cwd) = if use_executor {
+        (server, cwd)
+    } else {
+        use std::os::unix::fs::PermissionsExt;
+        let wrapper = root.path().join("server");
+        std::fs::write(
+            &wrapper,
+            "#!/bin/sh\nprintf '%s' \"$0\" > argv0\nexec \"$MCP_SERVER\" \"$@\"\n",
+        )?;
+        std::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o755))?;
+        env.insert(OsString::from("MCP_SERVER"), server.into_os_string());
+        (
+            std::path::PathBuf::from("./server"),
+            root.path().to_path_buf(),
+        )
+    };
     let client = RmcpClient::new_stdio_client_with_protocol_mode(
         server.into(),
         vec![OsString::from(server_mode)],
-        env,
+        Some(env),
         &[],
-        /*cwd*/ Some(std::env::current_dir()?.to_string_lossy().into_owned()),
+        Some(cwd.to_string_lossy().into_owned()),
         launcher,
         protocol_mode,
     )
@@ -166,6 +187,13 @@ async fn exercise_stdio_server(
         })
     );
     assert_eq!(elicitation_count.load(Ordering::Relaxed), 1);
+    #[cfg(unix)]
+    if !use_executor {
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("argv0"))?,
+            "./server"
+        );
+    }
     client.shutdown().await;
     Ok(())
 }

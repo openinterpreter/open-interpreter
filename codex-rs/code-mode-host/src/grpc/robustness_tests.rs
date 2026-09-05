@@ -139,6 +139,7 @@ async fn dropping_execution_before_admission_releases_its_reservation() {
             execution_id,
             "cell".to_string(),
             host.state.cell_permit().expect("reserve cell permit"),
+            /*traceparent*/ None,
         )
         .expect_err("abandoned execution must not admit a runtime cell");
     assert_eq!(error.code(), Code::Cancelled);

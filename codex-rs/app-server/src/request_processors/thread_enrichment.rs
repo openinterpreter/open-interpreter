@@ -1,4 +1,5 @@
-use super::turn_processor::can_accept_direct_input;
+use super::apply_live_model_settings;
+use super::thread_input::can_accept_direct_input;
 use crate::thread_status::ThreadWatchManager;
 use crate::thread_status::resolve_thread_status;
 use codex_app_server_protocol::SessionSource;
@@ -32,11 +33,7 @@ pub(super) async fn enrich_loaded_threads<T>(
                 thread.status = status.clone();
             }
 
-            if !matches!(
-                &thread.source,
-                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
-            ) || matches!(watched_status, Some(ThreadStatus::NotLoaded))
-            {
+            if matches!(watched_status, Some(ThreadStatus::NotLoaded)) {
                 return;
             }
 
@@ -46,6 +43,14 @@ pub(super) async fn enrich_loaded_threads<T>(
             let Ok(loaded_thread) = thread_manager.get_thread(thread_id).await else {
                 return;
             };
+            let config_snapshot = loaded_thread.config_snapshot().await;
+            apply_live_model_settings(thread, &config_snapshot);
+            if !matches!(
+                &thread.source,
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+            ) {
+                return;
+            }
             match loaded_thread.agent_status().await {
                 AgentStatus::Running => {
                     if watched_status.is_none() {
@@ -68,7 +73,6 @@ pub(super) async fn enrich_loaded_threads<T>(
                     return;
                 }
             }
-            let config_snapshot = loaded_thread.config_snapshot().await;
             thread.can_accept_direct_input = Some(can_accept_direct_input(
                 loaded_thread.multi_agent_version(),
                 &config_snapshot.session_source,

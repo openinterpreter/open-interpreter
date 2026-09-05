@@ -22,7 +22,7 @@ pub struct PlanToolOutput;
 const PLAN_UPDATED_MESSAGE: &str = "Plan updated";
 
 impl ToolOutput for PlanToolOutput {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         PLAN_UPDATED_MESSAGE.to_string()
     }
 
@@ -54,7 +54,10 @@ impl ToolExecutor<ToolInvocation> for PlanHandler {
         create_update_plan_tool()
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(self.handle_call(invocation))
     }
 }
@@ -81,7 +84,7 @@ impl PlanHandler {
             }
         };
 
-        if turn.mode == ModeKind::Plan {
+        if turn.mode() == ModeKind::Plan {
             return Err(FunctionCallError::RespondToModel(
                 "update_plan is a TODO/checklist tool and is not allowed in Plan mode".to_string(),
             ));
@@ -96,7 +99,11 @@ impl PlanHandler {
     }
 }
 
-impl CoreToolRuntime for PlanHandler {}
+impl CoreToolRuntime for PlanHandler {
+    fn is_builtin_control_tool(&self) -> bool {
+        true
+    }
+}
 
 fn parse_update_plan_arguments(arguments: &str) -> Result<UpdatePlanArgs, FunctionCallError> {
     serde_json::from_str::<UpdatePlanArgs>(arguments).map_err(|e| {

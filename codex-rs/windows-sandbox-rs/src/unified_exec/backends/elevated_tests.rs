@@ -81,6 +81,7 @@ fn retry_uses_original_unified_exec_request_and_stops_after_second_failure() {
             tty: true,
             stdin_open: true,
             use_private_desktop: true,
+            private_desktop_name: None,
         },
         read_roots_override: Some(vec![PathBuf::from(r"C:\workspace\read")]),
         read_roots_include_platform_defaults: true,

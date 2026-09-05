@@ -132,7 +132,9 @@ def _validate_gpt_image_2_size(size: str) -> None:
     total_pixels = width * height
 
     if max_edge > GPT_IMAGE_2_MAX_EDGE:
-        _die("gpt-image-2 size maximum edge length must be less than or equal to 3840px.")
+        _die(
+            "gpt-image-2 size maximum edge length must be less than or equal to 3840px."
+        )
     if width % 16 != 0 or height % 16 != 0:
         _die("gpt-image-2 size width and height must be multiples of 16px.")
     if max_edge / min_edge > GPT_IMAGE_2_MAX_RATIO:
@@ -257,7 +259,9 @@ def _augment_prompt(args: argparse.Namespace, prompt: str) -> str:
     return _augment_prompt_fields(args.augment, prompt, fields)
 
 
-def _augment_prompt_fields(augment: bool, prompt: str, fields: Dict[str, Optional[str]]) -> str:
+def _augment_prompt_fields(
+    augment: bool, prompt: str, fields: Dict[str, Optional[str]]
+) -> str:
     if not augment:
         return prompt
 
@@ -280,7 +284,7 @@ def _augment_prompt_fields(augment: bool, prompt: str, fields: Dict[str, Optiona
     if fields.get("materials"):
         sections.append(f"Materials/textures: {fields['materials']}")
     if fields.get("text"):
-        sections.append(f"Text (verbatim): \"{fields['text']}\"")
+        sections.append(f'Text (verbatim): "{fields["text"]}"')
     if fields.get("constraints"):
         sections.append(f"Constraints: {fields['constraints']}")
     if fields.get("negative"):
@@ -327,7 +331,9 @@ def _derive_downscale_path(path: Path, suffix: str) -> Path:
     return path.with_name(f"{path.stem}{suffix}{path.suffix}")
 
 
-def _downscale_image_bytes(image_bytes: bytes, *, max_dim: int, output_format: str) -> bytes:
+def _downscale_image_bytes(
+    image_bytes: bytes, *, max_dim: int, output_format: str
+) -> bytes:
     try:
         from PIL import Image
     except Exception:
@@ -342,16 +348,22 @@ def _downscale_image_bytes(image_bytes: bytes, *, max_dim: int, output_format: s
         scale = min(1.0, float(max_dim) / float(max(w, h)))
         target = (max(1, int(round(w * scale))), max(1, int(round(h * scale))))
 
-        resized = img if target == (w, h) else img.resize(target, Image.Resampling.LANCZOS)
+        resized = (
+            img if target == (w, h) else img.resize(target, Image.Resampling.LANCZOS)
+        )
 
         fmt = output_format.lower()
         if fmt == "jpg":
             fmt = "jpeg"
 
         if fmt == "jpeg":
-            if resized.mode in ("RGBA", "LA") or ("transparency" in getattr(resized, "info", {})):
+            if resized.mode in ("RGBA", "LA") or (
+                "transparency" in getattr(resized, "info", {})
+            ):
                 bg = Image.new("RGB", resized.size, (255, 255, 255))
-                bg.paste(resized.convert("RGBA"), mask=resized.convert("RGBA").split()[-1])
+                bg.paste(
+                    resized.convert("RGBA"), mask=resized.convert("RGBA").split()[-1]
+                )
                 resized = bg
             else:
                 resized = resized.convert("RGB")
@@ -389,7 +401,9 @@ def _decode_write_and_downscale(
         if derived.exists() and not force:
             _die(f"Output already exists: {derived} (use --force to overwrite)")
         derived.parent.mkdir(parents=True, exist_ok=True)
-        resized = _downscale_image_bytes(raw, max_dim=downscale_max_dim, output_format=output_format)
+        resized = _downscale_image_bytes(
+            raw, max_dim=downscale_max_dim, output_format=output_format
+        )
         derived.write_bytes(resized)
         print(f"Wrote {derived}")
 
@@ -398,7 +412,9 @@ def _create_client():
     try:
         from openai import OpenAI
     except ImportError:
-        _die(f"openai SDK not installed in the active environment. {_dependency_hint('openai')}")
+        _die(
+            f"openai SDK not installed in the active environment. {_dependency_hint('openai')}"
+        )
     return OpenAI()
 
 
@@ -500,10 +516,7 @@ def _job_output_paths(
 
     if n == 1:
         return [base]
-    return [
-        base.with_name(f"{base.stem}-{i}{base.suffix}")
-        for i in range(1, n + 1)
-    ]
+    return [base.with_name(f"{base.stem}-{i}{base.suffix}") for i in range(1, n + 1)]
 
 
 def _extract_retry_after_seconds(exc: Exception) -> Optional[float]:
@@ -589,17 +602,25 @@ async def _run_generate_batch(args: argparse.Namespace) -> int:
             prompt = str(job["prompt"]).strip()
             fields = _merge_non_null(base_fields, job.get("fields", {}))
             # Allow flat job keys as well (use_case, scene, etc.)
-            fields = _merge_non_null(fields, {k: job.get(k) for k in base_fields.keys()})
+            fields = _merge_non_null(
+                fields, {k: job.get(k) for k in base_fields.keys()}
+            )
             augmented = _augment_prompt_fields(args.augment, prompt, fields)
 
             job_payload = dict(base_payload)
             job_payload["prompt"] = augmented
-            job_payload = _merge_non_null(job_payload, {k: job.get(k) for k in base_payload.keys()})
+            job_payload = _merge_non_null(
+                job_payload, {k: job.get(k) for k in base_payload.keys()}
+            )
             job_payload = {k: v for k, v in job_payload.items() if v is not None}
 
             _validate_generate_payload(job_payload)
-            effective_output_format = _normalize_output_format(job_payload.get("output_format"))
-            _validate_transparency(job_payload.get("background"), effective_output_format)
+            effective_output_format = _normalize_output_format(
+                job_payload.get("output_format")
+            )
+            _validate_transparency(
+                job_payload.get("background"), effective_output_format
+            )
             job_payload["output_format"] = effective_output_format
 
             n = int(job_payload.get("n", 1))
@@ -614,7 +635,8 @@ async def _run_generate_batch(args: argparse.Namespace) -> int:
             downscaled = None
             if args.downscale_max_dim is not None:
                 downscaled = [
-                    str(_derive_downscale_path(p, args.downscale_suffix)) for p in outputs
+                    str(_derive_downscale_path(p, args.downscale_suffix))
+                    for p in outputs
                 ]
             _print_request(
                 {
@@ -688,7 +710,9 @@ async def _run_generate_batch(args: argparse.Namespace) -> int:
                 raise
             return i, str(exc)
 
-    tasks = [asyncio.create_task(run_job(i, job)) for i, job in enumerate(jobs, start=1)]
+    tasks = [
+        asyncio.create_task(run_job(i, job)) for i, job in enumerate(jobs, start=1)
+    ]
 
     try:
         await asyncio.gather(*tasks)
@@ -730,7 +754,9 @@ def _generate(args: argparse.Namespace) -> None:
     output_paths = _build_output_paths(args.out, output_format, args.n, args.out_dir)
     downscaled = None
     if args.downscale_max_dim is not None:
-        downscaled = [str(_derive_downscale_path(p, args.downscale_suffix)) for p in output_paths]
+        downscaled = [
+            str(_derive_downscale_path(p, args.downscale_suffix)) for p in output_paths
+        ]
 
     if args.dry_run:
         _print_request(
@@ -799,7 +825,9 @@ def _edit(args: argparse.Namespace) -> None:
     output_paths = _build_output_paths(args.out, output_format, args.n, args.out_dir)
     downscaled = None
     if args.downscale_max_dim is not None:
-        downscaled = [str(_derive_downscale_path(p, args.downscale_suffix)) for p in output_paths]
+        downscaled = [
+            str(_derive_downscale_path(p, args.downscale_suffix)) for p in output_paths
+        ]
 
     if args.dry_run:
         payload_preview = dict(payload)
@@ -949,7 +977,9 @@ def main() -> int:
         help="Generate multiple prompts concurrently (JSONL input)",
     )
     _add_shared_args(batch_parser)
-    batch_parser.add_argument("--input", required=True, help="Path to JSONL file (one job per line)")
+    batch_parser.add_argument(
+        "--input", required=True, help="Path to JSONL file (one job per line)"
+    )
     batch_parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     batch_parser.add_argument("--max-attempts", type=int, default=3)
     batch_parser.add_argument("--fail-fast", action="store_true")
@@ -969,11 +999,16 @@ def main() -> int:
         _die("--concurrency must be between 1 and 25")
     if getattr(args, "max_attempts", 3) < 1 or getattr(args, "max_attempts", 3) > 10:
         _die("--max-attempts must be between 1 and 10")
-    if args.output_compression is not None and not (0 <= args.output_compression <= 100):
+    if args.output_compression is not None and not (
+        0 <= args.output_compression <= 100
+    ):
         _die("--output-compression must be between 0 and 100")
     if args.command == "generate-batch" and not args.out_dir:
         _die("generate-batch requires --out-dir")
-    if getattr(args, "downscale_max_dim", None) is not None and args.downscale_max_dim < 1:
+    if (
+        getattr(args, "downscale_max_dim", None) is not None
+        and args.downscale_max_dim < 1
+    ):
         _die("--downscale-max-dim must be >= 1")
 
     _validate_model(args.model)

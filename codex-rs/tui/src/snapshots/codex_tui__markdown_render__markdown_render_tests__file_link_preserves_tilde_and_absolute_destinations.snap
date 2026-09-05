@@ -1,0 +1,19 @@
+---
+source: tui/src/markdown_render_tests.rs
+expression: "plain_lines(&text).join(\"\\n\")"
+---
+~/notes
+
+/home/alice/notes
+
+/home/alice/notes (~/notes)
+
+~/notes (/home/alice/notes)
+
+my notes (~/notes:12:3)
+
+~/project/src/lib.rs
+
+src/lib.rs
+
+~ (/home/alice:12)

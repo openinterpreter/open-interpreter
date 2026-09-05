@@ -6,6 +6,7 @@ use crate::runtime::MemoryStartupContext;
 use crate::start_memories_startup_task;
 use crate::storage::rebuild_raw_memories_file_from_memories;
 use crate::storage::sync_rollout_summaries_from_memories;
+use codex_config::test_support::CloudConfigBundleFixture;
 use codex_config::types::MemoriesConfig;
 use codex_features::Feature;
 use codex_git_utils::diff_since_latest_init;
@@ -18,6 +19,7 @@ use codex_model_provider::ProviderAccountResult;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::models::ContentItem;
@@ -31,13 +33,19 @@ use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 use codex_state::Phase2JobClaimOutcome;
 use codex_utils_absolute_path::test_support::PathExt;
+use core_test_support::fs_wait;
+use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
+#[cfg(unix)]
+use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
+#[cfg(unix)]
+use core_test_support::responses::sse_failed;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
@@ -62,6 +70,254 @@ async fn memories_startup_creates_memory_root() -> anyhow::Result<()> {
     wait_for_dir(&memory_root).await?;
 
     shutdown_test_codex(&test).await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn memories_startup_removes_symlinked_extensions_before_seeding() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let memory_root = home.path().join("memories");
+    let outside = home.path().join("outside");
+    tokio::fs::create_dir_all(&memory_root).await?;
+    tokio::fs::create_dir_all(&outside).await?;
+    std::os::unix::fs::symlink(&outside, memory_root.join("extensions"))?;
+
+    let test = build_test_codex(&server, home).await?;
+    trigger_memories_startup(&test).await;
+    wait_for_dir(&memory_root.join("extensions/ad_hoc")).await?;
+
+    assert!(
+        tokio::fs::symlink_metadata(memory_root.join("extensions"))
+            .await?
+            .is_dir()
+    );
+    assert!(
+        !outside.join("ad_hoc").exists(),
+        "extension seeding must not create directories through the removed symbolic link"
+    );
+
+    shutdown_test_codex(&test).await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn memories_startup_fails_consolidation_when_worker_creates_extension_symlink()
+-> anyhow::Result<()> {
+    let responses = [
+        sse(vec![
+            ev_response_created("resp-phase2-complete"),
+            ev_assistant_message("msg-phase2-complete", "phase2 complete"),
+            ev_completed("resp-phase2-complete"),
+        ]),
+        sse_failed("resp-phase2-failed", "server_error", "worker failed"),
+    ];
+
+    for response in responses {
+        let server = start_mock_server().await;
+        let home = Arc::new(TempDir::new()?);
+        let db = init_state_db(&home).await?;
+        let root = home.path().join("memories");
+        seed_stage1_output(
+            db.as_ref(),
+            home.path(),
+            chrono::Utc::now(),
+            "raw memory",
+            "rollout summary",
+            "worker-symlink",
+        )
+        .await?;
+        seed_required_memory_artifacts(&root).await?;
+        reset_git_repository(&root).await?;
+
+        let target = home.path().join("outside.md");
+        tokio::fs::write(&target, "outside content").await?;
+        let link = root.join("extensions/external_agent_import/instructions.md");
+        let worker_target = target.clone();
+        let worker_link = link.clone();
+        let phase2 = mount_sse_once_match(
+            &server,
+            move |_request: &wiremock::Request| {
+                std::fs::create_dir_all(worker_link.parent().expect("extension directory"))
+                    .expect("create extension directory");
+                std::os::unix::fs::symlink(&worker_target, &worker_link)
+                    .expect("create worker symbolic link");
+                true
+            },
+            response,
+        )
+        .await;
+        let test = build_test_codex(&server, home).await?;
+
+        trigger_memories_startup(&test).await;
+        wait_for_single_request(&phase2).await;
+
+        assert_eq!(
+            wait_for_phase2_job_to_finish(db.as_ref()).await?,
+            Phase2JobClaimOutcome::SkippedRetryUnavailable
+        );
+        assert_eq!(tokio::fs::read_to_string(&target).await?, "outside content");
+        assert_eq!(
+            tokio::fs::symlink_metadata(&link)
+                .await
+                .expect_err("worker-created symbolic link should be removed")
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(
+            root.join("phase2_workspace_diff.md").exists(),
+            "a rejected consolidation result must not reset the trusted baseline"
+        );
+
+        shutdown_test_codex(&test).await?;
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn memories_startup_phase2_scopes_stop_hooks() -> anyhow::Result<()> {
+    for (pin_hooks, managed_response) in [
+        (false, None),
+        (true, None),
+        (true, Some(r#"{"decision":"block","reason":"denied"}"#)),
+        (true, Some(r#"{"continue":false,"stopReason":"denied"}"#)),
+    ] {
+        let server = start_mock_server().await;
+        let home = Arc::new(TempDir::new()?);
+        let db = init_state_db(&home).await?;
+        let root = memory_root(&home.path().abs());
+        seed_stage1_output(
+            db.as_ref(),
+            home.path(),
+            chrono::Utc::now(),
+            "raw memory",
+            "rollout summary",
+            "stop-hooks",
+        )
+        .await?;
+        seed_required_memory_artifacts(&root).await?;
+
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let hook_script = home.path().join("memory_hook.py");
+        let hook_log = home.path().join("stop");
+        let notify_log = home.path().join("notify");
+        let managed_log = home.path().join("managed");
+        let response = managed_response.unwrap_or("{}");
+        tokio::fs::write(
+            &hook_script,
+            format!(
+                r#"import json
+import sys
+from pathlib import Path
+
+kind = sys.argv[1]
+with Path(__file__).with_name(kind).open("a", newline="\n") as log:
+    log.write("hook invoked\n")
+if kind == "managed":
+    print({response:?})
+elif kind == "stop" and Path(json.load(sys.stdin)["cwd"]).name == "memories":
+    print('{{"decision":"block","reason":"Keep working on the project."}}')
+"#
+            ),
+        )
+        .await?;
+        tokio::fs::write(
+            home.path().join("hooks.json"),
+            serde_json::json!({"hooks": {"Stop": [{"hooks": [{
+                "type": "command",
+                "command": format!("{python} \"{}\" stop", hook_script.display()),
+            }]}]}})
+            .to_string(),
+        )
+        .await?;
+        let mut requirements = if pin_hooks {
+            "[features]\nhooks = true\n"
+        } else {
+            ""
+        }
+        .to_string();
+        if managed_response.is_some() {
+            let command =
+                serde_json::to_string(&format!("{python} \"{}\" managed", hook_script.display()))?;
+            requirements.push_str(&format!(
+                "\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = {command}\n"
+            ));
+        }
+        let test = test_codex()
+            .with_home(home)
+            .with_cloud_config_bundle(
+                CloudConfigBundleFixture::loader_with_enterprise_requirement(requirements),
+            )
+            .with_config(move |config| {
+                config
+                    .features
+                    .enable(Feature::Sqlite)
+                    .expect("enable SQLite");
+                config.memories = startup_test_memories_config();
+                config.notify = Some(vec![
+                    python.to_string(),
+                    hook_script.display().to_string(),
+                    "notify".to_string(),
+                ]);
+                trust_discovered_hooks(config);
+            })
+            // Command hooks run on the app host, so the parent needs a host-local cwd.
+            .build(&server)
+            .await?;
+        let phase2 = mount_sse_once(
+            &server,
+            sse(vec![
+                ev_response_created("resp-phase2"),
+                ev_assistant_message("msg-phase2", "phase2 complete"),
+                ev_completed("resp-phase2"),
+            ]),
+        )
+        .await;
+
+        trigger_memories_startup(&test).await;
+        wait_for_single_request(&phase2).await;
+        if managed_response.is_some() {
+            assert_eq!(
+                wait_for_phase2_job_to_finish(db.as_ref()).await?,
+                Phase2JobClaimOutcome::SkippedRetryUnavailable
+            );
+            assert_eq!(
+                tokio::fs::read_to_string(managed_log).await?,
+                "hook invoked\n"
+            );
+        } else {
+            wait_for_phase2_workspace_reset(db.as_ref(), &root).await?;
+        }
+        phase2.single_request();
+        assert!(
+            !hook_log.exists(),
+            "memory worker must not run the user Stop hook"
+        );
+        assert!(
+            !notify_log.exists(),
+            "memory worker must not send legacy notifications"
+        );
+
+        if managed_response.is_none() {
+            let parent = mount_sse_once(
+                &server,
+                sse(vec![
+                    ev_response_created("resp-parent"),
+                    ev_assistant_message("msg-parent", "parent complete"),
+                    ev_completed("resp-parent"),
+                ]),
+            )
+            .await;
+            test.submit_turn("parent task").await?;
+            parent.single_request();
+            assert_eq!(tokio::fs::read_to_string(hook_log).await?, "hook invoked\n");
+            fs_wait::wait_for_path_exists(notify_log, Duration::from_secs(10)).await?;
+        }
+        shutdown_test_codex(&test).await?;
+    }
     Ok(())
 }
 
@@ -344,6 +600,7 @@ async fn memories_startup_phase1_uses_live_thread_service_tier_and_detached_meta
         &test.codex,
         codex_protocol::protocol::ThreadSettingsOverrides {
             service_tier: Some(Some(ServiceTier::Fast.request_value().to_string())),
+            permission_profile: Some(codex_protocol::models::PermissionProfile::workspace_write()),
             ..Default::default()
         },
     )
@@ -398,8 +655,19 @@ async fn memories_startup_phase1_uses_live_thread_service_tier_and_detached_meta
         .expect("detached memory request should include workspace metadata");
     let metadata: serde_json::Value =
         serde_json::from_str(&metadata_header).expect("turn metadata json");
+    let client_metadata: serde_json::Value = serde_json::from_str(
+        request.body_json()["client_metadata"]["x-codex-turn-metadata"]
+            .as_str()
+            .expect("detached memory request should include client metadata"),
+    )
+    .expect("client metadata json");
+    assert_eq!(client_metadata, metadata);
     assert_eq!(metadata["request_kind"].as_str(), Some("memory"));
-    assert_eq!(metadata["sandbox_mode"].as_str(), Some("read-only"));
+    assert_eq!(
+        metadata["thread_source"].as_str(),
+        Some("memory_consolidation")
+    );
+    assert_eq!(metadata["sandbox_mode"].as_str(), Some("workspace-write"));
     assert!(metadata.get("session_id").is_none());
     assert!(metadata.get("thread_id").is_none());
     assert!(metadata.get("turn_id").is_none());
@@ -422,6 +690,12 @@ async fn memories_startup_phase1_provider_default_drives_request_model() -> anyh
         request.body_json()["model"].as_str(),
         Some(MOCK_PROVIDER_PHASE_ONE_MODEL)
     );
+    let input: Vec<ResponseItem> = serde_json::from_value(request.body_json()["input"].clone())?;
+    let message = input
+        .iter()
+        .find(|item| item.is_user_message())
+        .expect("phase-one input message");
+    assert!(message.id().is_some_and(ResponseItemId::is_prefixed));
 
     Ok(())
 }

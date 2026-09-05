@@ -31,6 +31,43 @@ pub struct Policy {
     host_executables_by_name: HashMap<String, Arc<[AbsolutePathBuf]>>,
 }
 
+/// A requirements-owned execution policy with order-independent equality.
+#[derive(Debug, Clone)]
+pub struct RequirementsExecPolicy {
+    policy: Policy,
+}
+
+impl RequirementsExecPolicy {
+    pub fn new(policy: Policy) -> Self {
+        Self { policy }
+    }
+
+    pub fn fingerprint(&self) -> Vec<String> {
+        let mut entries = Vec::new();
+        for (program, rules) in self.policy.rules().iter_all() {
+            for rule in rules {
+                entries.push(format!("{program}:{rule:?}"));
+            }
+        }
+        entries.sort();
+        entries
+    }
+}
+
+impl PartialEq for RequirementsExecPolicy {
+    fn eq(&self, other: &Self) -> bool {
+        self.fingerprint() == other.fingerprint()
+    }
+}
+
+impl Eq for RequirementsExecPolicy {}
+
+impl AsRef<Policy> for RequirementsExecPolicy {
+    fn as_ref(&self) -> &Policy {
+        &self.policy
+    }
+}
+
 impl Policy {
     pub fn new(rules_by_program: MultiMap<String, RuleRef>) -> Self {
         Self::from_parts(rules_by_program, Vec::new(), HashMap::new())

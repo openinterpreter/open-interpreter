@@ -11,8 +11,10 @@
 //! recent killed span.
 //!
 //! Wrapping also reserves a visible insertion point: full logical lines get continuation rows,
-//! and overflowing spaces wrap instead of moving the cursor outside the textarea. A partial
-//! whitespace continuation stays attached to the following word rather than becoming a blank row.
+//! and trailing spaces wrap instead of moving the cursor outside the textarea. At soft word
+//! breaks, interior separators hang off the preceding row without changing the editable text.
+//! Visible web URLs carry their complete terminal hyperlink destination across wrapped rows;
+//! masked rendering never exposes hyperlink destinations.
 
 use crate::key_hint::KeyBindingListExt;
 use crate::key_hint::is_altgr;
@@ -21,6 +23,7 @@ use crate::keymap::KeymapContext;
 use crate::keymap::RuntimeKeymap;
 use crate::keymap::VimNormalKeymap;
 use crate::keymap::VimOperatorKeymap;
+use crate::keymap::VimSearchKeymap;
 use crate::keymap::VimTextObjectKeymap;
 use crate::width::display_width;
 use codex_protocol::user_input::ByteRange;
@@ -33,21 +36,34 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::style::Style;
+use ratatui::style::Stylize;
+use ratatui::text::Span;
 use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::WidgetRef;
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::cell::Ref;
 use std::cell::RefCell;
 use std::ops::Range;
+use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
+mod hyperlinks;
 mod vim;
+mod vim_commands;
+mod vim_search;
 mod wrapping;
 use self::vim::VimMode;
 use self::vim::VimMotion;
 use self::vim::VimOperator;
 use self::vim::VimPending;
+use self::vim::VimTextObject;
 use self::vim::VimTextObjectScope;
+use self::vim_commands::VimAction;
+use self::vim_commands::VimCommandState;
+use self::vim_commands::VimEditTarget;
+use self::vim_commands::VimInsertPosition;
+pub(crate) use self::vim_commands::VimPersistentState;
 
 const WORD_SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
 
@@ -127,9 +143,13 @@ pub(crate) struct TextArea {
     vim_enabled: bool,
     vim_mode: VimMode,
     vim_pending: VimPending,
-    editor_keymap: EditorKeymap,
+    vim_commands: VimCommandState,
+    vim_search: vim_search::VimSearch,
+    vim_search_enabled: bool,
+    editor_keymap: Arc<EditorKeymap>,
     vim_normal_keymap: VimNormalKeymap,
     vim_operator_keymap: VimOperatorKeymap,
+    vim_search_keymap: VimSearchKeymap,
     vim_text_object_keymap: VimTextObjectKeymap,
 }
 
@@ -137,6 +157,7 @@ pub(crate) struct TextArea {
 struct WrapCache {
     width: u16,
     lines: Vec<Range<usize>>,
+    hyperlinks: OnceCell<hyperlinks::HyperlinkCache>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -168,9 +189,13 @@ impl TextArea {
             vim_enabled: false,
             vim_mode: VimMode::Insert,
             vim_pending: VimPending::None,
+            vim_commands: VimCommandState::default(),
+            vim_search: vim_search::VimSearch::default(),
+            vim_search_enabled: false,
             editor_keymap: defaults.editor,
             vim_normal_keymap: defaults.vim_normal,
             vim_operator_keymap: defaults.vim_operator,
+            vim_search_keymap: defaults.vim_search,
             vim_text_object_keymap: defaults.vim_text_object,
         }
     }
@@ -182,9 +207,10 @@ impl TextArea {
     /// the kill buffer, so callers can safely apply a live config update while
     /// preserving the current draft exactly as typed.
     pub fn set_keymap_bindings(&mut self, keymap: &RuntimeKeymap) {
-        self.editor_keymap = keymap.editor.clone();
+        self.editor_keymap = Arc::clone(&keymap.editor);
         self.vim_normal_keymap = keymap.vim_normal.clone();
         self.vim_operator_keymap = keymap.vim_operator.clone();
+        self.vim_search_keymap = keymap.vim_search.clone();
         self.vim_text_object_keymap = keymap.vim_text_object.clone();
     }
 
@@ -236,6 +262,9 @@ impl TextArea {
         self.cursor_pos = self.clamp_pos_to_nearest_boundary(self.cursor_pos);
         self.wrap_cache.replace(None);
         self.preferred_col = None;
+        self.vim_pending = VimPending::None;
+        self.vim_search = vim_search::VimSearch::default();
+        self.vim_commands = VimCommandState::default();
     }
 
     /// Enable or disable modal Vim editing for the textarea.
@@ -247,6 +276,8 @@ impl TextArea {
     pub(crate) fn set_vim_enabled(&mut self, enabled: bool) {
         self.vim_enabled = enabled;
         self.vim_pending = VimPending::None;
+        self.vim_search = vim_search::VimSearch::default();
+        self.vim_commands = VimCommandState::default();
         self.vim_mode = if enabled {
             VimMode::Normal
         } else {
@@ -282,16 +313,17 @@ impl TextArea {
     /// This is observable so the composer can avoid stealing the second key of
     /// `d{motion}` or `y{motion}` for higher-level shortcuts.
     pub(crate) fn is_vim_operator_pending(&self) -> bool {
-        !matches!(self.vim_pending, VimPending::None)
+        self.vim_query().is_some() || !matches!(self.vim_pending, VimPending::None)
     }
 
     /// Return the keymap context that owns the next editing key.
     pub(crate) fn keymap_context(&self) -> KeymapContext {
-        if !self.vim_enabled || self.vim_mode == VimMode::Insert {
+        if !self.vim_enabled || self.vim_mode == VimMode::Insert || self.vim_query().is_some() {
             return KeymapContext::Editor;
         }
         match self.vim_pending {
             VimPending::None => KeymapContext::VimNormal,
+            VimPending::Replace | VimPending::Find { .. } => KeymapContext::Editor,
             VimPending::Operator(_) => KeymapContext::VimOperator,
             VimPending::TextObject { .. } => KeymapContext::VimTextObject,
         }
@@ -306,6 +338,10 @@ impl TextArea {
         if self.vim_enabled {
             self.vim_mode = VimMode::Insert;
             self.vim_pending = VimPending::None;
+            self.cancel_vim_search();
+            if self.vim_commands.pending_change.is_empty() && !self.vim_commands.replaying {
+                self.start_vim_edit(VimAction::Insert(VimInsertPosition::Cursor));
+            }
         }
     }
 
@@ -319,6 +355,7 @@ impl TextArea {
         if self.vim_enabled {
             self.vim_mode = VimMode::Normal;
             self.vim_pending = VimPending::None;
+            self.cancel_vim_search();
             self.preferred_col = None;
         }
     }
@@ -339,12 +376,11 @@ impl TextArea {
 
     /// Return whether Escape should be intercepted before composer-level routing.
     ///
-    /// In Vim insert mode, Escape is an editing transition rather than a popup
-    /// cancel/backtrack shortcut. Letting the composer handle it first would
-    /// close UI surfaces while leaving the textarea in insert mode.
+    /// In Vim insert mode or while a command is pending, Escape is an editing
+    /// transition rather than a popup cancel/backtrack or turn-interrupt shortcut.
     pub(crate) fn should_handle_vim_insert_escape(&self, event: KeyEvent) -> bool {
         self.vim_enabled
-            && self.vim_mode == VimMode::Insert
+            && (self.vim_mode == VimMode::Insert || self.is_vim_operator_pending())
             && event.code == KeyCode::Esc
             && event.modifiers == KeyModifiers::NONE
             && matches!(event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
@@ -355,6 +391,7 @@ impl TextArea {
     /// `None` means Vim editing is disabled, so callers should omit the mode
     /// indicator rather than rendering an insert-mode label for normal
     /// non-modal editing.
+    #[cfg(test)]
     pub(crate) fn vim_mode_label(&self) -> Option<&'static str> {
         if !self.vim_enabled {
             return None;
@@ -365,11 +402,23 @@ impl TextArea {
         })
     }
 
+    /// Return the styled footer indicator for the active Vim editing mode.
+    pub(crate) fn vim_mode_indicator_span(&self) -> Option<Span<'static>> {
+        if !self.vim_enabled {
+            return None;
+        }
+        Some(match self.vim_mode {
+            VimMode::Normal => "Vim: Normal".magenta(),
+            VimMode::Insert => "Vim: Insert".green(),
+        })
+    }
+
     pub fn text(&self) -> &str {
         &self.text
     }
 
     pub fn insert_str(&mut self, text: &str) {
+        self.record_vim_inserted_text(text);
         self.insert_str_at(self.cursor_pos, text);
     }
 
@@ -450,16 +499,13 @@ impl TextArea {
         }
 
         let lines = self.wrapped_lines(area.width);
-        let effective_scroll = self.effective_scroll(area.height, &lines, state.scroll);
-        let i = Self::wrapped_line_index_by_start(&lines, self.cursor_pos)?;
-        let ls = &lines[i];
-        let col = display_width(&self.text[ls.start..self.cursor_pos])
-            .min(usize::from(area.width.saturating_sub(1))) as u16;
+        let effective_scroll = self.effective_scroll(area, &lines, state.scroll);
+        let (i, col) = wrapping::cursor_position(&self.text, &lines, area.width, self.cursor_pos)?;
         let screen_row = i
             .saturating_sub(effective_scroll as usize)
             .try_into()
             .unwrap_or(0);
-        Some((area.x + col, area.y + screen_row))
+        Some((area.x + col as u16, area.y + screen_row))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -469,13 +515,6 @@ impl TextArea {
     fn current_display_col(&self) -> usize {
         let bol = self.beginning_of_current_line();
         display_width(&self.text[bol..self.cursor_pos])
-    }
-
-    fn wrapped_line_index_by_start(lines: &[Range<usize>], pos: usize) -> Option<usize> {
-        // partition_point returns the index of the first element for which
-        // the predicate is false, i.e. the count of elements with start <= pos.
-        let idx = lines.partition_point(|r| r.start <= pos);
-        if idx == 0 { None } else { Some(idx - 1) }
     }
 
     fn move_to_display_col_on_line(
@@ -545,7 +584,7 @@ impl TextArea {
         }
 
         if keymap.delete_backward_word.is_pressed(event) {
-            self.delete_backward_word();
+            self.apply_vim_insert_action(VimAction::DeleteBackwardWord);
             return;
         }
 
@@ -563,27 +602,27 @@ impl TextArea {
         }
 
         if keymap.delete_backward.is_pressed(event) {
-            self.delete_backward(/*n*/ 1);
+            self.apply_vim_insert_action(VimAction::DeleteBackward);
             return;
         }
         if keymap.delete_forward_word.is_pressed(event) {
-            self.delete_forward_word();
+            self.apply_vim_insert_action(VimAction::DeleteForwardWord);
             return;
         }
         if keymap.delete_forward.is_pressed(event) {
-            self.delete_forward(/*n*/ 1);
+            self.apply_vim_insert_action(VimAction::DeleteForward);
             return;
         }
         if keymap.kill_line_start.is_pressed(event) {
-            self.kill_to_beginning_of_line();
+            self.apply_vim_insert_action(VimAction::KillLineStart);
             return;
         }
         if keymap.kill_whole_line.is_pressed(event) {
-            self.kill_current_line();
+            self.apply_vim_insert_action(VimAction::KillLine);
             return;
         }
         if keymap.kill_line_end.is_pressed(event) {
-            self.kill_to_end_of_line();
+            self.apply_vim_insert_action(VimAction::KillLineEnd);
             return;
         }
         if keymap.yank.is_pressed(event) {
@@ -591,27 +630,27 @@ impl TextArea {
             return;
         }
         if keymap.move_word_left.is_pressed(event) {
-            self.set_cursor(self.beginning_of_previous_word());
+            self.apply_vim_insert_action(VimAction::MoveWordLeft);
             return;
         }
         if keymap.move_word_right.is_pressed(event) {
-            self.set_cursor(self.end_of_next_word());
+            self.apply_vim_insert_action(VimAction::MoveWordRight);
             return;
         }
         if keymap.move_left.is_pressed(event) {
-            self.move_cursor_left();
+            self.apply_vim_insert_action(VimAction::MoveLeft);
             return;
         }
         if keymap.move_right.is_pressed(event) {
-            self.move_cursor_right();
+            self.apply_vim_insert_action(VimAction::MoveRight);
             return;
         }
         if keymap.move_up.is_pressed(event) {
-            self.move_cursor_up();
+            self.apply_vim_insert_action(VimAction::MoveUp);
             return;
         }
         if keymap.move_down.is_pressed(event) {
-            self.move_cursor_down();
+            self.apply_vim_insert_action(VimAction::MoveDown);
             return;
         }
         if keymap.move_line_start.is_pressed(event) {
@@ -623,7 +662,7 @@ impl TextArea {
                     ..
                 }
             );
-            self.move_cursor_to_beginning_of_line(move_up_at_bol);
+            self.apply_vim_insert_action(VimAction::MoveLineStart { move_up_at_bol });
             return;
         }
         if keymap.move_line_end.is_pressed(event) {
@@ -635,7 +674,7 @@ impl TextArea {
                     ..
                 }
             );
-            self.move_cursor_to_end_of_line(move_down_at_eol);
+            self.apply_vim_insert_action(VimAction::MoveLineEnd { move_down_at_eol });
             return;
         }
 
@@ -657,23 +696,34 @@ impl TextArea {
     }
 
     fn handle_vim_input(&mut self, event: KeyEvent) {
+        if self.handle_vim_search_key(event) {
+            return;
+        }
+        let prior_mode = self.vim_mode;
         match self.vim_mode {
             VimMode::Insert => self.handle_vim_insert(event),
             VimMode::Normal => self.handle_vim_normal(event),
+        }
+        if prior_mode == VimMode::Insert && self.vim_mode == VimMode::Normal {
+            self.finish_pending_vim_change();
         }
     }
 
     fn handle_vim_insert(&mut self, event: KeyEvent) {
         if matches!(event.code, KeyCode::Esc) {
-            let bol = self.beginning_of_current_line();
-            if self.cursor_pos > bol {
-                self.cursor_pos = self.prev_atomic_boundary(self.cursor_pos).max(bol);
-            }
-            self.enter_vim_normal_mode();
+            self.leave_vim_insert_mode();
             return;
         }
         let keymap = self.editor_keymap.clone();
         self.input_with_keymap(event, &keymap);
+    }
+
+    fn leave_vim_insert_mode(&mut self) {
+        let bol = self.beginning_of_current_line();
+        if self.cursor_pos > bol {
+            self.cursor_pos = self.prev_atomic_boundary(self.cursor_pos).max(bol);
+        }
+        self.enter_vim_normal_mode();
     }
 
     fn handle_vim_normal(&mut self, event: KeyEvent) {
@@ -688,47 +738,34 @@ impl TextArea {
                 self.handle_vim_text_object(operator, scope, event);
                 return;
             }
+            VimPending::Replace | VimPending::Find { .. } => {
+                self.handle_vim_pending_command(pending, event);
+                return;
+            }
         }
 
         if self.vim_normal_keymap.enter_insert.is_pressed(event) {
-            self.vim_mode = VimMode::Insert;
+            self.start_vim_edit(VimAction::Insert(VimInsertPosition::Cursor));
             return;
         }
         if self.vim_normal_keymap.append_after_cursor.is_pressed(event) {
-            let next = self.next_atomic_boundary(self.cursor_pos);
-            self.set_cursor(next);
-            self.vim_mode = VimMode::Insert;
+            self.start_vim_edit(VimAction::Insert(VimInsertPosition::AfterCursor));
             return;
         }
         if self.vim_normal_keymap.append_line_end.is_pressed(event) {
-            self.set_cursor(self.end_of_current_line());
-            self.vim_mode = VimMode::Insert;
+            self.start_vim_edit(VimAction::Insert(VimInsertPosition::LineEnd));
             return;
         }
         if self.vim_normal_keymap.insert_line_start.is_pressed(event) {
-            self.set_cursor(self.first_non_blank_of_current_line());
-            self.vim_mode = VimMode::Insert;
+            self.start_vim_edit(VimAction::Insert(VimInsertPosition::LineStart));
             return;
         }
         if self.vim_normal_keymap.open_line_below.is_pressed(event) {
-            let eol = self.end_of_current_line();
-            let old_len = self.text.len();
-            let insert_at = if eol < old_len { eol + 1 } else { eol };
-            self.insert_str_at(insert_at, "\n");
-            let cursor = if eol < old_len {
-                insert_at
-            } else {
-                insert_at + 1
-            };
-            self.set_cursor(cursor);
-            self.vim_mode = VimMode::Insert;
+            self.start_vim_edit(VimAction::Insert(VimInsertPosition::OpenBelow));
             return;
         }
         if self.vim_normal_keymap.open_line_above.is_pressed(event) {
-            let bol = self.beginning_of_current_line();
-            self.insert_str_at(bol, "\n");
-            self.set_cursor(bol);
-            self.vim_mode = VimMode::Insert;
+            self.start_vim_edit(VimAction::Insert(VimInsertPosition::OpenAbove));
             return;
         }
         if self.vim_normal_keymap.move_left.is_pressed(event) {
@@ -768,23 +805,19 @@ impl TextArea {
             return;
         }
         if self.vim_normal_keymap.delete_char.is_pressed(event) {
-            self.delete_forward_kill(/*n*/ 1);
+            self.start_vim_edit(VimAction::Delete(VimEditTarget::Character));
             return;
         }
         if self.vim_normal_keymap.substitute_char.is_pressed(event) {
-            if self.cursor_pos < self.end_of_current_line() {
-                self.delete_forward_kill(/*n*/ 1);
-            }
-            self.vim_mode = VimMode::Insert;
+            self.start_vim_edit(VimAction::Change(VimEditTarget::Character));
             return;
         }
         if self.vim_normal_keymap.delete_to_line_end.is_pressed(event) {
-            self.vim_kill_to_end_of_line();
+            self.start_vim_edit(VimAction::Delete(VimEditTarget::LineEnd));
             return;
         }
         if self.vim_normal_keymap.change_to_line_end.is_pressed(event) {
-            self.vim_kill_to_end_of_line();
-            self.vim_mode = VimMode::Insert;
+            self.start_vim_edit(VimAction::Change(VimEditTarget::LineEnd));
             return;
         }
         if self.vim_normal_keymap.yank_line.is_pressed(event) {
@@ -792,7 +825,7 @@ impl TextArea {
             return;
         }
         if self.vim_normal_keymap.paste_after.is_pressed(event) {
-            self.paste_after_cursor();
+            self.start_vim_edit(VimAction::PasteAfter);
             return;
         }
         if self
@@ -817,12 +850,15 @@ impl TextArea {
         }
         if self.vim_normal_keymap.cancel_operator.is_pressed(event) {
             self.vim_pending = VimPending::None;
+            self.cancel_vim_search();
+            return;
         }
+        self.handle_vim_extra_command(event);
     }
 
     fn handle_vim_operator(&mut self, op: VimOperator, event: KeyEvent) -> bool {
         if op == VimOperator::Delete && self.vim_operator_keymap.delete_line.is_pressed(event) {
-            self.kill_current_line();
+            self.start_vim_edit(VimAction::Delete(VimEditTarget::Line));
             return true;
         }
         if op == VimOperator::Yank && self.vim_operator_keymap.yank_line.is_pressed(event) {
@@ -840,13 +876,28 @@ impl TextArea {
             return true;
         }
 
-        if op != VimOperator::Change
-            && let Some(motion) = self.vim_motion_for_event(event)
-        {
-            self.apply_vim_operator(op, motion);
+        if let Some(motion) = self.vim_motion_for_event(event) {
+            match op {
+                VimOperator::Delete => {
+                    self.start_vim_edit(VimAction::Delete(VimEditTarget::Motion(motion)));
+                }
+                VimOperator::Change => {
+                    self.start_vim_edit(VimAction::Change(VimEditTarget::Motion(motion)));
+                }
+                VimOperator::Yank => self.apply_vim_operator(op, motion),
+            }
             return true;
         }
-        false
+        if op == VimOperator::Change
+            && self
+                .vim_normal_keymap
+                .start_change_operator
+                .is_pressed(event)
+        {
+            self.start_vim_edit(VimAction::Change(VimEditTarget::Line));
+            return true;
+        }
+        self.handle_vim_operator_command(op, event)
     }
 
     fn handle_vim_text_object(
@@ -861,8 +912,24 @@ impl TextArea {
         let Some(object) = self.vim_text_object_for_event(event) else {
             return false;
         };
-        if let Some(range) = self.text_object_range(object, scope) {
-            self.apply_vim_operator_to_range(op, range);
+        match op {
+            VimOperator::Delete => {
+                self.start_vim_edit(VimAction::Delete(VimEditTarget::TextObject {
+                    scope,
+                    object,
+                }));
+            }
+            VimOperator::Change => {
+                self.start_vim_edit(VimAction::Change(VimEditTarget::TextObject {
+                    scope,
+                    object,
+                }));
+            }
+            VimOperator::Yank => {
+                if let Some(range) = self.text_object_range(object, scope) {
+                    self.apply_vim_operator_to_range(op, range);
+                }
+            }
         }
         true
     }
@@ -907,14 +974,48 @@ impl TextArea {
     }
 
     fn apply_vim_operator(&mut self, op: VimOperator, motion: VimMotion) {
+        if op == VimOperator::Change && motion == VimMotion::WordForward {
+            let target = if self.text[self.cursor_pos..]
+                .chars()
+                .next()
+                .is_some_and(|ch| !ch.is_whitespace())
+            {
+                self.end_of_next_word()
+            } else {
+                self.beginning_of_next_word()
+                    .min(self.end_of_current_line())
+            };
+            if target > self.cursor_pos {
+                self.apply_vim_operator_to_range(op, self.cursor_pos..target);
+            } else {
+                self.vim_mode = VimMode::Insert;
+            }
+            return;
+        }
         let Some(range) = self.range_for_motion(motion) else {
+            if op == VimOperator::Change && motion == VimMotion::LineEnd {
+                self.vim_mode = VimMode::Insert;
+            }
             return;
         };
-        match op {
-            VimOperator::Delete => self.kill_range(range),
-            VimOperator::Yank => self.yank_range(range),
-            VimOperator::Change => {}
+        if op == VimOperator::Change && matches!(motion, VimMotion::Up | VimMotion::Down) {
+            if motion == VimMotion::Up && self.beginning_of_current_line() == 0
+                || motion == VimMotion::Down && self.end_of_current_line() == self.text.len()
+            {
+                return;
+            }
+            let retain_newline =
+                range.end < self.text.len() && self.text[range.clone()].ends_with('\n');
+            let start = range.start;
+            self.kill_line_range(range);
+            if retain_newline {
+                self.insert_str_at(start, "\n");
+                self.set_cursor(start);
+            }
+            self.vim_mode = VimMode::Insert;
+            return;
         }
+        self.apply_vim_operator_to_range(op, range);
     }
 
     fn apply_vim_operator_to_range(&mut self, op: VimOperator, range: Range<usize>) {
@@ -1249,11 +1350,16 @@ impl TextArea {
             let cache_ref = self.wrap_cache.borrow();
             if let Some(cache) = cache_ref.as_ref() {
                 let lines = &cache.lines;
-                if let Some(idx) = Self::wrapped_line_index_by_start(lines, self.cursor_pos) {
+                if let Some((idx, col)) =
+                    wrapping::cursor_position(&self.text, lines, cache.width, self.cursor_pos)
+                {
                     let cur_range = &lines[idx];
-                    let target_col = self.preferred_col.unwrap_or_else(|| {
-                        display_width(&self.text[cur_range.start..self.cursor_pos])
-                    });
+                    // A saved column can outlive a resize. Do not land in hanging whitespace
+                    // that is displayed on the following row.
+                    let target_col = self
+                        .preferred_col
+                        .unwrap_or(col)
+                        .min(usize::from(cache.width.saturating_sub(1)));
                     if idx > 0 {
                         let prev = &lines[idx - 1];
                         let line_start = prev.start;
@@ -1315,11 +1421,13 @@ impl TextArea {
             let cache_ref = self.wrap_cache.borrow();
             if let Some(cache) = cache_ref.as_ref() {
                 let lines = &cache.lines;
-                if let Some(idx) = Self::wrapped_line_index_by_start(lines, self.cursor_pos) {
-                    let cur_range = &lines[idx];
-                    let target_col = self.preferred_col.unwrap_or_else(|| {
-                        display_width(&self.text[cur_range.start..self.cursor_pos])
-                    });
+                if let Some((idx, col)) =
+                    wrapping::cursor_position(&self.text, lines, cache.width, self.cursor_pos)
+                {
+                    let target_col = self
+                        .preferred_col
+                        .unwrap_or(col)
+                        .min(usize::from(cache.width.saturating_sub(1)));
                     if idx + 1 < lines.len() {
                         let next = &lines[idx + 1];
                         let line_start = next.start;
@@ -1912,7 +2020,11 @@ impl TextArea {
             if needs_recalc {
                 let display_text = text_for_display(&self.text);
                 let lines = wrapping::wrapped_lines(display_text.as_ref(), width);
-                *cache = Some(WrapCache { width, lines });
+                *cache = Some(WrapCache {
+                    width,
+                    lines,
+                    hyperlinks: OnceCell::new(),
+                });
             }
         }
 
@@ -1925,30 +2037,24 @@ impl TextArea {
     ///
     /// - Cursor is always on screen.
     /// - No scrolling if content fits in the area.
-    fn effective_scroll(
-        &self,
-        area_height: u16,
-        lines: &[Range<usize>],
-        current_scroll: u16,
-    ) -> u16 {
+    fn effective_scroll(&self, area: Rect, lines: &[Range<usize>], current_scroll: u16) -> u16 {
         let total_lines = lines.len() as u16;
-        if area_height >= total_lines {
+        if area.height >= total_lines {
             return 0;
         }
 
-        // Where is the cursor within wrapped lines? Prefer assigning boundary positions
-        // (where pos equals the start of a wrapped line) to that later line.
         let cursor_line_idx =
-            Self::wrapped_line_index_by_start(lines, self.cursor_pos).unwrap_or(0) as u16;
+            wrapping::cursor_position(&self.text, lines, area.width, self.cursor_pos)
+                .map_or(0, |(row, _)| row) as u16;
 
-        let max_scroll = total_lines.saturating_sub(area_height);
+        let max_scroll = total_lines.saturating_sub(area.height);
         let mut scroll = current_scroll.min(max_scroll);
 
         // Ensure cursor is visible within [scroll, scroll + area_height)
         if cursor_line_idx < scroll {
             scroll = cursor_line_idx;
-        } else if cursor_line_idx >= scroll + area_height {
-            scroll = cursor_line_idx + 1 - area_height;
+        } else if cursor_line_idx >= scroll + area.height {
+            scroll = cursor_line_idx + 1 - area.height;
         }
         scroll
     }
@@ -1973,7 +2079,7 @@ impl StatefulWidgetRef for &TextArea {
 
     fn render_ref(&self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         let lines = self.wrapped_lines(area.width);
-        let scroll = self.effective_scroll(area.height, &lines, state.scroll);
+        let scroll = self.effective_scroll(area, &lines, state.scroll);
         state.scroll = scroll;
 
         let start = scroll as usize;
@@ -1991,7 +2097,7 @@ impl TextArea {
         mask_char: char,
     ) {
         let lines = self.wrapped_lines(area.width);
-        let scroll = self.effective_scroll(area.height, &lines, state.scroll);
+        let scroll = self.effective_scroll(area, &lines, state.scroll);
         state.scroll = scroll;
 
         let start = scroll as usize;
@@ -2012,7 +2118,7 @@ impl TextArea {
         highlights: &[(Range<usize>, Style)],
     ) {
         let lines = self.wrapped_lines(area.width);
-        let scroll = self.effective_scroll(area.height, &lines, state.scroll);
+        let scroll = self.effective_scroll(area, &lines, state.scroll);
         state.scroll = scroll;
 
         let start = scroll as usize;
@@ -2030,31 +2136,40 @@ impl TextArea {
         base_style: Style,
         highlights: &[(Range<usize>, Style)],
     ) {
-        for (row, idx) in range.enumerate() {
+        let element_style = base_style.fg(Color::Cyan);
+        for (row, idx) in range.clone().enumerate() {
             let r = &lines[idx];
             let y = area.y + row as u16;
-            let line_range = r.start..r.end - 1;
+            let visible = wrapping::visible_prefix(&self.text[r.start..r.end - 1], area.width);
+            let line_range = r.start..r.start + visible.len();
             buf.set_style(Rect::new(area.x, y, area.width, 1), base_style);
             // Draw base line with the provided style.
             buf.set_stringn(
                 area.x,
                 y,
-                text_for_display(&self.text[line_range.clone()]),
+                text_for_display(visible),
                 usize::from(area.width),
                 base_style,
             );
 
-            // Overlay styled segments for elements that intersect this line.
-            for elem in &self.elements {
-                // Compute overlap with displayed slice.
-                let overlap_start = elem.range.start.max(line_range.start);
-                let overlap_end = elem.range.end.min(line_range.end);
+            // Apply search highlights last so they remain visible over styled elements.
+            let overlays = self
+                .elements
+                .iter()
+                .map(|element| (&element.range, element_style))
+                .chain(highlights.iter().map(|(range, style)| (range, *style)));
+            for (overlay_range, style) in overlays {
+                let overlap_start = overlay_range.start.max(line_range.start);
+                let overlap_end = overlay_range.end.min(line_range.end);
                 if overlap_start >= overlap_end {
                     continue;
                 }
                 let styled = &self.text[overlap_start..overlap_end];
-                let x_off = display_width(&self.text[line_range.start..overlap_start]) as u16;
-                let style = base_style.fg(Color::Cyan);
+                let x_off = display_width(&self.text[line_range.start..overlap_start]);
+                if x_off >= usize::from(area.width) {
+                    continue;
+                }
+                let x_off = x_off as u16;
                 buf.set_stringn(
                     area.x + x_off,
                     y,
@@ -2063,25 +2178,12 @@ impl TextArea {
                     style,
                 );
             }
-
-            // Overlay render-only highlight ranges last so transient search highlighting remains
-            // visible even when it intersects attachment placeholders or other styled elements.
-            for (highlight_range, style) in highlights {
-                let overlap_start = highlight_range.start.max(line_range.start);
-                let overlap_end = highlight_range.end.min(line_range.end);
-                if overlap_start >= overlap_end {
-                    continue;
-                }
-                let highlighted = &self.text[overlap_start..overlap_end];
-                let x_off = display_width(&self.text[line_range.start..overlap_start]) as u16;
-                buf.set_stringn(
-                    area.x + x_off,
-                    y,
-                    text_for_display(highlighted),
-                    usize::from(area.width.saturating_sub(x_off)),
-                    *style,
-                );
-            }
+        }
+        if let Some(wrap_cache) = self.wrap_cache.borrow().as_ref() {
+            wrap_cache
+                .hyperlinks
+                .get_or_init(|| hyperlinks::HyperlinkCache::new(&self.text, lines))
+                .mark(buf, area, &self.text, lines, range);
         }
     }
 
@@ -2097,8 +2199,8 @@ impl TextArea {
         for (row, idx) in range.enumerate() {
             let r = &lines[idx];
             let y = area.y + row as u16;
-            let line_range = r.start..r.end - 1;
-            let masked = self.text[line_range.clone()]
+            let visible = wrapping::visible_prefix(&self.text[r.start..r.end - 1], area.width);
+            let masked = visible
                 .graphemes(/*is_extended*/ true)
                 .flat_map(|grapheme| std::iter::repeat_n(mask_char, display_width(grapheme)))
                 .collect::<String>();
@@ -2745,18 +2847,10 @@ mod tests {
     }
 
     #[test]
-    fn vim_text_object_cancellation_and_unsupported_change_motions_do_not_edit() {
+    fn vim_text_object_cancellation_does_not_edit() {
         let mut t = ta_with("hello world");
         t.set_cursor(/*pos*/ 1);
         t.set_vim_enabled(/*enabled*/ true);
-
-        t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
-        t.input(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE));
-
-        assert_eq!(t.text(), "hello world");
-        assert_eq!(t.kill_buffer, "");
-        assert_eq!(t.vim_mode_label(), Some("Normal"));
-        assert!(!t.is_vim_operator_pending());
 
         t.input(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         t.input(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
@@ -2971,8 +3065,8 @@ mod tests {
         let mut t = ta_with("abc\ndef\nghi");
         t.set_cursor(/*pos*/ 5);
         let mut keymap = RuntimeKeymap::defaults().editor;
-        keymap.kill_line_start.clear();
-        keymap.kill_whole_line = vec![key_hint::ctrl(KeyCode::Char('u'))];
+        Arc::make_mut(&mut keymap).kill_line_start.clear();
+        Arc::make_mut(&mut keymap).kill_whole_line = vec![key_hint::ctrl(KeyCode::Char('u'))];
 
         t.input_with_keymap(
             KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
@@ -3222,7 +3316,7 @@ mod tests {
         let mut t = ta_with("a\nb");
         t.set_cursor(/*pos*/ 2);
         let mut keymap = RuntimeKeymap::defaults().editor;
-        keymap.move_up.clear();
+        Arc::make_mut(&mut keymap).move_up.clear();
 
         t.input_with_keymap(
             KeyEvent::new(KeyCode::Char('\u{0010}'), KeyModifiers::NONE),
@@ -3237,8 +3331,8 @@ mod tests {
         let mut t = ta_with("a\nb");
         t.set_cursor(/*pos*/ 0);
         let mut keymap = RuntimeKeymap::defaults().editor;
-        keymap.move_up.clear();
-        keymap.move_down = vec![crate::key_hint::ctrl(KeyCode::Char('p'))];
+        Arc::make_mut(&mut keymap).move_up.clear();
+        Arc::make_mut(&mut keymap).move_down = vec![crate::key_hint::ctrl(KeyCode::Char('p'))];
 
         t.input_with_keymap(
             KeyEvent::new(KeyCode::Char('\u{0010}'), KeyModifiers::NONE),
@@ -3645,7 +3739,7 @@ mod tests {
     }
 
     #[test]
-    fn leading_space_after_full_line_stays_with_following_text() {
+    fn separator_after_full_line_hangs_before_following_text() {
         let mut t = ta_with("abad a");
         t.set_cursor(t.text().len());
         let area = Rect::new(0, 0, /*width*/ 4, /*height*/ 2);
@@ -3658,9 +3752,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(t.desired_height(area.width), 2);
-        assert_eq!(t.cursor_pos(area), Some((2, 1)));
+        assert_eq!(t.cursor_pos(area), Some((1, 1)));
         insta::assert_snapshot!(
-            "textarea_leading_space_after_full_line_stays_with_following_text",
+            "textarea_separator_after_full_line_hangs_before_following_text",
             format!("cursor: {:?}\n{}", t.cursor_pos(area), terminal.backend())
         );
 
@@ -3669,12 +3763,12 @@ mod tests {
             t.set_cursor(t.text().len());
 
             assert_eq!(t.desired_height(area.width), 2);
-            assert_eq!(t.cursor_pos(area), Some((2, 1)));
+            assert_eq!(t.cursor_pos(area), Some((1, 1)));
         }
     }
 
     #[test]
-    fn breakable_unicode_space_stays_with_following_text() {
+    fn breakable_unicode_space_hangs_before_following_text() {
         let mut t = ta_with("abad\u{3000}abcde");
         t.set_cursor(t.text().len());
         let area = Rect::new(0, 0, /*width*/ 4, /*height*/ 3);
@@ -3687,9 +3781,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(t.desired_height(area.width), 3);
-        assert_eq!(t.cursor_pos(area), Some((3, 2)));
+        assert_eq!(t.cursor_pos(area), Some((1, 2)));
         insta::assert_snapshot!(
-            "textarea_breakable_unicode_space_stays_with_following_text",
+            "textarea_breakable_unicode_space_hangs_before_following_text",
             format!("cursor: {:?}\n{}", t.cursor_pos(area), terminal.backend())
         );
     }
@@ -3705,18 +3799,19 @@ mod tests {
         }
 
         let mut t = ta_with("abad abcde xy zz");
-        assert_eq!(t.desired_height(area.width), 5);
+        let area = Rect::new(0, 0, /*width*/ 4, /*height*/ 4);
+        assert_eq!(t.desired_height(area.width), 4);
         for (cursor, expected) in [
             (4, (0, 1)),
-            (5, (1, 1)),
-            (8, (0, 2)),
-            (9, (1, 2)),
-            (10, (2, 2)),
-            (11, (0, 3)),
-            (12, (1, 3)),
-            (13, (2, 3)),
-            (14, (0, 4)),
-            (16, (2, 4)),
+            (5, (0, 1)),
+            (8, (3, 1)),
+            (9, (0, 2)),
+            (10, (1, 2)),
+            (11, (2, 2)),
+            (12, (3, 2)),
+            (13, (0, 3)),
+            (14, (0, 3)),
+            (16, (2, 3)),
         ] {
             t.set_cursor(cursor);
             assert_eq!(t.cursor_pos(area), Some(expected));
@@ -3740,8 +3835,8 @@ mod tests {
     fn reflow_keeps_fitting_remainder_on_current_row() {
         for (text, width, expected_height, expected_cursor) in [
             ("  -", 1, 4, (0, 3)),
-            ("p    a b", 3, 3, (2, 2)),
-            ("p     a b", 5, 2, (4, 1)),
+            ("p    a b", 3, 3, (0, 2)),
+            ("p     a b", 5, 2, (3, 1)),
             (" aaaa a   ", 3, 4, (1, 3)),
         ] {
             let mut t = ta_with(text);
@@ -3751,7 +3846,10 @@ mod tests {
             assert_eq!(t.desired_height(area.width), expected_height);
             assert_eq!(t.cursor_pos(area), Some(expected_cursor));
             for range in t.wrapped_lines(width).iter() {
-                assert!(display_width(&text[range.start..range.end - 1]) <= usize::from(width));
+                assert!(
+                    display_width(text[range.start..range.end - 1].trim_end_matches(' '))
+                        <= usize::from(width)
+                );
             }
         }
 
@@ -3792,15 +3890,15 @@ mod tests {
     }
 
     #[test]
-    fn space_runs_wrap_before_later_text() {
+    fn space_runs_hang_before_later_text() {
         let mut t = ta_with("abad     next");
-        let area = Rect::new(0, 0, /*width*/ 4, /*height*/ 4);
+        let area = Rect::new(0, 0, /*width*/ 4, /*height*/ 3);
 
-        assert_eq!(t.desired_height(area.width), 4);
+        assert_eq!(t.desired_height(area.width), 3);
 
-        for (cursor, expected) in [(4, (0, 1)), (6, (2, 1)), (8, (0, 2)), (9, (1, 2))] {
+        for cursor in 4..=9 {
             t.set_cursor(cursor);
-            assert_eq!(t.cursor_pos(area), Some(expected));
+            assert_eq!(t.cursor_pos(area), Some((0, 1)));
         }
     }
 
@@ -4199,7 +4297,7 @@ mod tests {
     fn wrapped_navigation_with_newlines_and_spaces() {
         // Include spaces and an explicit newline to exercise boundaries
         let mut t = ta_with("word1  word2\nword3");
-        // Width 6 wraps "word1 " and " word2" before the newline.
+        // Width 6 leaves both separators on the first visual row.
         let _ = t.desired_height(/*width*/ 6);
 
         // Put the cursor at column 1 of "word2".
@@ -4208,20 +4306,16 @@ mod tests {
 
         // Up moves directly to the preceding visual line while preserving the visual column.
         t.move_cursor_up();
-        assert_eq!(t.cursor(), 2);
+        assert_eq!(t.cursor(), 1);
 
-        // Down returns to the same visual column of " word2".
+        // Down returns to the same visual column of "word2".
         t.move_cursor_down();
         assert_eq!(t.cursor(), start_word2 + 1);
 
-        // A full line reserves an insertion row immediately before the explicit newline.
-        t.move_cursor_down();
-        assert_eq!(t.cursor(), t.text().find('\n').unwrap());
-
-        // Down again crosses the logical newline to the next visual line ("word3").
+        // Down crosses the logical newline to the next visual line ("word3").
         t.move_cursor_down();
         let start_word3 = t.text().find("word3").unwrap();
-        assert!(t.cursor() >= start_word3 && t.cursor() <= start_word3 + "word3".len());
+        assert_eq!(t.cursor(), start_word3 + 1);
     }
 
     #[test]

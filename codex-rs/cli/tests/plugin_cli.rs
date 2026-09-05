@@ -1,14 +1,33 @@
 use anyhow::Result;
+use anyhow::ensure;
+use app_test_support::ChatGptAuthFixture;
+use app_test_support::write_chatgpt_auth;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::MarketplaceConfigUpdate;
 use codex_config::record_user_marketplace;
+use codex_config::types::AuthCredentialsStoreMode;
 use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 use serde_json::json;
 use std::path::Path;
+use std::process::Output;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tempfile::TempDir;
+use tokio::process::Command;
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::header;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
+use wiremock::matchers::query_param;
 
 const MARKETPLACE_HEADER: &str = "MARKETPLACE";
 const MARKETPLACE_LIST_HEADER: &str = "MARKETPLACE  ROOT";
@@ -36,8 +55,6 @@ fn codex_command_in(codex_home: &Path, current_dir: &Path) -> Result<assert_cmd:
 
 fn configured_local_marketplace(source: &str) -> MarketplaceConfigUpdate<'_> {
     MarketplaceConfigUpdate {
-        last_updated: "2026-05-06T00:00:00Z",
-        last_revision: None,
         source_type: "local",
         source,
         ref_name: None,
@@ -381,8 +398,6 @@ async fn marketplace_list_json_includes_configured_git_marketplace_source() -> R
     write_plugins_enabled_config(codex_home.path())?;
     write_marketplace_source(&marketplace_root)?;
     let update = MarketplaceConfigUpdate {
-        last_updated: "2026-06-04T08:39:49Z",
-        last_revision: Some("abc123"),
         source_type: "git",
         source: "https://example.com/acme/agent-skills.git",
         ref_name: None,
@@ -430,8 +445,6 @@ async fn marketplace_list_json_keys_configured_source_by_root() -> Result<()> {
     write_marketplace_source(home.path())?;
     write_marketplace_source(&marketplace_root)?;
     let update = MarketplaceConfigUpdate {
-        last_updated: "2026-06-04T08:39:49Z",
-        last_revision: Some("abc123"),
         source_type: "git",
         source: "https://example.com/acme/agent-skills.git",
         ref_name: None,
@@ -616,7 +629,7 @@ async fn plugin_list_prints_plugins_in_a_table() -> Result<()> {
         .stdout(contains("PLUGIN"))
         .stdout(contains("STATUS"))
         .stdout(contains("VERSION"))
-        .stdout(contains("PATH"))
+        .stdout(contains("SOURCE"))
         .stdout(contains(marketplace_manifest.display().to_string()))
         .stdout(contains("sample@debug"))
         .stdout(contains("not installed"))
@@ -679,8 +692,6 @@ async fn plugin_list_json_includes_configured_git_marketplace_source() -> Result
     write_plugins_enabled_config(codex_home.path())?;
     write_marketplace_source(&marketplace_root)?;
     let update = MarketplaceConfigUpdate {
-        last_updated: "2026-06-04T08:39:49Z",
-        last_revision: Some("abc123"),
         source_type: "git",
         source: "https://example.com/acme/agent-skills.git",
         ref_name: None,
@@ -1112,5 +1123,755 @@ async fn plugin_add_rejects_cached_plugins_without_authorizing_marketplace_snaps
             "plugin `sample` was not found in marketplace `debug`",
         ));
 
+    Ok(())
+}
+
+const REMOTE_ID: &str = "b1234567-89ab-4cde-8f01-234567890abc";
+const MARKETPLACE: &str = "openai-curated-remote";
+const PLUGIN_KEY: &str = "sample@openai-curated-remote";
+
+fn sample_remote_plugin_bundle() -> Result<Vec<u8>> {
+    let mut archive = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
+    for (path, contents) in [
+        (
+            ".codex-plugin/plugin.json",
+            r#"{"name":"sample","version":"1.2.3"}"#,
+        ),
+        (
+            "skills/sample/SKILL.md",
+            "---\nname: sample\ndescription: Sample remote skill\n---\nSample instructions.\n",
+        ),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(/*mode*/ 0o644);
+        header.set_cksum();
+        archive.append_data(&mut header, path, contents.as_bytes())?;
+    }
+    Ok(archive.into_inner()?.finish()?)
+}
+
+struct RemoteMarketplaceFixture {
+    home: TempDir,
+    server: MockServer,
+    plugin: Value,
+}
+
+impl RemoteMarketplaceFixture {
+    async fn new() -> Result<Self> {
+        let home = TempDir::new()?;
+        let server = MockServer::start().await;
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!(
+                "cli_auth_credentials_store = 'file'\nchatgpt_base_url = '{}/backend-api'\n[features]\nplugins = true\nremote_plugin = true\n",
+                server.uri()
+            ),
+        )?;
+        write_chatgpt_auth(
+            home.path(),
+            ChatGptAuthFixture::new("chatgpt-token")
+                .account_id("account-123")
+                .chatgpt_account_id("account-123"),
+            AuthCredentialsStoreMode::File,
+        )?;
+        let plugin = json!({
+            "id": REMOTE_ID, "name": "sample", "scope": "GLOBAL",
+            "installation_policy": "AVAILABLE", "authentication_policy": "ON_USE",
+            "release": {"version": "1.2.3", "display_name": "Sample", "description": "Remote sample",
+                "interface": {}, "bundle_download_url": format!("{}/bundle.tar.gz", server.uri())}
+        });
+        Mock::given(method("GET"))
+            .and(path("/backend-api/ps/plugins/list"))
+            .and(query_param("scope", "GLOBAL"))
+            .and(header("authorization", "Bearer chatgpt-token"))
+            .and(header("chatgpt-account-id", "account-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"plugins": [plugin.clone()], "pagination": {"next_page_token": null}}),
+            ))
+            .mount(&server)
+            .await;
+        Ok(Self {
+            home,
+            server,
+            plugin,
+        })
+    }
+
+    fn write_local_curated_marketplace(&self) -> Result<Value> {
+        let source = canonicalize_existing_preserving_symlinks(self.home.path())?
+            .join(".tmp")
+            .join("plugins");
+        let mut manifest = json!({
+            "name": "openai-curated",
+            "plugins": [{
+                "name": "sample",
+                "source": {"source": "local", "path": "./plugins/sample"}
+            }]
+        });
+        write_marketplace_source_with_manifest(&source, &manifest.to_string())?;
+        std::fs::write(
+            self.home.path().join(".tmp").join("plugins.sha"),
+            "local-curated",
+        )?;
+        manifest["name"] = json!("openai-api-curated");
+        std::fs::write(
+            source
+                .join(".agents")
+                .join("plugins")
+                .join("api_marketplace.json"),
+            manifest.to_string(),
+        )?;
+        Ok(json!({
+            "pluginId": "sample@openai-curated", "name": "sample",
+            "marketplaceName": "openai-curated", "version": "1.2.3",
+            "installed": false, "enabled": false,
+            "source": {"source": "local", "path": source.join("plugins").join("sample")},
+            "installPolicy": "AVAILABLE", "authPolicy": "ON_INSTALL"
+        }))
+    }
+
+    async fn run(&self, args: &[&str]) -> Result<Output> {
+        Ok(Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
+            .current_dir(self.home.path())
+            .env("CODEX_HOME", self.home.path())
+            .env("HOME", self.home.path())
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("CODEX_API_KEY")
+            .env_remove("CODEX_ACCESS_TOKEN")
+            .env("CODEX_TEST_ALLOW_HTTP_REMOTE_PLUGIN_BUNDLE_DOWNLOADS", "1")
+            .args(args)
+            .output()
+            .await?)
+    }
+
+    async fn success(&self, args: &[&str]) -> Result<String> {
+        let output = self.run(args).await?;
+        ensure!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?)
+    }
+}
+
+#[tokio::test]
+async fn remote_plugin_listing_replaces_local_curated_catalog() -> Result<()> {
+    let fixture = RemoteMarketplaceFixture::new().await?;
+    let mut local_plugin = fixture.write_local_curated_marketplace()?;
+    fixture
+        .success(&["plugin", "add", "sample@openai-curated"])
+        .await?;
+    local_plugin["installed"] = json!(true);
+    local_plugin["enabled"] = json!(true);
+    local_plugin["version"] = json!("local-curated");
+    let mut installed_plugin = fixture.plugin.clone();
+    installed_plugin["enabled"] = json!(true);
+    Mock::given(path("/backend-api/ps/plugins/installed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "plugins": [installed_plugin], "pagination": {"next_page_token": null}
+        })))
+        .mount(&fixture.server)
+        .await;
+
+    let listed = fixture
+        .success(&["plugin", "list", "--available", "--json"])
+        .await?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&listed)?,
+        json!({"installed": [{
+            "pluginId": PLUGIN_KEY, "name": "sample", "marketplaceName": MARKETPLACE,
+            "version": "1.2.3", "installed": true, "enabled": true,
+            "source": {"source": "remote", "id": REMOTE_ID},
+            "installPolicy": "AVAILABLE", "authPolicy": "ON_USE"
+        }], "available": []})
+    );
+    let table = fixture.success(&["plugin", "list"]).await?;
+    insta::assert_snapshot!(table, @r"
+    Marketplace `openai-curated-remote`
+    Remote catalog
+
+    PLUGIN                        STATUS              VERSION  SOURCE
+    sample@openai-curated-remote  installed, enabled  1.2.3    b1234567-89ab-4cde-8f01-234567890abc
+    ");
+
+    fixture.server.reset().await;
+    let listed = fixture
+        .success(&["plugin", "list", "-m", "openai-curated", "--json"])
+        .await?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&listed)?,
+        json!({"installed": [local_plugin], "available": []})
+    );
+    assert!(fixture.server.received_requests().await.unwrap().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_plugin_listing_preserves_local_curated_only_when_fetch_fails() -> Result<()> {
+    for status in [200, 403] {
+        let fixture = RemoteMarketplaceFixture::new().await?;
+        fixture.server.reset().await;
+        let local_plugin = fixture.write_local_curated_marketplace()?;
+        let response = ResponseTemplate::new(status).set_body_json(json!({
+            "plugins": [], "pagination": {"next_page_token": null}
+        }));
+        let _catalog = Mock::given(path("/backend-api/ps/plugins/list"))
+            .respond_with(response)
+            .mount_as_scoped(&fixture.server)
+            .await;
+        Mock::given(path("/backend-api/ps/plugins/installed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "plugins": [], "pagination": {"next_page_token": null}
+            })))
+            .mount(&fixture.server)
+            .await;
+
+        let listed = fixture
+            .success(&["plugin", "list", "--available", "--json"])
+            .await?;
+        let available = if status == 200 {
+            Vec::new()
+        } else {
+            vec![local_plugin]
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&listed)?,
+            json!({"installed": [], "available": available}),
+            "catalog response status: {status}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_plugin_add_list_and_remove() -> Result<()> {
+    let fixture = RemoteMarketplaceFixture::new().await?;
+    let installed = Arc::new(AtomicBool::new(false));
+    let installed_for_list = Arc::clone(&installed);
+    let mut installed_plugin = fixture.plugin.clone();
+    installed_plugin["enabled"] = json!(true);
+    Mock::given(path("/backend-api/ps/plugins/installed"))
+        .respond_with(move |_: &wiremock::Request| {
+            let plugins = if installed_for_list.load(Ordering::SeqCst) {
+                vec![installed_plugin.clone()]
+            } else {
+                Vec::new()
+            };
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"plugins": plugins, "pagination": {"next_page_token": null}}))
+        })
+        .mount(&fixture.server)
+        .await;
+    Mock::given(path(format!("/backend-api/ps/plugins/{REMOTE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&fixture.plugin))
+        .mount(&fixture.server)
+        .await;
+    Mock::given(path("/bundle.tar.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(sample_remote_plugin_bundle()?))
+        .expect(1)
+        .mount(&fixture.server)
+        .await;
+    let installed_root = canonicalize_existing_preserving_symlinks(fixture.home.path())?
+        .join("plugins")
+        .join("cache")
+        .join(MARKETPLACE)
+        .join("sample")
+        .join("1.2.3");
+    let manifest = installed_root.join(".codex-plugin/plugin.json");
+    let installed_for_add = Arc::clone(&installed);
+    Mock::given(method("POST"))
+        .and(path(format!("/backend-api/ps/plugins/{REMOTE_ID}/install")))
+        .and(query_param("includeAppsNeedingAuth", "true"))
+        .and(header("authorization", "Bearer chatgpt-token"))
+        .respond_with(move |_: &wiremock::Request| {
+            assert!(
+                manifest.is_file(),
+                "cache must exist before backend install"
+            );
+            installed_for_add.store(true, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({"id": REMOTE_ID, "enabled": true}))
+        })
+        .expect(1)
+        .mount(&fixture.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/backend-api/ps/plugins/{REMOTE_ID}/uninstall"
+        )))
+        .and(header("authorization", "Bearer chatgpt-token"))
+        .respond_with(move |_: &wiremock::Request| {
+            installed.store(false, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({"id": REMOTE_ID, "enabled": false}))
+        })
+        .expect(1)
+        .mount(&fixture.server)
+        .await;
+
+    let available = json!({
+        "pluginId": PLUGIN_KEY, "name": "sample", "marketplaceName": MARKETPLACE,
+        "version": "1.2.3", "installed": false, "enabled": false,
+        "source": {"source": "remote", "id": REMOTE_ID}, "installPolicy": "AVAILABLE", "authPolicy": "ON_USE"
+    });
+    let listed = fixture
+        .success(&["plugin", "list", "--available", "--json"])
+        .await?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&listed)?,
+        json!({"installed": [], "available": [available.clone()]})
+    );
+    let table = fixture
+        .success(&["plugin", "list", "-m", MARKETPLACE])
+        .await?;
+    insta::assert_snapshot!(table, @r"
+    Marketplace `openai-curated-remote`
+    Remote catalog
+
+    PLUGIN                        STATUS         VERSION  SOURCE
+    sample@openai-curated-remote  not installed  1.2.3    b1234567-89ab-4cde-8f01-234567890abc
+    ");
+    let added = fixture
+        .success(&["plugin", "add", PLUGIN_KEY, "--json"])
+        .await?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&added)?,
+        json!({
+            "pluginId": PLUGIN_KEY, "name": "sample", "marketplaceName": MARKETPLACE,
+            "version": "1.2.3", "installedPath": installed_root, "authPolicy": "ON_USE"
+        })
+    );
+    assert_eq!(
+        fixture
+            .server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/backend-api/ps/plugins/list")
+            .count(),
+        1,
+        "installing a cached name must not refetch the catalog"
+    );
+    assert!(installed_root.join("skills/sample/SKILL.md").is_file());
+    let mut expected = available;
+    expected["installed"] = json!(true);
+    expected["enabled"] = json!(true);
+    let listed = fixture
+        .success(&["plugin", "list", "-m", MARKETPLACE, "--json"])
+        .await?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&listed)?,
+        json!({"installed": [expected], "available": []})
+    );
+    let _delisted = Mock::given(path("/backend-api/ps/plugins/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"plugins": [], "pagination": {"next_page_token": null}})),
+        )
+        .mount_as_scoped(&fixture.server)
+        .await;
+    let removed = fixture
+        .success(&[
+            "-c",
+            "features.remote_plugin=false",
+            "plugin",
+            "remove",
+            "sample",
+            "-m",
+            MARKETPLACE,
+            "--json",
+        ])
+        .await?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&removed)?,
+        json!({"pluginId": PLUGIN_KEY, "name": "sample", "marketplaceName": MARKETPLACE})
+    );
+    assert!(!installed_root.exists());
+    let listed = fixture.success(&["plugin", "list", "--json"]).await?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&listed)?,
+        json!({"installed": [], "available": []})
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_plugin_add_refreshes_cached_catalog_on_name_miss() -> Result<()> {
+    for (remote_plugin_config, collection) in [
+        ("features.remote_plugin=true", None),
+        ("features.remote_plugin=false", Some("vertical")),
+    ] {
+        let fixture = RemoteMarketplaceFixture::new().await?;
+        fixture.server.reset().await;
+        let published = Arc::new(AtomicBool::new(false));
+        let published_for_list = Arc::clone(&published);
+        let plugin = fixture.plugin.clone();
+        Mock::given(method("GET"))
+            .and(path("/backend-api/ps/plugins/list"))
+            .and(query_param("scope", "GLOBAL"))
+            .respond_with(move |_: &wiremock::Request| {
+                let plugins = if published_for_list.load(Ordering::SeqCst) {
+                    vec![plugin.clone()]
+                } else {
+                    Vec::new()
+                };
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "plugins": plugins, "pagination": {"next_page_token": null}
+                }))
+            })
+            .expect(2)
+            .mount(&fixture.server)
+            .await;
+        Mock::given(path("/backend-api/ps/plugins/installed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "plugins": [], "pagination": {"next_page_token": null}
+            })))
+            .mount(&fixture.server)
+            .await;
+        Mock::given(path(format!("/backend-api/ps/plugins/{REMOTE_ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&fixture.plugin))
+            .expect(1)
+            .mount(&fixture.server)
+            .await;
+        Mock::given(path("/bundle.tar.gz"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(sample_remote_plugin_bundle()?))
+            .expect(1)
+            .mount(&fixture.server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/backend-api/ps/plugins/{REMOTE_ID}/install")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"id": REMOTE_ID, "enabled": true})),
+            )
+            .expect(1)
+            .mount(&fixture.server)
+            .await;
+
+        for is_published in [false, true] {
+            published.store(is_published, Ordering::SeqCst);
+            let listed = fixture
+                .success(&[
+                    "-c",
+                    remote_plugin_config,
+                    "plugin",
+                    "list",
+                    "-m",
+                    MARKETPLACE,
+                    "--available",
+                    "--json",
+                ])
+                .await?;
+            assert_eq!(
+                serde_json::from_str::<Value>(&listed)?,
+                json!({"installed": [], "available": []}),
+                "normal listing must keep using the fresh catalog cache"
+            );
+        }
+        let added = fixture
+            .success(&[
+                "-c",
+                remote_plugin_config,
+                "plugin",
+                "add",
+                PLUGIN_KEY,
+                "--json",
+            ])
+            .await?;
+        let installed_root = canonicalize_existing_preserving_symlinks(fixture.home.path())?
+            .join("plugins")
+            .join("cache")
+            .join(MARKETPLACE)
+            .join("sample")
+            .join("1.2.3");
+        assert_eq!(
+            serde_json::from_str::<Value>(&added)?,
+            json!({
+                "pluginId": PLUGIN_KEY, "name": "sample", "marketplaceName": MARKETPLACE,
+                "version": "1.2.3", "installedPath": installed_root, "authPolicy": "ON_USE"
+            })
+        );
+        assert!(
+            installed_root
+                .join("skills")
+                .join("sample")
+                .join("SKILL.md")
+                .is_file()
+        );
+        let requests = fixture.server.received_requests().await.unwrap();
+        let catalog_collections = requests
+            .iter()
+            .filter(|request| request.url.path() == "/backend-api/ps/plugins/list")
+            .map(|request| {
+                request
+                    .url
+                    .query_pairs()
+                    .find_map(|(key, value)| (key == "collection").then(|| value.into_owned()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(catalog_collections, vec![collection.map(str::to_owned); 2]);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_plugin_add_limits_catalog_refresh_without_mutation() -> Result<()> {
+    enum CatalogCache {
+        Missing,
+        Fresh,
+        Expired,
+    }
+
+    for (remote_plugin_config, collection) in [
+        ("features.remote_plugin=true", None),
+        ("features.remote_plugin=false", Some("vertical")),
+    ] {
+        for (cache, plugin_count, status, catalog_fetches, error) in [
+            (
+                CatalogCache::Missing,
+                0,
+                200,
+                1,
+                "was not found in remote marketplace",
+            ),
+            (
+                CatalogCache::Fresh,
+                0,
+                200,
+                2,
+                "was not found in remote marketplace",
+            ),
+            (
+                CatalogCache::Expired,
+                0,
+                200,
+                2,
+                "was not found in remote marketplace",
+            ),
+            (
+                CatalogCache::Missing,
+                2,
+                200,
+                1,
+                "matched multiple remote plugins",
+            ),
+            (
+                CatalogCache::Missing,
+                0,
+                403,
+                1,
+                "failed to list remote marketplace plugins",
+            ),
+        ] {
+            let fixture = RemoteMarketplaceFixture::new().await?;
+            fixture.server.reset().await;
+            let mut duplicate = fixture.plugin.clone();
+            duplicate["id"] = json!("c1234567-89ab-4cde-8f01-234567890abc");
+            let plugins = [fixture.plugin.clone(), duplicate]
+                .into_iter()
+                .take(plugin_count)
+                .collect::<Vec<_>>();
+            Mock::given(path("/backend-api/ps/plugins/list"))
+                .and(query_param("scope", "GLOBAL"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+                    "plugins": plugins, "pagination": {"next_page_token": null}
+                })))
+                .expect(catalog_fetches)
+                .mount(&fixture.server)
+                .await;
+            Mock::given(path("/backend-api/ps/plugins/installed"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "plugins": [], "pagination": {"next_page_token": null}
+                })))
+                .mount(&fixture.server)
+                .await;
+            if !matches!(cache, CatalogCache::Missing) {
+                let listed = fixture
+                    .success(&[
+                        "-c",
+                        remote_plugin_config,
+                        "plugin",
+                        "list",
+                        "-m",
+                        MARKETPLACE,
+                        "--available",
+                        "--json",
+                    ])
+                    .await?;
+                assert_eq!(
+                    serde_json::from_str::<Value>(&listed)?,
+                    json!({"installed": [], "available": []})
+                );
+            }
+            if matches!(cache, CatalogCache::Expired) {
+                let cache_paths = std::fs::read_dir(
+                    fixture
+                        .home
+                        .path()
+                        .join("cache")
+                        .join("remote_plugin_catalog"),
+                )?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<std::io::Result<Vec<_>>>()?;
+                assert_eq!(cache_paths.len(), 1);
+                let cache_path = &cache_paths[0];
+                let mut cached_catalog: Value =
+                    serde_json::from_slice(&std::fs::read(cache_path)?)?;
+                cached_catalog["fetched_at"] = json!("2000-01-01T00:00:00Z");
+                std::fs::write(cache_path, serde_json::to_vec(&cached_catalog)?)?;
+            }
+            let output = fixture
+                .run(&["-c", remote_plugin_config, "plugin", "add", PLUGIN_KEY])
+                .await?;
+            assert!(!output.status.success());
+            let stderr = String::from_utf8(output.stderr)?;
+            assert!(stderr.contains(error), "{stderr}");
+            let requests = fixture.server.received_requests().await.unwrap();
+            let catalog_collections = requests
+                .iter()
+                .filter(|request| request.url.path() == "/backend-api/ps/plugins/list")
+                .map(|request| {
+                    request
+                        .url
+                        .query_pairs()
+                        .find_map(|(key, value)| (key == "collection").then(|| value.into_owned()))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                catalog_collections,
+                vec![collection.map(str::to_owned); catalog_fetches as usize]
+            );
+            assert!(requests.iter().all(|request| {
+                request.method == "GET"
+                    && matches!(
+                        request.url.path(),
+                        "/backend-api/ps/plugins/list" | "/backend-api/ps/plugins/installed"
+                    )
+            }));
+            assert!(
+                !fixture
+                    .home
+                    .path()
+                    .join("plugins")
+                    .join("cache")
+                    .join(MARKETPLACE)
+                    .exists()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_plugin_install_checks_policy_and_bundle_before_mutation() -> Result<()> {
+    let fixture = RemoteMarketplaceFixture::new().await?;
+    Mock::given(path("/backend-api/ps/plugins/installed"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"plugins": [], "pagination": {"next_page_token": null}})),
+        )
+        .mount(&fixture.server)
+        .await;
+    for (field, value, error) in [
+        ("status", "DISABLED_BY_ADMIN", "disabled by admin"),
+        (
+            "installation_policy",
+            "NOT_AVAILABLE",
+            "not available for install",
+        ),
+        ("status", "ENABLED", "failed to read plugin bundle tar"),
+    ] {
+        let mut plugin = fixture.plugin.clone();
+        plugin[field] = json!(value);
+        let _detail = Mock::given(path(format!("/backend-api/ps/plugins/{REMOTE_ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(plugin))
+            .mount_as_scoped(&fixture.server)
+            .await;
+        let _bundle = Mock::given(path("/bundle.tar.gz"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"bad gzip"))
+            .mount_as_scoped(&fixture.server)
+            .await;
+        let output = fixture
+            .run(&["plugin", "add", "sample", "-m", MARKETPLACE])
+            .await?;
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(stderr.contains(error), "{stderr}");
+    }
+    let requests = fixture.server.received_requests().await.unwrap();
+    assert!(requests.iter().all(|request| request.method != "POST"));
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/backend-api/ps/plugins/list")
+            .count(),
+        1,
+        "installation policy and bundle failures must not refetch the catalog"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_plugin_listing_uses_collection_when_remote_catalog_is_disabled() -> Result<()> {
+    let fixture = RemoteMarketplaceFixture::new().await?;
+    let mut local_plugin = fixture.write_local_curated_marketplace()?;
+    Mock::given(path("/backend-api/ps/plugins/installed"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"plugins": [], "pagination": {"next_page_token": null}})),
+        )
+        .mount(&fixture.server)
+        .await;
+    let listed = fixture
+        .success(&[
+            "-c",
+            "features.remote_plugin=false",
+            "plugin",
+            "list",
+            "--available",
+            "--json",
+        ])
+        .await?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&listed)?,
+        json!({"installed": [], "available": [local_plugin.clone(), {
+            "pluginId": PLUGIN_KEY, "name": "sample", "marketplaceName": MARKETPLACE,
+            "version": "1.2.3", "installed": false, "enabled": false,
+            "source": {"source": "remote", "id": REMOTE_ID},
+            "installPolicy": "AVAILABLE", "authPolicy": "ON_USE"
+        }]})
+    );
+    let requests = fixture.server.received_requests().await.unwrap();
+    let listing = requests
+        .iter()
+        .find(|request| request.url.path().ends_with("/list"))
+        .unwrap();
+    assert!(
+        listing
+            .url
+            .query_pairs()
+            .any(|(key, value)| key == "collection" && value == "vertical")
+    );
+    fixture.server.reset().await;
+    fixture
+        .success(&["-c", "features.plugins=false", "plugin", "list"])
+        .await?;
+    fixture
+        .success(&["plugin", "list", "-m", "local-only"])
+        .await?;
+    assert!(fixture.server.received_requests().await.unwrap().is_empty());
+    std::fs::remove_file(fixture.home.path().join("auth.json"))?;
+    let output = fixture.run(&["plugin", "list", "-m", MARKETPLACE]).await?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("chatgpt authentication required"));
+    let listed = fixture
+        .success(&["plugin", "list", "--available", "--json"])
+        .await?;
+    local_plugin["pluginId"] = json!("sample@openai-api-curated");
+    local_plugin["marketplaceName"] = json!("openai-api-curated");
+    assert_eq!(
+        serde_json::from_str::<Value>(&listed)?,
+        json!({"installed": [], "available": [local_plugin]})
+    );
     Ok(())
 }

@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use once_cell::sync::Lazy;
 use regex::Regex;
 use shlex::split as shlex_split;
@@ -335,10 +333,15 @@ fn looks_like_url(token: &str) -> bool {
 }
 
 fn executable_basename(exe: &str) -> Option<String> {
-    Path::new(exe)
-        .file_name()
-        .and_then(|osstr| osstr.to_str())
-        .map(str::to_ascii_lowercase)
+    let name = exe
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())?;
+    let name = match name.as_bytes() {
+        [drive, b':', ..] if drive.is_ascii_alphabetic() => &name[2..],
+        _ => name,
+    };
+    (!name.is_empty()).then(|| name.to_ascii_lowercase())
 }
 
 fn is_powershell_executable(exe: &str) -> bool {

@@ -190,7 +190,7 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
     /// a mapped event, hits `Pending`, or sees EOF/error. When the broker is paused, it drops
     /// the underlying stream and returns `Pending` to fully release stdin.
     pub fn poll_crossterm_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<TuiEvent>> {
-        // Some crossterm events map to None (e.g. FocusLost, mouse); loop so we keep polling
+        // Some crossterm events map to None (e.g. mouse); loop so we keep polling
         // until we return a mapped event, hit Pending, or see EOF/error.
         loop {
             let poll_result = {
@@ -275,11 +275,11 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
                 self.terminal_focused.store(true, Ordering::Relaxed);
                 // Keep the startup-cached palette: querying terminal colors here blocks the
                 // input loop, and a direct probe would discard keys typed during the refresh.
-                Some(TuiEvent::Draw)
+                Some(TuiEvent::FocusGained)
             }
             Event::FocusLost => {
                 self.terminal_focused.store(false, Ordering::Relaxed);
-                None
+                Some(TuiEvent::FocusLost)
             }
             _ => None,
         }
@@ -323,6 +323,8 @@ mod tests {
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyModifiers;
+    use crossterm::event::MouseEvent;
+    use crossterm::event::MouseEventKind;
     use pretty_assertions::assert_eq;
     use std::task::Context;
     use std::task::Poll;
@@ -419,7 +421,12 @@ mod tests {
         let (broker, handle, _draw_tx, draw_rx, terminal_focused) = setup();
         let mut stream = make_stream(broker, draw_rx, terminal_focused);
 
-        handle.send(Ok(Event::FocusLost));
+        handle.send(Ok(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })));
         handle.send(Ok(Event::Key(KeyEvent::new(
             KeyCode::Char('a'),
             KeyModifiers::NONE,
@@ -435,6 +442,34 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn focus_lost_is_forwarded_and_updates_terminal_state() {
+        let (broker, handle, _draw_tx, draw_rx, terminal_focused) = setup();
+        let mut stream = make_stream(broker, draw_rx, terminal_focused.clone());
+
+        handle.send(Ok(Event::FocusLost));
+
+        assert!(matches!(stream.next().await, Some(TuiEvent::FocusLost)));
+        assert!(!terminal_focused.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn focus_lost_consumed_by_startup_remains_visible_to_the_tui() {
+        let (broker, handle, _draw_tx, draw_rx, terminal_focused) = setup();
+        let mut tui = crate::tui::test_support::make_test_tui().expect("test tui");
+        tui.terminal_focused = terminal_focused.clone();
+        let mut startup_events = make_stream(broker, draw_rx, terminal_focused);
+
+        assert!(tui.is_terminal_focused());
+        handle.send(Ok(Event::FocusLost));
+
+        assert!(matches!(
+            startup_events.next().await,
+            Some(TuiEvent::FocusLost)
+        ));
+        assert!(!tui.is_terminal_focused());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn focus_gained_preserves_already_queued_key() {
         let (broker, handle, _draw_tx, draw_rx, terminal_focused) = setup();
         terminal_focused.store(false, Ordering::Relaxed);
@@ -444,7 +479,7 @@ mod tests {
         handle.send(Ok(Event::FocusGained));
         handle.send(Ok(Event::Key(expected_key)));
 
-        assert!(matches!(stream.next().await, Some(TuiEvent::Draw)));
+        assert!(matches!(stream.next().await, Some(TuiEvent::FocusGained)));
         assert!(terminal_focused.load(Ordering::Relaxed));
         assert!(matches!(
             &*broker

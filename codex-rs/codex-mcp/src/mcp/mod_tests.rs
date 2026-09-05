@@ -16,6 +16,7 @@ use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub(crate) fn test_mcp_config(codex_home: PathBuf) -> McpConfig {
     McpConfig {
@@ -23,15 +24,18 @@ pub(crate) fn test_mcp_config(codex_home: PathBuf) -> McpConfig {
         apps_mcp_product_sku: None,
         codex_home,
         mcp_oauth_credentials_store_mode: OAuthCredentialsStoreMode::default(),
+        oauth_refresh_mode: McpOAuthRefreshMode::Legacy,
         auth_keyring_backend_kind: AuthKeyringBackendKind::default(),
         mcp_oauth_callback_port: None,
         mcp_oauth_callback_url: None,
+        optional_mcp_startup_grace: DEFAULT_OPTIONAL_MCP_STARTUP_GRACE,
         skill_mcp_dependency_install_enabled: true,
         approval_policy: Constrained::allow_any(AskForApproval::OnRequest),
         permission_profile: PermissionProfile::default(),
         config_layer_stack: codex_config::ConfigLayerStack::default(),
         approvals_reviewer: codex_config::types::ApprovalsReviewer::default(),
         environment_cwds: HashMap::new(),
+        server_permission_profiles: HashMap::new(),
         codex_linux_sandbox_exe: None,
         use_legacy_landlock: false,
         apps_enabled: false,
@@ -44,11 +48,66 @@ pub(crate) fn test_mcp_config(codex_home: PathBuf) -> McpConfig {
     }
 }
 
+pub(crate) fn test_elicitation_config(
+    server_name: &str,
+    approval_policy: AskForApproval,
+    permission_profile: PermissionProfile,
+) -> Arc<McpConfig> {
+    let mut config = test_mcp_config(PathBuf::new());
+    config.approval_policy = Constrained::allow_any(approval_policy);
+    config.permission_profile = permission_profile.clone();
+    config
+        .server_permission_profiles
+        .insert(server_name.to_string(), permission_profile);
+    Arc::new(config)
+}
+
 #[test]
 fn qualified_mcp_tool_name_prefix_sanitizes_server_names_without_lowercasing() {
     assert_eq!(
         qualified_mcp_tool_name_prefix("Some-Server"),
         "mcp__Some_Server__".to_string()
+    );
+}
+
+#[test]
+fn mcp_server_permissions_handle_unattached_and_threadless_servers() {
+    let mut config = test_mcp_config(PathBuf::new());
+    config.permission_profile = PermissionProfile::Disabled;
+    let mut missing_server = codex_apps_mcp_server_config(
+        "https://example.com",
+        /*apps_mcp_product_sku*/ None,
+        /*originator*/ None,
+    );
+    missing_server.environment_id = "missing".to_string();
+    let mut selected_server = missing_server.clone();
+    selected_server.environment_id = "unattached".to_string();
+    let mut catalog = ResolvedMcpCatalog::builder();
+    catalog.register(McpServerRegistration::from_config(
+        "missing".to_string(),
+        missing_server,
+    ));
+    catalog.register(McpServerRegistration::from_selected_plugin(
+        "selected".to_string(),
+        McpPluginAttribution::new("selected@test".to_string(), "Selected".to_string()),
+        /*selection_order*/ 0,
+        selected_server,
+    ));
+    config.mcp_server_catalog = catalog.build();
+    let servers = effective_mcp_servers(&config, /*auth*/ None);
+    assert_eq!(config.permission_profile_for_server("selected"), None);
+    config.set_server_permission_profiles(&servers, std::iter::empty());
+
+    assert_eq!(
+        config.permission_profile_for_server("selected"),
+        Some(&PermissionProfile::Disabled)
+    );
+    assert_eq!(config.permission_profile_for_server("missing"), None);
+
+    let config = config.for_threadless_operations(&servers);
+    assert_eq!(
+        config.permission_profile_for_server("selected"),
+        Some(&PermissionProfile::default())
     );
 }
 

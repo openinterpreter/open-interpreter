@@ -36,7 +36,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
         )
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move { handle_spawn_agent(invocation).await.map(boxed_tool_output) })
     }
 }
@@ -86,14 +89,8 @@ async fn handle_spawn_agent(
             }),
         )
         .await;
-    let mut config = build_agent_spawn_config(
-        &session.get_base_instructions().await,
-        turn.as_ref(),
-        step_context.environments.primary(),
-    )?;
-    if let Some(service_tier) = args.service_tier.as_ref() {
-        config.service_tier = Some(service_tier.clone());
-    }
+    let mut config =
+        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
     if args.fork_context {
         reject_full_fork_agent_type_override(role_name)?;
     }
@@ -108,18 +105,8 @@ async fn handle_spawn_agent(
     if !args.fork_context {
         apply_spawn_agent_role(&session, &mut config, role_name).await?;
     }
-    apply_spawn_agent_service_tier(
-        &session,
-        &mut config,
-        turn.config.service_tier.as_deref(),
-        args.service_tier.as_deref(),
-    )
-    .await?;
-    apply_spawn_agent_runtime_overrides(
-        &mut config,
-        turn.as_ref(),
-        step_context.environments.primary(),
-    )?;
+    apply_spawn_agent_service_tier(&session, &mut config).await?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
 
     let result = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
         config,
@@ -139,6 +126,7 @@ async fn handle_spawn_agent(
             root_turn_id: turn.turn_metadata_state.root_turn_id(),
             environments: Some(step_context.environments.to_selections()),
             multi_agent_v2_usage_hints: None,
+            cyber_access_program: turn.cyber_access_program,
         },
     ))
     .await
@@ -240,7 +228,6 @@ struct SpawnAgentArgs {
     agent_type: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
-    service_tier: Option<String>,
     #[serde(default)]
     fork_context: bool,
 }
@@ -252,7 +239,7 @@ pub(crate) struct SpawnAgentResult {
 }
 
 impl ToolOutput for SpawnAgentResult {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         tool_output_json_text(self, "spawn_agent")
     }
 

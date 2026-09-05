@@ -103,6 +103,18 @@ Use `wire_api = "responses"` for OpenAI Responses-compatible providers,
 `wire_api = "chat"` for OpenAI-compatible chat-completions providers, and
 `wire_api = "messages"` only for Anthropic Messages-compatible providers.
 
+For a one-off run, select Chat Completions directly from the CLI:
+
+```shell
+interpreter --chat-completions
+interpreter exec --chat-completions "Summarize this repository"
+```
+
+The flag overrides the selected provider's request shape for that invocation.
+It composes with `model_provider`, `--oss`, and `--local-provider`; it does not
+change the provider's base URL, credentials, or model. For a persistent setup,
+keep `wire_api = "chat"` in the provider definition instead.
+
 For example, the hosted [app.nz](https://app.nz/) gateway is an
 OpenAI-compatible chat-completions provider whose `app/auto` model auto-routes
 across upstream providers:

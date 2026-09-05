@@ -25,7 +25,7 @@ use crossterm::event::KeyModifiers;
 use std::time::Duration;
 use tokio::time::Instant;
 
-const FIRST_DISPATCH_FUNCTION_KEY: u8 = 128;
+const FIRST_DISPATCH_FUNCTION_KEY: u8 = codex_config::types::MAX_FUNCTION_KEY + 1;
 const LAST_DISPATCH_FUNCTION_KEY: u8 = u8::MAX;
 const LIST_RESERVED_BINDINGS: &[(&str, KeyBinding)] = &[
     ("cancel", ctrl(KeyCode::Char('c'))),
@@ -67,6 +67,8 @@ const fn context_bit(context: KeymapContext) -> u16 {
         KeymapContext::Pager => 7,
         KeymapContext::List => 8,
         KeymapContext::Approval => 9,
+        KeymapContext::Agents => 10,
+        KeymapContext::VimSearch => 11,
     }
 }
 
@@ -130,6 +132,42 @@ or a two-stroke chord such as `ctrl-x ctrl-t`.",
                 .configured_specs
                 .push((action, configured_specs));
         }
+
+        let g = crate::key_hint::plain(KeyCode::Char('g'));
+        let jump_top = KeyChord {
+            prefix: g,
+            completion: g,
+        };
+        for action in keymap_action_ids().filter(|action| {
+            matches!(
+                (action.context, action.action),
+                (KeymapContext::VimNormal, "jump_top")
+                    | (KeymapContext::VimOperator, "motion_jump_top")
+            )
+        }) {
+            if effective_configured_binding(keymap, action).is_some()
+                || keymap_chords.bindings.iter().any(|configured| {
+                    action.context.overlaps(configured.action.context)
+                        && configured.chord == jump_top
+                })
+                || keymap_action_ids()
+                    .filter(|configured| action.context.overlaps(configured.context))
+                    .filter_map(|configured| effective_configured_binding(keymap, configured))
+                    .flat_map(KeybindingsSpec::specs)
+                    .any(|spec| {
+                        parse_keybinding(spec.as_str())
+                            .is_some_and(|binding| binding.parts() == g.parts())
+                    })
+            {
+                continue;
+            }
+
+            keymap_chords.bindings.push(RuntimeChordBinding {
+                action,
+                chord: jump_top,
+                spec: "g g".to_string(),
+            });
+        }
         Ok(keymap_chords)
     }
 
@@ -161,7 +199,17 @@ or a two-stroke chord such as `ctrl-x ctrl-t`.",
             };
         }
 
-        super::primary_binding(bindings).map(crate::key_hint::ShortcutHint::Single)
+        super::primary_binding(bindings)
+            .map(crate::key_hint::ShortcutHint::Single)
+            .or_else(|| {
+                self.bindings
+                    .iter()
+                    .find(|binding| binding.action == action)
+                    .map(|binding| crate::key_hint::ShortcutHint::Chord {
+                        prefix: binding.chord.prefix,
+                        completion: binding.chord.completion,
+                    })
+            })
     }
 }
 
@@ -441,6 +489,15 @@ fn validate_reserved_strokes(binding: &RuntimeChordBinding) -> Result<(), String
         ));
     }
 
+    if binding.action.context == KeymapContext::Agents
+        && binding.chord.prefix.parts() == (KeyCode::Backspace, KeyModifiers::NONE)
+    {
+        return Err(format!(
+            "Invalid `{path}` = `{}`: `backspace` is reserved for editing task input.",
+            binding.spec
+        ));
+    }
+
     #[cfg(unix)]
     if strokes.contains(&crate::key_hint::ctrl(KeyCode::Char('z')).parts()) {
         return Err(format!(
@@ -458,9 +515,10 @@ Choose a different chord and retry.",
         | KeymapContext::Editor
         | KeymapContext::VimNormal
         | KeymapContext::VimOperator
+        | KeymapContext::VimSearch
         | KeymapContext::VimTextObject => MAIN_RESERVED_BINDINGS,
         KeymapContext::List => LIST_RESERVED_BINDINGS,
-        KeymapContext::Approval => &LIST_RESERVED_BINDINGS[..1],
+        KeymapContext::Agents | KeymapContext::Approval => &LIST_RESERVED_BINDINGS[..1],
     };
     if let Some((reserved_action, _)) = reserved.iter().find(|(_, reserved)| {
         binding.chord.prefix.parts() == reserved.parts()

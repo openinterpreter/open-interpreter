@@ -13,6 +13,8 @@ pub struct ElevatedSandboxProfileCaptureRequest<'a> {
     pub env_map: HashMap<String, String>,
     pub timeout_ms: Option<u64>,
     pub cancellation: Option<crate::WindowsSandboxCancellationToken>,
+    // TODO(anp): Reconcile this private-desktop copy with the supplied sandbox context
+    // (TurnEnvironment::sandbox_context for turns), preserving this launch snapshot.
     pub use_private_desktop: bool,
     pub proxy_enforced: bool,
     pub network_proxy_restricting_sid: Option<String>,
@@ -55,6 +57,7 @@ mod windows_impl {
     use codex_utils_absolute_path::AbsolutePathBuf;
     use std::fs::File;
     use std::path::Path;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
@@ -183,6 +186,28 @@ mod windows_impl {
         }
 
         (|| -> Result<CaptureResult> {
+            let desktop_policy = use_private_desktop
+                .then(|| {
+                    crate::desktop::DesktopPolicy::elevated(
+                        crate::setup::SandboxSetupRequest {
+                            permissions: &permissions,
+                            command_cwd: cwd,
+                            env_map: &env_map,
+                            codex_home,
+                            proxy_enforced,
+                        },
+                        crate::setup::SetupRootOverrides {
+                            read_roots: read_roots_override.map(<[PathBuf]>::to_vec),
+                            read_roots_include_platform_defaults,
+                            write_roots: write_roots_override.map(<[PathBuf]>::to_vec),
+                            deny_read_paths: Some(deny_read_paths_override.clone()),
+                            deny_write_paths: Some(deny_write_paths_override.clone()),
+                        },
+                        &cap_sids,
+                        network_proxy_restricting_sid.as_deref(),
+                    )
+                })
+                .transpose()?;
             let spawn_request = SpawnRequest {
                 command: command.clone(),
                 cwd: cwd.to_path_buf(),
@@ -197,6 +222,7 @@ mod windows_impl {
                 tty: false,
                 stdin_open: false,
                 use_private_desktop,
+                private_desktop_name: None,
             };
             let transport = retry_runner_spawn_once(
                 sandbox_creds,
@@ -208,6 +234,7 @@ mod windows_impl {
                         &sandbox_creds,
                         logs_base_dir,
                         spawn_request.clone(),
+                        desktop_policy.as_ref(),
                     )
                 },
                 || {

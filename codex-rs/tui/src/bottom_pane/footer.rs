@@ -107,6 +107,7 @@ const FOOTER_CONTEXT_GAP_COLS: u16 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FooterKeyHints {
+    pub(crate) agents: Option<ShortcutHint>,
     pub(crate) toggle_shortcuts: Option<ShortcutHint>,
     pub(crate) queue: Option<ShortcutHint>,
     pub(crate) insert_newline: Option<ShortcutHint>,
@@ -122,6 +123,7 @@ impl FooterKeyHints {
     #[cfg(test)]
     pub(crate) fn default_bindings() -> Self {
         Self {
+            agents: None,
             toggle_shortcuts: Some(key_hint::plain(KeyCode::Char('?')).into()),
             queue: Some(key_hint::plain(KeyCode::Tab).into()),
             insert_newline: Some(key_hint::ctrl(KeyCode::Char('j')).into()),
@@ -161,7 +163,7 @@ impl CollaborationModeIndicator {
 /// (for example, showing `QuitShortcutReminder` only while its timer is active).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FooterMode {
-    /// Single-line incremental history search prompt shown while Ctrl+R search is active.
+    /// Single-line query prompt for history recall or Vim buffer search.
     HistorySearch,
     /// Transient "press again to quit" reminder (Ctrl+C/Ctrl+D).
     QuitShortcutReminder,
@@ -313,6 +315,13 @@ fn left_side_line(
     match state.hint {
         SummaryHintKind::None => {}
         SummaryHintKind::Shortcuts => {
+            if let Some(key) = key_hints.agents {
+                line.push_span(key);
+                line.push_span(" for agents".dim());
+                if key_hints.toggle_shortcuts.is_some() {
+                    line.push_span(" · ".dim());
+                }
+            }
             if let Some(key) = key_hints.toggle_shortcuts {
                 line.push_span(key);
                 line.push_span(" for shortcuts".dim());
@@ -384,6 +393,19 @@ pub(crate) fn single_line_footer_layout(
         }
     };
     let state_width = |state: LeftSideState| -> u16 { state_line(state).width() as u16 };
+    if show_shortcuts_hint && key_hints.agents.is_some() {
+        let compact_line = left_side_line(
+            collaboration_mode_indicator,
+            default_state,
+            FooterKeyHints {
+                toggle_shortcuts: None,
+                ..key_hints
+            },
+        );
+        if can_show_left_with_context(area, compact_line.width() as u16, context_width) {
+            return (SummaryLeft::Custom(compact_line), true);
+        }
+    }
     // When the mode cycle hint is applicable (idle, non-queue mode), only show
     // the right-side context indicator if the "(shift+tab to cycle)" variant
     // can also fit.
@@ -788,6 +810,13 @@ pub(crate) fn passive_footer_status_line(props: &FooterProps) -> Option<Line<'st
         }
     }
 
+    if props.mode == FooterMode::ComposerEmpty
+        && let Some(key) = props.key_hints.agents
+        && let Some(line) = line.as_mut()
+    {
+        line.extend(vec![" · ".dim(), key.into(), " for agents".dim()]);
+    }
+
     line
 }
 
@@ -939,8 +968,13 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
         ordered.push(change_mode);
     }
     ordered.push(show_transcript);
-
     let mut lines = build_columns(ordered);
+    if let Some(key) = state.key_hints.agents {
+        lines.push(Line::from(vec![
+            key.into(),
+            " for agents (empty prompt)".into(),
+        ]));
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         "customize shortcuts with ".into(),

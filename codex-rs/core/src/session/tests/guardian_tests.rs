@@ -1,14 +1,26 @@
 use super::*;
 use crate::compact::InitialContextInjection;
+use crate::config::Constrained;
 use crate::exec_policy::ExecPolicyManager;
 use crate::guardian::GUARDIAN_REVIEWER_NAME;
 use crate::plugins::plugins_manager_for_config;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::step_context::StepContext;
+use crate::session::tests::update_turn_settings_for_test;
+use crate::session::turn_context::NewTurnContextOptions;
 use crate::test_support::models_manager_with_provider;
 use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
+use crate::tools::orchestrator::ToolOrchestrator;
+use crate::tools::sandboxing::Approvable;
+use crate::tools::sandboxing::ApprovalAction;
+use crate::tools::sandboxing::ExecApprovalRequirement;
+use crate::tools::sandboxing::SandboxAttempt;
+use crate::tools::sandboxing::Sandboxable;
+use crate::tools::sandboxing::ToolCtx;
+use crate::tools::sandboxing::ToolError;
+use crate::tools::sandboxing::ToolRuntime;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
@@ -17,12 +29,18 @@ use codex_config::ConfigRequirementsToml;
 use codex_exec_server::EnvironmentManager;
 use codex_execpolicy::Decision;
 use codex_execpolicy::Evaluation;
+use codex_execpolicy::Policy;
 use codex_execpolicy::RuleMatch;
 use codex_features::Feature;
 use codex_model_provider::create_model_provider;
+use codex_network_proxy::NetworkDecision;
+use codex_network_proxy::NetworkPolicyRequest;
+use codex_network_proxy::NetworkProtocol;
 use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::error::SandboxErr;
 use codex_protocol::models::AdditionalPermissionProfile as PermissionProfile;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -48,6 +66,7 @@ use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
+use test_case::test_case;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
@@ -68,6 +87,93 @@ where
         }
         other => panic!("expected function output, got {other:?}"),
     }
+}
+
+async fn activate_turn_with_new_review_authority(session: &Arc<Session>) -> Arc<TurnContext> {
+    let (current_turn, _) = session
+        .new_turn_with_sub_id(
+            "current-authority-turn".to_string(),
+            SessionSettingsUpdate {
+                step_settings: StepSettingsUpdate {
+                    approval_policy: Some(AskForApproval::Never),
+                    approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                    ..Default::default()
+                },
+                permission_profile: Some(codex_protocol::models::PermissionProfile::Disabled),
+                ..Default::default()
+            },
+            NewTurnContextOptions::default(),
+        )
+        .await
+        .expect("next turn should accept different approval authority");
+    session
+        .start_task(
+            current_turn,
+            Vec::new(),
+            super::NeverEndingTask {
+                kind: crate::state::TaskKind::Regular,
+                listen_to_cancellation_token: true,
+            },
+        )
+        .await;
+
+    let (active_turn, _, _) = session
+        .active_turn_context_and_strict_auto_review()
+        .await
+        .expect("next turn should have active review authority");
+    assert_eq!(
+        (
+            active_turn.approval_policy(),
+            active_turn.config.approvals_reviewer
+        ),
+        (AskForApproval::Never, ApprovalsReviewer::AutoReview)
+    );
+    active_turn
+}
+
+fn captured_step_with_user_reviewer(
+    turn: &mut Arc<TurnContext>,
+    admitted_policy: AskForApproval,
+    captured_policy: AskForApproval,
+) -> Arc<StepContext> {
+    let config = Arc::make_mut(
+        &mut Arc::get_mut(turn)
+            .expect("turn should not be shared")
+            .config,
+    );
+    config
+        .permissions
+        .approval_policy
+        .set(admitted_policy)
+        .expect("set admitted turn approval policy");
+    config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+
+    let mut step = StepContext::for_test(Arc::clone(turn));
+    let captured = Arc::get_mut(&mut step).expect("step context should not be shared");
+    update_selected_settings_for_test(Arc::make_mut(&mut captured.settings), |selected| {
+        selected
+            .approval_policy
+            .set(captured_policy)
+            .expect("set captured approval policy");
+        selected.approvals_reviewer = ApprovalsReviewer::User;
+    });
+    step
+}
+
+async fn next_exec_approval(
+    events: &async_channel::Receiver<Event>,
+) -> codex_protocol::protocol::ExecApprovalRequestEvent {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if let EventMsg::ExecApprovalRequest(approval) =
+                events.recv().await.expect("receive approval event").msg
+            {
+                break approval;
+            }
+        }
+    })
+    .await
+    .expect("captured action should request user approval")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -96,7 +202,9 @@ async fn request_permissions_routes_to_guardian_when_reviewer_is_enabled() {
     .await;
 
     let (mut session, mut turn_context_raw) = make_session_and_context().await;
-    Arc::make_mut(&mut turn_context_raw.model_info).node_repl_auto_review_required = true;
+    update_turn_settings_for_test(&mut turn_context_raw, |settings| {
+        Arc::make_mut(&mut settings.model_info).node_repl_auto_review_required = true;
+    });
     *session.active_turn.lock().await = Some(ActiveTurn::default());
     Arc::make_mut(&mut turn_context_raw.config)
         .permissions
@@ -134,6 +242,7 @@ async fn request_permissions_routes_to_guardian_when_reviewer_is_enabled() {
     evidence.record("js", "cell", "image", vec![image]);
     let session = Arc::new(session);
     let turn_context = Arc::new(turn_context_raw);
+    let step_context = StepContext::for_test(Arc::clone(&turn_context));
 
     let requested_permissions = RequestPermissionProfile {
         network: Some(NetworkPermissions {
@@ -149,7 +258,7 @@ async fn request_permissions_routes_to_guardian_when_reviewer_is_enabled() {
     let response = tokio::time::timeout(
         Duration::from_secs(45),
         session.request_permissions_for_environment(
-            &turn_context,
+            &step_context,
             "perm-call-1".to_string(),
             RequestPermissionsArgs {
                 environment_id: None,
@@ -173,7 +282,7 @@ async fn request_permissions_routes_to_guardian_when_reviewer_is_enabled() {
     );
     let second_response = session
         .request_permissions_for_environment(
-            &turn_context,
+            &step_context,
             "perm-call-2".to_string(),
             RequestPermissionsArgs {
                 environment_id: None,
@@ -201,6 +310,84 @@ async fn request_permissions_routes_to_guardian_when_reviewer_is_enabled() {
     }
     assert!(guardian_request.body_contains_text("request_permissions"));
     assert!(guardian_request.body_contains_text("need network"));
+}
+
+#[tokio::test]
+async fn request_permissions_uses_issuing_step_policy_and_reviewer() {
+    let server = start_mock_server().await;
+    let guardian_requests = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("guardian", r#"{"outcome":"allow"}"#),
+            ev_completed("guardian-review"),
+        ]),
+    )
+    .await;
+    let (session, turn, _) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |config| {
+            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
+            config.approvals_reviewer = ApprovalsReviewer::User;
+            config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+            config
+                .features
+                .enable(Feature::GuardianApproval)
+                .expect("enable Guardian");
+        },
+    )
+    .await;
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    let mut step = StepContext::for_test(turn);
+    let captured = Arc::get_mut(&mut step).expect("unshared step");
+    // The issuing step differs from the admitted Never/User turn.
+    update_selected_settings_for_test(Arc::make_mut(&mut captured.settings), |selected| {
+        selected
+            .approval_policy
+            .set(AskForApproval::OnRequest)
+            .expect("set step policy");
+        selected.approvals_reviewer = ApprovalsReviewer::AutoReview;
+    });
+    let permissions = RequestPermissionProfile {
+        network: Some(NetworkPermissions {
+            enabled: Some(true),
+        }),
+        ..Default::default()
+    };
+
+    let response = timeout(
+        Duration::from_secs(5),
+        session.request_permissions_for_environment(
+            &step,
+            "step-permissions".to_string(),
+            RequestPermissionsArgs {
+                environment_id: None,
+                reason: Some("need network".to_string()),
+                permissions: permissions.clone(),
+            },
+            step.environments
+                .primary()
+                .expect("primary environment")
+                .selection(),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("issuing step should route to Guardian without a user approval");
+
+    assert_eq!(
+        response,
+        Some(RequestPermissionsResponse {
+            permissions,
+            scope: PermissionGrantScope::Turn,
+            strict_auto_review: false,
+        })
+    );
+    assert!(
+        guardian_requests
+            .single_request()
+            .body_contains_text("request_permissions")
+    );
 }
 
 #[tokio::test]
@@ -264,7 +451,7 @@ async fn request_permissions_guardian_review_stops_when_cancelled() {
                 .selection();
             session
                 .request_permissions_for_environment(
-                    &turn_context,
+                    &StepContext::for_test(Arc::clone(&turn_context)),
                     "perm-call-cancelled".to_string(),
                     RequestPermissionsArgs {
                         environment_id: None,
@@ -308,7 +495,7 @@ async fn request_permissions_guardian_review_stops_when_cancelled() {
 }
 
 #[tokio::test]
-async fn guardian_allows_shell_command_additional_permissions_requests_past_policy_validation() {
+async fn guardian_allows_exec_command_additional_permissions_requests_past_policy_validation() {
     let server = start_mock_server().await;
     let _request_log = mount_sse_once(
         &server,
@@ -371,11 +558,9 @@ async fn guardian_allows_shell_command_additional_permissions_requests_past_poli
     );
     let session = Arc::new(session);
     let turn_context = Arc::new(turn_context_raw);
-    let expiration_ms: u64 = if cfg!(windows) { 2_500 } else { 1_000 };
+    let yield_time_ms: u64 = 10_000;
 
-    let handler = crate::tools::handlers::ShellCommandHandler::from(
-        codex_tools::ShellCommandBackendConfig::Classic,
-    );
+    let handler = crate::tools::handlers::ExecCommandHandler::default();
     #[allow(deprecated)]
     let workdir = Some(turn_context.cwd.to_string_lossy().to_string());
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
@@ -387,14 +572,14 @@ async fn guardian_allows_shell_command_additional_permissions_requests_past_poli
             cancellation_token: CancellationToken::new(),
             tracker: Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
             call_id: "test-call".to_string(),
-            tool_name: codex_tools::ToolName::plain("shell_command"),
+            tool_name: codex_tools::ToolName::plain("exec_command"),
             source: crate::tools::context::ToolCallSource::Direct,
             payload: ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "command": "echo hi",
+                    "cmd": "echo hi",
                     "login": false,
                     "workdir": workdir,
-                    "timeout_ms": expiration_ms,
+                    "yield_time_ms": yield_time_ms,
                     "sandbox_permissions": SandboxPermissions::WithAdditionalPermissions,
                     "additional_permissions": PermissionProfile {
                         network: Some(NetworkPermissions {
@@ -414,7 +599,7 @@ async fn guardian_allows_shell_command_additional_permissions_requests_past_poli
 }
 
 #[tokio::test]
-async fn strict_auto_review_turn_grant_forces_guardian_for_shell_command_policy_skip() {
+async fn strict_auto_review_turn_grant_forces_guardian_for_exec_command_policy_skip() {
     let server = start_mock_server().await;
     let guardian_request_log = mount_sse_once(
         &server,
@@ -462,10 +647,13 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_shell_command_policy_
         .set(AskForApproval::Never)
         .expect("test setup should allow updating approval policy");
     let mut config = (*turn_context_raw.config).clone();
+    // Keep Never outside Full Access without requiring an OS sandbox for this routing test.
     config
         .permissions
-        .set_permission_profile(codex_protocol::models::PermissionProfile::Disabled)
-        .expect("test setup should allow disabling the permission profile");
+        .set_permission_profile(codex_protocol::models::PermissionProfile::External {
+            network: NetworkSandboxPolicy::Restricted,
+        })
+        .expect("test setup should allow external sandbox permissions");
     let TurnEnvironmentState::Ready(environment) =
         &mut turn_context_raw.environments.environments[0]
     else {
@@ -497,13 +685,10 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_shell_command_policy_
                 kind: crate::state::TaskKind::Regular,
                 listen_to_cancellation_token: true,
             },
-            crate::tasks::MailboxParentProvenance::Ignore,
         )
         .await;
 
-    let handler = crate::tools::handlers::ShellCommandHandler::from(
-        codex_tools::ShellCommandBackendConfig::Classic,
-    );
+    let handler = crate::tools::handlers::ExecCommandHandler::default();
     #[allow(deprecated)]
     let workdir = Some(turn_context.cwd.to_string_lossy().to_string());
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
@@ -515,14 +700,14 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_shell_command_policy_
             cancellation_token: CancellationToken::new(),
             tracker: Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
             call_id: "strict-shell-command-call".to_string(),
-            tool_name: codex_tools::ToolName::plain("shell_command"),
+            tool_name: codex_tools::ToolName::plain("exec_command"),
             source: ToolCallSource::Direct,
             payload: ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "command": "echo hi",
+                    "cmd": "echo hi",
                     "login": false,
                     "workdir": workdir,
-                    "timeout_ms": 1_000_u64,
+                    "yield_time_ms": 10_000_u64,
                 })
                 .to_string(),
             },
@@ -533,6 +718,284 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_shell_command_policy_
     assert!(output.contains("hi"));
     let guardian_request = guardian_request_log.single_request();
     assert!(guardian_request.body_contains_text("echo hi"));
+}
+
+#[test_case(AskForApproval::Never; "policy_precheck")]
+#[test_case(AskForApproval::OnRequest; "reviewer_routing")]
+#[tokio::test]
+async fn network_approval_uses_published_task_authority_within_same_turn(
+    admitted_policy: AskForApproval,
+) {
+    let (session, turn, events) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        move |config| {
+            config.permissions.approval_policy = Constrained::allow_any(admitted_policy);
+            config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+            config
+                    .permissions
+                    .set_permission_profile(
+                        codex_protocol::models::PermissionProfile::workspace_write(),
+                    )
+                    .expect("set managed permissions");
+        },
+    )
+    .await;
+    session
+        .start_task(
+            Arc::clone(&turn),
+            Vec::new(),
+            super::NeverEndingTask {
+                kind: crate::state::TaskKind::Regular,
+                listen_to_cancellation_token: true,
+            },
+        )
+        .await;
+    // Inject later-step authority directly while live policy changes remain gated.
+    {
+        let active = session.active_turn.lock().await;
+        let task = active
+            .as_ref()
+            .expect("active turn")
+            .task
+            .as_ref()
+            .expect("active task");
+        let mut settings = task.turn_context.current_settings.load_full();
+        update_selected_settings_for_test(Arc::make_mut(&mut settings), |selected| {
+            selected
+                .approval_policy
+                .set(AskForApproval::OnRequest)
+                .expect("update policy");
+            selected.approvals_reviewer = ApprovalsReviewer::User;
+        });
+        task.turn_context.current_settings.store(settings);
+    }
+    let decision = session
+        .services
+        .network_approval
+        .handle_inline_policy_request(
+            Arc::clone(&session),
+            NetworkPolicyRequest {
+                protocol: NetworkProtocol::Http,
+                host: "example.com".to_string(),
+                port: 80,
+                environment_id: None,
+                client_addr: None,
+                method: None,
+                command: None,
+                exec_policy_hint: None,
+                execution_id: None,
+                disconnect: None,
+            },
+        );
+    tokio::pin!(decision);
+    let approval = timeout(Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                result = &mut decision => panic!("expected user network approval, got {result:?}"),
+                event = events.recv() => {
+                    match event.expect("approval event").msg {
+                        EventMsg::ExecApprovalRequest(approval) => break approval,
+                        EventMsg::GuardianAssessment(_) => panic!("expected the current user reviewer"),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("network approval requested");
+    assert_eq!(approval.turn_id, turn.sub_id);
+    session
+        .notify_approval(&approval.call_id, ReviewDecision::Approved)
+        .await;
+    assert_eq!(
+        timeout(Duration::from_secs(5), decision)
+            .await
+            .expect("network decision"),
+        NetworkDecision::Allow
+    );
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+#[tokio::test]
+async fn delayed_exec_command_uses_its_captured_authority_after_next_turn_starts() {
+    let (mut session, mut action_turn, events) = make_session_and_context_with_rx().await;
+    // Windows can allow safe echo commands without prompting when its sandbox is disabled.
+    let mut exec_policy = Policy::empty();
+    exec_policy
+        .add_prefix_rule(
+            &["echo".to_string(), "captured-action-authority".to_string()],
+            Decision::Prompt,
+        )
+        .expect("test command should require approval");
+    Arc::get_mut(&mut session)
+        .expect("session should not be shared")
+        .services
+        .exec_policy = Arc::new(ExecPolicyManager::new(Arc::new(exec_policy)));
+    let step_context = captured_step_with_user_reviewer(
+        &mut action_turn,
+        AskForApproval::Never,
+        AskForApproval::OnRequest,
+    );
+    let current_turn = activate_turn_with_new_review_authority(&session).await;
+    assert_ne!(action_turn.sub_id, current_turn.sub_id);
+
+    let call_id = "delayed-captured-authority-shell-command";
+    let command = "echo captured-action-authority";
+    let handler = crate::tools::handlers::ExecCommandHandler::default();
+    let invocation = handler.handle(ToolInvocation {
+        session: Arc::clone(&session),
+        turn: Arc::clone(&action_turn),
+        step_context,
+        cancellation_token: CancellationToken::new(),
+        tracker: Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
+        call_id: call_id.to_string(),
+        tool_name: codex_tools::ToolName::plain("exec_command"),
+        source: ToolCallSource::Direct,
+        payload: ToolPayload::Function {
+            arguments: serde_json::json!({
+                "cmd": command,
+                "login": false,
+                "sandbox_permissions": SandboxPermissions::RequireEscalated,
+                "justification": "verify captured action authority",
+            })
+            .to_string(),
+        },
+    });
+    let approve = async {
+        let approval = next_exec_approval(&events).await;
+        assert_eq!(approval.call_id, call_id);
+        assert_eq!(approval.turn_id, action_turn.sub_id);
+        assert!(approval.command.join(" ").contains(command));
+        session
+            .notify_approval(call_id, ReviewDecision::Approved)
+            .await;
+    };
+
+    let (output, ()) = tokio::join!(invocation, approve);
+    let output = output.expect("approved shell command should succeed");
+    assert!(expect_text_output(output.as_ref()).contains("captured-action-authority"));
+}
+
+#[tokio::test]
+async fn sandbox_denied_retry_uses_the_action_policy_and_reviewer() {
+    #[derive(Default)]
+    struct DeniedOnceRuntime {
+        attempts: usize,
+    }
+
+    impl Approvable<TurnEnvironment> for DeniedOnceRuntime {
+        fn exec_approval_requirement(
+            &self,
+            _request: &TurnEnvironment,
+        ) -> Option<ExecApprovalRequirement> {
+            Some(ExecApprovalRequirement::Skip {
+                bypass_sandbox: false,
+                proposed_execpolicy_amendment: None,
+            })
+        }
+
+        fn approval_action(
+            &self,
+            request: &TurnEnvironment,
+            call_id: &str,
+        ) -> std::io::Result<ApprovalAction> {
+            Ok(ApprovalAction::ExecCommand {
+                id: call_id.to_string(),
+                environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+                command: vec!["echo".to_string(), "sandbox-retry".to_string()],
+                hook_command: "echo sandbox-retry".to_string(),
+                cwd: request.cwd().clone(),
+                sandbox_permissions: SandboxPermissions::UseDefault,
+                additional_permissions: None,
+                justification: None,
+                tty: false,
+                proposed_execpolicy_amendment: None,
+            })
+        }
+    }
+
+    impl Sandboxable for DeniedOnceRuntime {
+        fn sandbox_preference(&self) -> codex_sandboxing::SandboxablePreference {
+            codex_sandboxing::SandboxablePreference::Auto
+        }
+    }
+
+    impl ToolRuntime<TurnEnvironment, String> for DeniedOnceRuntime {
+        fn turn_environment<'a>(&self, request: &'a TurnEnvironment) -> &'a TurnEnvironment {
+            request
+        }
+
+        async fn run(
+            &mut self,
+            _request: &TurnEnvironment,
+            _attempt: &SandboxAttempt<'_>,
+            _context: &ToolCtx,
+        ) -> Result<String, ToolError> {
+            self.attempts += 1;
+            if self.attempts == 1 {
+                return Err(ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied {
+                    output: Box::new(ExecToolCallOutput {
+                        exit_code: 1,
+                        ..Default::default()
+                    }),
+                    network_policy_decision: None,
+                })));
+            }
+            Ok("sandbox-retry-succeeded".to_string())
+        }
+    }
+
+    let (session, mut action_turn, events) = make_session_and_context_with_rx().await;
+    let step_context = captured_step_with_user_reviewer(
+        &mut action_turn,
+        AskForApproval::OnRequest,
+        AskForApproval::UnlessTrusted,
+    );
+
+    let current_turn = activate_turn_with_new_review_authority(&session).await;
+    assert_ne!(action_turn.sub_id, current_turn.sub_id);
+
+    let call_id = "captured-action-sandbox-retry";
+    let context = ToolCtx {
+        session: Arc::clone(&session),
+        step_context,
+        cancellation_token: CancellationToken::new(),
+        call_id: call_id.to_string(),
+        tool_name: codex_tools::ToolName::plain("exec_command"),
+    };
+    let environment = context
+        .step_context
+        .environments
+        .primary()
+        .expect("primary environment");
+    let mut orchestrator = ToolOrchestrator::new();
+    let mut runtime = DeniedOnceRuntime::default();
+    let approve = async {
+        let approval = next_exec_approval(&events).await;
+        assert_eq!(approval.call_id, call_id);
+        assert_eq!(approval.turn_id, action_turn.sub_id);
+        assert_eq!(
+            approval.reason.as_deref(),
+            Some("command failed; retry without sandbox?")
+        );
+        session
+            .notify_approval(call_id, ReviewDecision::Approved)
+            .await;
+    };
+
+    let (output, ()) = tokio::join!(
+        orchestrator.run(&mut runtime, environment, &context),
+        approve
+    );
+    assert_eq!(
+        output
+            .expect("approved sandbox retry should succeed")
+            .output,
+        "sandbox-retry-succeeded"
+    );
+    assert_eq!(runtime.attempts, 2);
 }
 
 #[tokio::test]
@@ -591,6 +1054,12 @@ async fn guardian_allows_unified_exec_additional_permissions_requests_past_polic
 #[tokio::test]
 async fn process_compacted_history_preserves_separate_guardian_developer_message() {
     let (session, mut turn_context) = make_session_and_context().await;
+    update_turn_settings_for_test(&mut turn_context, |settings| {
+        update_selected_settings_for_test(settings, |selected| {
+            selected.collaboration_mode.settings.reasoning_effort =
+                Some(ReasoningEffortConfig::Persistent);
+        });
+    });
     let guardian_policy = "guardian policy".to_string();
     let guardian_source =
         SessionSource::SubAgent(SubAgentSource::Other(GUARDIAN_REVIEWER_NAME.to_string()));
@@ -644,7 +1113,13 @@ async fn process_compacted_history_preserves_separate_guardian_developer_message
         .iter()
         .filter_map(|item| match item {
             ResponseItem::Message { role, content, .. } if role == "developer" => {
-                crate::content_items_to_text(content)
+                crate::content_items_to_text(content).map(|text| {
+                    (
+                        text,
+                        item.executed_tool_call_metadata()
+                            .and_then(|metadata| metadata.content_item_kinds.clone()),
+                    )
+                })
             }
             _ => None,
         })
@@ -653,10 +1128,22 @@ async fn process_compacted_history_preserves_separate_guardian_developer_message
     assert!(
         !developer_messages
             .iter()
-            .any(|message| message.contains("stale developer message"))
+            .any(|(message, _)| message.contains("stale developer message"))
+    );
+    assert!(
+        !developer_messages
+            .iter()
+            .any(|(message, _)| message.contains("<persistent_mode>")),
+        "guardian context must not inherit persistent-mode proactivity"
     );
     assert!(developer_messages.len() >= 2);
-    assert_eq!(developer_messages.last(), Some(&guardian_policy));
+    assert_eq!(
+        developer_messages.last(),
+        Some(&(
+            guardian_policy,
+            Some(vec![ContentItemKind("guardian.policy".to_string())]),
+        ))
+    );
 }
 
 #[tokio::test]
@@ -665,7 +1152,7 @@ async fn process_compacted_history_preserves_separate_guardian_developer_message
     clippy::await_holding_invalid_type,
     reason = "test mutates active turn state directly to seed granted permissions"
 )]
-async fn shell_command_allows_sticky_turn_permissions_without_inline_request_permissions_feature() {
+async fn exec_command_allows_sticky_turn_permissions_without_inline_request_permissions_feature() {
     let (mut session, turn_context_raw) = make_session_and_context().await;
     session
         .features
@@ -690,9 +1177,7 @@ async fn shell_command_allows_sticky_turn_permissions_without_inline_request_per
     let session = Arc::new(session);
     let turn_context = Arc::new(turn_context_raw);
 
-    let handler = crate::tools::handlers::ShellCommandHandler::from(
-        codex_tools::ShellCommandBackendConfig::Classic,
-    );
+    let handler = crate::tools::handlers::ExecCommandHandler::default();
     #[allow(deprecated)]
     let workdir = Some(turn_context.cwd.to_string_lossy().to_string());
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
@@ -704,13 +1189,13 @@ async fn shell_command_allows_sticky_turn_permissions_without_inline_request_per
             cancellation_token: CancellationToken::new(),
             tracker: Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
             call_id: "sticky-turn-grant".to_string(),
-            tool_name: codex_tools::ToolName::plain("shell_command"),
+            tool_name: codex_tools::ToolName::plain("exec_command"),
             source: crate::tools::context::ToolCallSource::Direct,
             payload: ToolPayload::Function {
                 arguments: serde_json::json!({
-                    "command": "echo hi",
+                    "cmd": "echo hi",
                     "login": false,
-                    "timeout_ms": 1_000_u64,
+                    "yield_time_ms": 10_000_u64,
                     "workdir": workdir,
                 })
                 .to_string(),
@@ -786,7 +1271,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
     );
     let plugins_manager = Arc::new(plugins_manager_for_config(
         &config,
-        auth_manager.get_api_auth_mode(),
+        Arc::clone(&auth_manager),
     ));
     let skills_service = Arc::new(HostSkillsService::new(
         config.codex_home.clone(),
@@ -805,6 +1290,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
         models_manager,
+        git_root_discovery: Arc::default(),
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         skills_service,
         plugins_manager,
@@ -832,6 +1318,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         environment_selections: Vec::new(),
         thread_extension_init: codex_extension_api::ExtensionDataInit::default(),
         client_mcp_extensions: ClientMcpExtensions::default(),
+        reserved_thread_id: None,
         analytics_events_client: None,
         thread_store,
         attestation_provider: None,

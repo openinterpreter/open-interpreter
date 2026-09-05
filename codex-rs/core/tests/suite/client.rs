@@ -1,3 +1,4 @@
+use codex_config::test_support::CloudConfigBundleFixture;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::ModelClient;
 use codex_core::NewThread;
@@ -72,6 +73,7 @@ use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_failed;
+use core_test_support::responses::start_mock_server;
 use core_test_support::responses::strip_metadata_from_json;
 use core_test_support::responses::strip_response_item_ids_from_json;
 use core_test_support::responses_metadata as test_responses_metadata;
@@ -382,8 +384,9 @@ async fn sends_audio_urls_to_responses() {
         .unwrap();
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 
-    let user_message = response_mock
-        .single_request()
+    let request = response_mock.single_request();
+    assert!(request.has_content_kinds(&["user.audio"]));
+    let user_message = request
         .input()
         .into_iter()
         .rev()
@@ -426,8 +429,9 @@ async fn sends_local_audio_to_responses() -> anyhow::Result<()> {
         .await?;
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 
-    let user_message = response_mock
-        .single_request()
+    let request = response_mock.single_request();
+    assert!(request.has_content_kinds(&["user.text", "user.audio", "user.text"]));
+    let user_message = request
         .input()
         .into_iter()
         .rev()
@@ -741,6 +745,9 @@ impl ProviderAuthCommandFixture {
             std::fs::write(
                 &script_path,
                 r#"#!/bin/sh
+if [ -f fail-until-401 ]; then
+    exit 1
+fi
 first_line=$(sed -n '1p' tokens.txt)
 printf '%s\n' "$first_line"
 tail -n +2 tokens.txt > tokens.next
@@ -763,6 +770,7 @@ mv tokens.next tokens.txt
                 &script_path,
                 r#"@echo off
 setlocal EnableExtensions DisableDelayedExpansion
+if exist fail-until-401 exit /b 1
 
 set "first_line="
 <tokens.txt set /p first_line=
@@ -794,7 +802,7 @@ move /y tokens.next tokens.txt >nul
     fn auth(&self) -> ModelProviderAuthInfo {
         ModelProviderAuthInfo {
             command: self.command.clone(),
-            args: self.args.clone(),
+            args: self.args.iter().cloned().map(Into::into).collect(),
             // Match the model-provider default to avoid brittle shell-startup timing in CI.
             timeout_ms: non_zero_u64(/*value*/ 5_000),
             refresh_interval_ms: 60_000,
@@ -1208,7 +1216,9 @@ async fn resume_replays_image_tool_outputs_with_detail() {
             ordinal: None,
             item: rollout_response_item(ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: function_call_id.to_string(),
+                call_id: Some(function_call_id.to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_content_items(vec![
                     FunctionCallOutputContentItem::InputImage {
                         image_url: image_url.to_string(),
@@ -1415,6 +1425,43 @@ async fn provider_auth_command_refreshes_after_401() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_auth_command_recovers_after_initial_resolution_failure() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    let auth_fixture = ProviderAuthCommandFixture::new(&["recovered-token"]).unwrap();
+    let failure_marker = auth_fixture.tempdir.path().join("fail-until-401");
+    std::fs::write(&failure_marker, "").unwrap();
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(|request: &wiremock::Request| !request.headers.contains_key("authorization"))
+        .respond_with(move |_request: &wiremock::Request| {
+            std::fs::remove_file(&failure_marker).unwrap();
+            ResponseTemplate::new(401).set_body_string("unauthorized")
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header("authorization", "Bearer recovered-token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(
+                    sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+                    "text/event-stream",
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    send_provider_auth_request(&server, auth_fixture.auth()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn amazon_bedrock_proxy_uses_command_auth_and_custom_headers() {
     skip_if_no_network!();
 
@@ -1434,7 +1481,7 @@ async fn amazon_bedrock_proxy_uses_command_auth_and_custom_headers() {
     provider
         .http_headers
         .get_or_insert_default()
-        .insert("x-some-header".to_string(), "foo".to_string());
+        .insert("x-some-header".to_string(), "foo".into());
 
     send_request_with_provider(provider).await;
 
@@ -1518,6 +1565,7 @@ async fn send_request_with_provider(provider: ModelProviderInfo) {
         SessionSource::Exec,
         "test_originator".to_string(),
         config.model_verbosity,
+        config.features.enabled(Feature::ContentItemKinds),
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
@@ -2164,6 +2212,49 @@ async fn omits_environment_context_when_configured_off() {
     );
 }
 
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn powershell_shell_version_is_model_visible_only_when_enabled() -> anyhow::Result<()> {
+    core_test_support::skip_if_remote!(Ok(()), "requires local Windows PowerShell execution");
+
+    let shell_path = codex_shell_command::powershell::try_find_powershell_executable_blocking()
+        .ok_or_else(|| anyhow::anyhow!("Windows PowerShell is unavailable"))?
+        .to_path_buf();
+    for enabled in [false, true] {
+        let server = MockServer::start().await;
+        let response = mount_sse_once(&server, sse(vec![ev_completed("done")])).await;
+        let user_shell = codex_shell_command::shell_detect::DetectedShell {
+            shell_type: codex_shell_command::shell_detect::ShellType::PowerShell,
+            shell_path: shell_path.clone(),
+        }
+        .into();
+        let mut builder = test_codex()
+            .with_user_shell(user_shell)
+            .with_config(move |config| {
+                config
+                    .features
+                    .set_enabled(Feature::PowerShellShellVersion, enabled)
+                    .expect("test config should allow PowerShell version feature updates");
+            });
+        let test = builder.build_with_auto_env(&server).await?;
+        test.submit_turn("report the selected shell").await?;
+
+        let request = response.single_request();
+        assert!(message_input_text_contains(
+            &request,
+            "user",
+            "<shell>powershell</shell>"
+        ));
+        assert_eq!(
+            message_input_text_contains(&request, "user", "<shell_version>5.1</shell_version>"),
+            enabled,
+            "PowerShell shell version must follow its feature flag"
+        );
+    }
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn includes_configured_max_effort_in_request() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
@@ -2201,42 +2292,6 @@ async fn includes_configured_max_effort_in_request() -> anyhow::Result<()> {
             .and_then(|t| t.get("effort"))
             .and_then(|v| v.as_str()),
         Some("max")
-    );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn includes_no_effort_in_request() -> anyhow::Result<()> {
-    skip_if_no_network!(Ok(()));
-    let server = MockServer::start().await;
-
-    let resp_mock = mount_sse_once(
-        &server,
-        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
-    )
-    .await;
-    let TestCodex { codex, .. } = test_codex().with_model("gpt-5.4").build(&server).await?;
-
-    codex
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: "hello".into(),
-            text_elements: Vec::new(),
-        }]))
-        .await
-        .unwrap();
-
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
-
-    let request = resp_mock.single_request();
-    let request_body = request.body_json();
-
-    assert_eq!(
-        request_body
-            .get("reasoning")
-            .and_then(|t| t.get("effort"))
-            .and_then(|v| v.as_str()),
-        Some("medium")
     );
 
     Ok(())
@@ -2893,6 +2948,48 @@ async fn includes_developer_instructions_message_in_request() {
     );
 }
 
+#[tokio::test]
+async fn includes_managed_developer_instructions_once_per_request() -> anyhow::Result<()> {
+    const CLIENT_INSTRUCTIONS: &str = "client developer instructions";
+    const MANAGED_INSTRUCTIONS: &str = "managed requirements instructions";
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex()
+        .with_cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(format!(
+                "additional_developer_instructions = {MANAGED_INSTRUCTIONS:?}"
+            )),
+        )
+        .with_config(|config| {
+            config.developer_instructions = Some(CLIENT_INSTRUCTIONS.to_string());
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    let managed_message = format!(
+        "<managed_developer_instructions>\n{MANAGED_INSTRUCTIONS}\n</managed_developer_instructions>"
+    );
+
+    for (response_id, prompt) in [("resp-1", "first turn"), ("resp-2", "second turn")] {
+        let response = mount_sse_once(&server, sse(vec![ev_completed(response_id)])).await;
+        test.submit_text_turn(prompt).await?;
+
+        let developer_messages = response.single_request().message_input_texts("developer");
+        assert!(
+            developer_messages
+                .iter()
+                .any(|message| message.contains(CLIENT_INSTRUCTIONS))
+        );
+        assert_eq!(
+            developer_messages
+                .iter()
+                .filter(|message| message.contains("<managed_developer_instructions>"))
+                .collect::<Vec<_>>(),
+            vec![&managed_message]
+        );
+    }
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids() {
     skip_if_no_network!();
@@ -2961,6 +3058,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
         SessionSource::Exec,
         "test_originator".to_string(),
         config.model_verbosity,
+        config.features.enabled(Feature::ContentItemKinds),
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
@@ -3012,7 +3110,9 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
     });
     prompt.input.push(ResponseItem::FunctionCallOutput {
         id: None,
-        call_id: "function-call-id".into(),
+        call_id: Some("function-call-id".into()),
+        name: None,
+        namespace: None,
         output: FunctionCallOutputPayload::from_text("ok".into()),
         internal_chat_message_metadata_passthrough: None,
     });
@@ -3537,13 +3637,13 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         aws: None,
         query_params: Some(std::collections::HashMap::from([(
             "api-version".to_string(),
-            "2025-04-01-preview".to_string(),
+            "2025-04-01-preview".into(),
         )])),
         env_key_instructions: None,
         wire_api: WireApi::Responses,
         http_headers: Some(std::collections::HashMap::from([(
             "Custom-Header".to_string(),
-            "Value".to_string(),
+            "Value".into(),
         )])),
         env_http_headers: None,
         request_max_retries: None,
@@ -3618,7 +3718,7 @@ async fn env_var_overrides_loaded_auth() {
         env_key: Some(EXISTING_ENV_VAR_WITH_NON_EMPTY_VALUE.to_string()),
         query_params: Some(std::collections::HashMap::from([(
             "api-version".to_string(),
-            "2025-04-01-preview".to_string(),
+            "2025-04-01-preview".into(),
         )])),
         env_key_instructions: None,
         experimental_bearer_token: None,
@@ -3627,7 +3727,7 @@ async fn env_var_overrides_loaded_auth() {
         wire_api: WireApi::Responses,
         http_headers: Some(std::collections::HashMap::from([(
             "Custom-Header".to_string(),
-            "Value".to_string(),
+            "Value".into(),
         )])),
         env_http_headers: None,
         request_max_retries: None,

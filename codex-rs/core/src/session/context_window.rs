@@ -1,6 +1,8 @@
 use super::session::Session;
 use super::turn_context::TurnContext;
+use crate::config::Config;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
+use codex_protocol::openai_models::ModelInfo;
 
 #[derive(Debug)]
 pub(crate) struct ContextWindowTokenStatus {
@@ -24,24 +26,51 @@ pub(crate) async fn context_window_token_status(
     sess: &Session,
     turn_context: &TurnContext,
 ) -> ContextWindowTokenStatus {
+    context_window_token_status_with_config(
+        sess,
+        turn_context.config.as_ref(),
+        turn_context.model_info().as_ref(),
+    )
+    .await
+}
+
+pub(crate) async fn context_window_token_status_for_model(
+    sess: &Session,
+    config: &Config,
+    turn_context: &TurnContext,
+    model_info: &ModelInfo,
+) -> ContextWindowTokenStatus {
+    let mut config = config.clone();
+    config.token_budget = super::token_budget::resolve_token_budget(
+        turn_context.configured_token_budget.as_ref(),
+        turn_context.use_model_token_budget_defaults,
+        model_info,
+    );
+    context_window_token_status_with_config(sess, &config, model_info).await
+}
+
+async fn context_window_token_status_with_config(
+    sess: &Session,
+    config: &Config,
+    model_info: &ModelInfo,
+) -> ContextWindowTokenStatus {
     let active_context_tokens = sess.get_total_token_usage().await;
 
     // Count either the full active context or only the tokens added after the initial prefix.
     let (auto_compact_scope_tokens, auto_compact_scope_limit, auto_compact_window_prefill_tokens) =
-        match turn_context.config.model_auto_compact_token_limit_scope {
+        match config.model_auto_compact_token_limit_scope {
             AutoCompactTokenLimitScope::Total => (
                 active_context_tokens,
-                turn_context.model_info.auto_compact_token_limit(),
+                model_info.auto_compact_token_limit(),
                 None,
             ),
             AutoCompactTokenLimitScope::BodyAfterPrefix => {
                 let window = sess.auto_compact_window_snapshot().await;
                 let baseline = window.prefill_input_tokens.unwrap_or(active_context_tokens);
 
-                let scope_limit = turn_context
-                    .config
+                let scope_limit = config
                     .model_auto_compact_token_limit
-                    .or_else(|| turn_context.model_info.auto_compact_token_limit());
+                    .or_else(|| model_info.auto_compact_token_limit());
                 (
                     active_context_tokens.saturating_sub(baseline),
                     scope_limit,
@@ -51,7 +80,9 @@ pub(crate) async fn context_window_token_status(
         };
 
     // The model's full context window is a hard cap, independent of the auto-compaction scope.
-    let full_context_window_limit = turn_context.model_context_window();
+    let full_context_window_limit = model_info.resolved_context_window().map(|context_window| {
+        context_window.saturating_mul(model_info.effective_context_window_percent) / 100
+    });
 
     // Report remaining tokens against the base (unbuffered) window, capped by the full context.
     let base_window_tokens_remaining = [
@@ -63,8 +94,7 @@ pub(crate) async fn context_window_token_status(
     .min();
 
     // Only reserve the fallback buffer when there is a fallback prompt to use it.
-    let auto_compact_fallback_buffer_tokens = turn_context
-        .config
+    let auto_compact_fallback_buffer_tokens = config
         .token_budget
         .as_ref()
         .map_or(0, crate::config::TokenBudgetConfig::fallback_buffer_tokens);

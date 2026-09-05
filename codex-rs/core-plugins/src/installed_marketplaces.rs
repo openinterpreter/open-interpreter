@@ -7,7 +7,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use tracing::warn;
 
 use crate::marketplace::find_marketplace_manifest_path;
-use crate::marketplace_policy::project_effective_user_config;
+use crate::marketplace_policy::policy_filtered_plugin_config;
 
 pub const INSTALLED_MARKETPLACES_DIR: &str = ".tmp/marketplaces";
 
@@ -19,10 +19,11 @@ pub fn installed_marketplace_roots_from_layer_stack(
     config_layer_stack: &ConfigLayerStack,
     codex_home: &Path,
 ) -> Vec<AbsolutePathBuf> {
-    let Some(user_config) = project_effective_user_config(config_layer_stack, codex_home) else {
+    let Some(effective_config) = policy_filtered_plugin_config(config_layer_stack, codex_home)
+    else {
         return Vec::new();
     };
-    let Some(marketplaces_value) = user_config.get("marketplaces") else {
+    let Some(marketplaces_value) = effective_config.get("marketplaces") else {
         return Vec::new();
     };
     let Some(marketplaces) = marketplaces_value.as_table() else {

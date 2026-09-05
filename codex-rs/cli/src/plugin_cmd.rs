@@ -1,7 +1,10 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use anyhow::ensure;
 use clap::Parser;
+use codex_app_server_protocol::PluginAuthPolicy;
+use codex_app_server_protocol::PluginInstallPolicy;
 use codex_core::config::Config;
 use codex_core::config::find_codex_home;
 use codex_core::plugins_manager_for_config;
@@ -11,6 +14,7 @@ use codex_core_plugins::PluginInstallOutcome;
 use codex_core_plugins::PluginInstallRequest;
 use codex_core_plugins::PluginsConfigInput;
 use codex_core_plugins::PluginsManager;
+use codex_core_plugins::RemotePluginInstallRequest;
 use codex_core_plugins::allowed_configured_marketplace_names;
 use codex_core_plugins::installed_marketplaces::marketplace_install_root;
 use codex_core_plugins::installed_marketplaces::resolve_configured_marketplace_root;
@@ -19,15 +23,23 @@ use codex_core_plugins::marketplace::MarketplacePluginAuthPolicy;
 use codex_core_plugins::marketplace::MarketplacePluginInstallPolicy;
 use codex_core_plugins::marketplace::MarketplacePluginSource;
 use codex_core_plugins::marketplace::find_marketplace_manifest_path;
+use codex_core_plugins::remote;
+use codex_core_plugins::remote::REMOTE_GLOBAL_MARKETPLACE_NAME;
+use codex_core_plugins::remote::RemoteMarketplace;
+use codex_core_plugins::remote::RemoteMarketplaceSource;
+use codex_core_plugins::remote::RemotePluginCatalogCacheMode;
+use codex_core_plugins::remote::RemotePluginSummary;
 use codex_login::AuthManager;
+use codex_login::CodexAuth;
 use codex_plugin::PluginId;
 use codex_plugin::validate_plugin_segment;
-use codex_protocol::auth::AuthMode;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::CliConfigOverrides;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::marketplace_cmd::MarketplaceCli;
 
@@ -70,19 +82,19 @@ pub struct PluginCli {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum PluginSubcommand {
-    /// Install a plugin from a configured marketplace snapshot.
+    /// Install a plugin from a configured or remote marketplace.
     ///
     /// Pass either `PLUGIN@MARKETPLACE` or pass `PLUGIN` with
     /// `--marketplace MARKETPLACE`.
     Add(AddPluginArgs),
 
-    /// List plugins available from configured marketplace snapshots.
+    /// List plugins available from configured and remote marketplaces.
     List(ListPluginsArgs),
 
     /// Add, list, upgrade, or remove configured plugin marketplaces.
     Marketplace(MarketplaceCli),
 
-    /// Remove an installed plugin from local config and cache.
+    /// Uninstall a plugin and remove its local cache.
     ///
     /// Pass either `PLUGIN@MARKETPLACE` or pass `PLUGIN` with
     /// `--marketplace MARKETPLACE`.
@@ -99,7 +111,7 @@ pub struct AddPluginArgs {
     #[arg(value_name = "PLUGIN[@MARKETPLACE]")]
     plugin: String,
 
-    /// Configured marketplace name to use when PLUGIN does not include @MARKETPLACE.
+    /// Marketplace name to use when PLUGIN does not include @MARKETPLACE.
     #[arg(long = "marketplace", short = 'm', value_name = "MARKETPLACE")]
     marketplace_name: Option<String>,
 
@@ -114,7 +126,7 @@ pub struct AddPluginArgs {
     after_help = list_plugin_examples()
 )]
 pub struct ListPluginsArgs {
-    /// Only list plugins from this configured marketplace name.
+    /// Only list plugins from this marketplace name.
     #[arg(long = "marketplace", short = 'm', value_name = "MARKETPLACE")]
     marketplace_name: Option<String>,
 
@@ -150,52 +162,81 @@ pub async fn run_plugin_add(
     overrides: Vec<(String, toml::Value)>,
     args: AddPluginArgs,
 ) -> Result<()> {
-    let PluginCommandContext {
-        codex_home,
-        plugins_input,
-        manager,
-    } = load_plugin_command_context(overrides).await?;
+    let context = load_plugin_command_context(overrides).await?;
     let AddPluginArgs {
         plugin,
         marketplace_name,
         json,
     } = args;
-    let PluginSelection {
-        plugin_name,
-        marketplace_name,
-        ..
-    } = parse_plugin_selection(plugin, marketplace_name)?;
-    let marketplace = find_marketplace_for_plugin(
-        &manager,
-        codex_home.as_path(),
-        &plugins_input,
-        &marketplace_name,
-        &plugin_name,
-    )?;
-    let outcome = manager
-        .install_plugin(
-            &plugins_input.config_layer_stack,
-            PluginInstallRequest {
-                plugin_name,
-                marketplace_path: marketplace.path,
-            },
+    let selection = parse_plugin_selection(plugin, marketplace_name)?;
+    let outcome = if selection.marketplace_name == REMOTE_GLOBAL_MARKETPLACE_NAME {
+        let mut listing = fetch_remote_marketplaces(
+            &context,
+            Some(&selection.marketplace_name),
+            RemotePluginCatalogCacheMode::PreferFreshCache,
         )
         .await?;
+        // A newly published plugin may be missing from an otherwise fresh catalog cache.
+        if listing.catalog_cache_used
+            && !listing
+                .marketplaces
+                .iter()
+                .flat_map(|marketplace| &marketplace.plugins)
+                .any(|plugin| plugin.name == selection.plugin_name)
+        {
+            listing = fetch_remote_marketplaces(
+                &context,
+                Some(&selection.marketplace_name),
+                RemotePluginCatalogCacheMode::ForceRefetch,
+            )
+            .await?;
+        }
+        let plugin = resolve_remote_plugin(listing.marketplaces, &selection)?;
+        context
+            .manager
+            .install_remote_plugin(
+                &context.plugins_input,
+                context.auth.as_ref(),
+                RemotePluginInstallRequest {
+                    marketplace_name: selection.marketplace_name,
+                    remote_plugin_id: plugin.remote_plugin_id,
+                    install_attempt_id: None,
+                },
+                /*on_effective_plugins_changed*/ None,
+            )
+            .await?
+            .installed
+    } else {
+        let marketplace = find_marketplace_for_plugin(
+            &context.manager,
+            context.codex_home.as_path(),
+            &context.plugins_input,
+            &selection.marketplace_name,
+            &selection.plugin_name,
+        )?;
+        context
+            .manager
+            .install_plugin(
+                &context.plugins_input,
+                PluginInstallRequest {
+                    plugin_name: selection.plugin_name,
+                    marketplace_path: marketplace.path,
+                },
+            )
+            .await?
+    };
+    let output = JsonPluginAddOutput::from_outcome(outcome);
 
     if json {
-        let output = JsonPluginAddOutput::from_outcome(outcome);
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
 
     println!(
         "Added plugin `{}` from marketplace `{}`.",
-        outcome.plugin_id.plugin_name, outcome.plugin_id.marketplace_name
+        output.name, output.marketplace_name
     );
-    println!(
-        "Installed plugin root: {}",
-        outcome.installed_path.as_path().display()
-    );
+    println!("Installed plugin root: {}", output.installed_path);
 
     Ok(())
 }
@@ -228,39 +269,70 @@ pub async fn run_plugin_list(
     overrides: Vec<(String, toml::Value)>,
     args: ListPluginsArgs,
 ) -> Result<()> {
+    let context = load_plugin_command_context(overrides).await?;
+    let remote_listing = fetch_remote_marketplaces(
+        &context,
+        args.marketplace_name.as_deref(),
+        RemotePluginCatalogCacheMode::PreferFreshCache,
+    )
+    .await?;
     let PluginCommandContext {
         codex_home,
         plugins_input,
         manager,
         ..
-    } = load_plugin_command_context(overrides).await?;
+    } = context;
     let outcome = manager
-        .list_marketplaces_for_config(&plugins_input, &[], /*include_openai_curated*/ true)
+        .list_marketplaces_for_config(
+            &plugins_input,
+            &[],
+            /*include_openai_curated*/ !remote_listing.uses_global_catalog,
+        )
         .context("failed to list marketplace plugins")?;
     ensure_configured_marketplace_snapshots_loaded(
         codex_home.as_path(),
         &plugins_input,
         &outcome.errors,
-        /*marketplace_name*/ None,
+        args.marketplace_name.as_deref(),
     )?;
 
+    let marketplace_sources = configured_marketplace_sources(&plugins_input, codex_home.as_path());
     let marketplaces = outcome
         .marketplaces
         .into_iter()
+        .map(|marketplace| {
+            let source = marketplace_sources.get(&marketplace.name).cloned();
+            PluginListMarketplace {
+                plugins: marketplace
+                    .plugins
+                    .into_iter()
+                    .map(|plugin| {
+                        PluginListEntry::from_configured_plugin(
+                            &marketplace.name,
+                            source.clone(),
+                            plugin,
+                        )
+                    })
+                    .collect(),
+                name: marketplace.name,
+                path: Some(marketplace.path),
+            }
+        })
+        .chain(
+            remote_listing
+                .marketplaces
+                .into_iter()
+                .map(PluginListMarketplace::from),
+        )
         .filter(|marketplace| {
             args.marketplace_name
                 .as_ref()
                 .is_none_or(|name| marketplace.name == *name)
         })
         .collect::<Vec<_>>();
-    let marketplace_sources = configured_marketplace_sources(&plugins_input, codex_home.as_path());
 
     if args.json {
-        let output = JsonPluginListOutput::from_marketplaces(
-            marketplaces,
-            args.available,
-            &marketplace_sources,
-        );
+        let output = JsonPluginListOutput::from_marketplaces(marketplaces, args.available);
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
@@ -277,7 +349,6 @@ pub async fn run_plugin_list(
             let mut plugin_width = "PLUGIN".len();
             let mut status_width = "STATUS".len();
             let mut installed_version_width = "VERSION".len();
-            let mut path_width = "PATH".len();
 
             for plugin in &marketplace.plugins {
                 let state = if plugin.installed && plugin.enabled {
@@ -287,19 +358,16 @@ pub async fn run_plugin_list(
                 } else {
                     "not installed"
                 };
-                let installed_version = plugin.installed_version.clone().unwrap_or_default();
+                let installed_version = plugin.display_version.clone().unwrap_or_default();
                 let path = match &plugin.source {
-                    codex_core_plugins::marketplace::MarketplacePluginSource::Local { path } => {
-                        path.as_path().display().to_string()
-                    }
-                    codex_core_plugins::marketplace::MarketplacePluginSource::Git {
-                        url,
-                        path,
-                        ref_name,
-                        sha,
+                    JsonPluginSource::Remote { id } => id.clone(),
+                    JsonPluginSource::Local { path } => path.clone(),
+                    JsonPluginSource::Git { url, ref_name, sha }
+                    | JsonPluginSource::GitSubdir {
+                        url, ref_name, sha, ..
                     } => {
                         let mut parts = vec![url.clone()];
-                        if let Some(path) = path {
+                        if let JsonPluginSource::GitSubdir { path, .. } = &plugin.source {
                             parts.push(format!("path `{path}`"));
                         }
                         if let Some(ref_name) = ref_name {
@@ -310,7 +378,7 @@ pub async fn run_plugin_list(
                         }
                         parts.join(", ")
                     }
-                    codex_core_plugins::marketplace::MarketplacePluginSource::Npm {
+                    JsonPluginSource::Npm {
                         package,
                         version,
                         registry,
@@ -325,26 +393,29 @@ pub async fn run_plugin_list(
                         parts.join(", ")
                     }
                 };
-                plugin_width = plugin_width.max(plugin.id.len());
+                plugin_width = plugin_width.max(plugin.plugin_id.len());
                 status_width = status_width.max(state.len());
                 installed_version_width = installed_version_width.max(installed_version.len());
-                path_width = path_width.max(path.len());
-                rows.push((plugin.id.clone(), state, installed_version, path));
+                rows.push((plugin.plugin_id.clone(), state, installed_version, path));
             }
 
             if index > 0 {
                 println!();
             }
             println!("Marketplace `{}`", marketplace.name);
-            println!("{}", marketplace.path.as_path().display());
+            if let Some(path) = &marketplace.path {
+                println!("{}", path.display());
+            } else {
+                println!("Remote catalog");
+            }
             println!();
             println!(
-                "{:<plugin_width$}  {:<status_width$}  {:<installed_version_width$}  {:<path_width$}",
-                "PLUGIN", "STATUS", "VERSION", "PATH"
+                "{:<plugin_width$}  {:<status_width$}  {:<installed_version_width$}  SOURCE",
+                "PLUGIN", "STATUS", "VERSION"
             );
             for (plugin, status, installed_version, path) in rows {
                 println!(
-                    "{plugin:<plugin_width$}  {status:<status_width$}  {installed_version:<installed_version_width$}  {path:<path_width$}"
+                    "{plugin:<plugin_width$}  {status:<status_width$}  {installed_version:<installed_version_width$}  {path}"
                 );
             }
         }
@@ -353,30 +424,67 @@ pub async fn run_plugin_list(
     Ok(())
 }
 
+struct PluginListMarketplace {
+    name: String,
+    path: Option<AbsolutePathBuf>,
+    plugins: Vec<PluginListEntry>,
+}
+
+impl From<RemoteMarketplace> for PluginListMarketplace {
+    fn from(marketplace: RemoteMarketplace) -> Self {
+        Self {
+            plugins: marketplace
+                .plugins
+                .into_iter()
+                .map(|plugin| {
+                    let version = plugin.local_version.or(plugin.version);
+                    PluginListEntry {
+                        plugin_id: plugin.id,
+                        name: plugin.name,
+                        marketplace_name: marketplace.name.clone(),
+                        display_version: version.clone(),
+                        version,
+                        installed: plugin.installed,
+                        enabled: plugin.enabled,
+                        source: JsonPluginSource::Remote {
+                            id: plugin.remote_plugin_id,
+                        },
+                        marketplace_source: None,
+                        install_policy: match plugin.install_policy {
+                            PluginInstallPolicy::NotAvailable => "NOT_AVAILABLE",
+                            PluginInstallPolicy::Available => "AVAILABLE",
+                            PluginInstallPolicy::InstalledByDefault => "INSTALLED_BY_DEFAULT",
+                        },
+                        auth_policy: match plugin.auth_policy {
+                            PluginAuthPolicy::OnInstall => "ON_INSTALL",
+                            PluginAuthPolicy::OnUse => "ON_USE",
+                        },
+                    }
+                })
+                .collect(),
+            name: marketplace.name,
+            path: None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct JsonPluginListOutput {
-    installed: Vec<JsonPluginListEntry>,
-    available: Vec<JsonPluginListEntry>,
+    installed: Vec<PluginListEntry>,
+    available: Vec<PluginListEntry>,
 }
 
 impl JsonPluginListOutput {
     fn from_marketplaces(
-        marketplaces: Vec<codex_core_plugins::ConfiguredMarketplace>,
+        marketplaces: Vec<PluginListMarketplace>,
         include_available: bool,
-        marketplace_sources: &HashMap<String, JsonMarketplaceSource>,
     ) -> Self {
         let mut installed = Vec::new();
         let mut available = Vec::new();
 
         for marketplace in marketplaces {
-            let marketplace_source = marketplace_sources.get(&marketplace.name).cloned();
-            for plugin in marketplace.plugins {
-                let entry = JsonPluginListEntry::from_configured_plugin(
-                    &marketplace.name,
-                    marketplace_source.clone(),
-                    plugin,
-                );
+            for entry in marketplace.plugins {
                 if entry.installed {
                     installed.push(entry);
                 } else if include_available {
@@ -394,11 +502,13 @@ impl JsonPluginListOutput {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct JsonPluginListEntry {
+struct PluginListEntry {
     plugin_id: String,
     name: String,
     marketplace_name: String,
     version: Option<String>,
+    #[serde(skip)]
+    display_version: Option<String>,
     installed: bool,
     enabled: bool,
     source: JsonPluginSource,
@@ -408,18 +518,20 @@ struct JsonPluginListEntry {
     auth_policy: &'static str,
 }
 
-impl JsonPluginListEntry {
+impl PluginListEntry {
     fn from_configured_plugin(
         marketplace_name: &str,
         marketplace_source: Option<JsonMarketplaceSource>,
         plugin: codex_core_plugins::ConfiguredMarketplacePlugin,
     ) -> Self {
-        let version = plugin.installed_version.or(plugin.local_version);
+        let display_version = plugin.installed_version;
+        let version = display_version.clone().or(plugin.local_version);
         Self {
             plugin_id: plugin.id,
             name: plugin.name,
             marketplace_name: marketplace_name.to_string(),
             version,
+            display_version,
             installed: plugin.installed,
             enabled: plugin.enabled,
             source: JsonPluginSource::from_marketplace_source(plugin.source),
@@ -433,6 +545,9 @@ impl JsonPluginListEntry {
 #[derive(Debug, Serialize)]
 #[serde(tag = "source", rename_all = "kebab-case")]
 enum JsonPluginSource {
+    Remote {
+        id: String,
+    },
     Local {
         path: String,
     },
@@ -507,10 +622,8 @@ pub(crate) fn configured_marketplace_sources(
     plugins_input: &PluginsConfigInput,
     codex_home: &Path,
 ) -> HashMap<String, JsonMarketplaceSource> {
-    let Some(user_config) = plugins_input.config_layer_stack.effective_user_config() else {
-        return HashMap::new();
-    };
-    let Some(marketplaces) = user_config
+    let effective_config = plugins_input.config_layer_stack.effective_config();
+    let Some(marketplaces) = effective_config
         .get("marketplaces")
         .and_then(toml::Value::as_table)
     else {
@@ -557,7 +670,7 @@ pub async fn run_plugin_remove(
     overrides: Vec<(String, toml::Value)>,
     args: RemovePluginArgs,
 ) -> Result<()> {
-    let PluginCommandContext { manager, .. } = load_plugin_command_context(overrides).await?;
+    let context = load_plugin_command_context(overrides).await?;
     let RemovePluginArgs {
         plugin,
         marketplace_name,
@@ -565,9 +678,41 @@ pub async fn run_plugin_remove(
     } = args;
     let selection = parse_plugin_selection(plugin, marketplace_name)?;
 
-    manager
-        .uninstall_plugin(selection.plugin_key.clone())
-        .await?;
+    if selection.marketplace_name == REMOTE_GLOBAL_MARKETPLACE_NAME {
+        ensure!(
+            context.plugins_input.plugins_enabled,
+            "remote plugins are not enabled"
+        );
+        let auth = context.auth.as_ref();
+        // Installed plugins may no longer appear in the directory or curated collection.
+        let marketplaces = context
+            .manager
+            .build_and_cache_remote_installed_plugin_marketplaces(
+                &context.plugins_input,
+                auth,
+                &[REMOTE_GLOBAL_MARKETPLACE_NAME],
+                /*on_effective_plugins_changed*/ None,
+            )
+            .await?;
+        let plugin = resolve_remote_plugin(marketplaces, &selection)?;
+        let outcome = context
+            .manager
+            .uninstall_remote_plugin(
+                &context.plugins_input,
+                auth,
+                &plugin.remote_plugin_id,
+                /*on_effective_plugins_changed*/ None,
+            )
+            .await?;
+        if let Some(err) = outcome.cache_removal_error {
+            return Err(err.into());
+        }
+    } else {
+        context
+            .manager
+            .uninstall_plugin(selection.plugin_key.clone())
+            .await?;
+    }
     if json {
         let output = JsonPluginRemoveOutput::from_selection(selection);
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -603,7 +748,8 @@ impl JsonPluginRemoveOutput {
 struct PluginCommandContext {
     codex_home: PathBuf,
     plugins_input: PluginsConfigInput,
-    manager: PluginsManager,
+    manager: Arc<PluginsManager>,
+    auth: Option<CodexAuth>,
 }
 
 async fn load_plugin_command_context(
@@ -614,22 +760,21 @@ async fn load_plugin_command_context(
         .await
         .context("failed to load configuration")?;
     let plugins_input = config.plugins_config_input();
-    let manager = plugins_manager_for_config(&config, load_cli_auth_mode(&config).await?);
+    let auth_manager = load_cli_auth_manager(&config).await?;
+    let manager = Arc::new(plugins_manager_for_config(
+        &config,
+        Arc::clone(&auth_manager),
+    ));
     Ok(PluginCommandContext {
         codex_home: codex_home.to_path_buf(),
         plugins_input,
         manager,
+        auth: auth_manager.auth().await,
     })
 }
 
-pub(crate) async fn load_cli_auth_mode(config: &Config) -> Result<Option<AuthMode>> {
-    Ok(
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true)
-            .await?
-            .auth()
-            .await
-            .map(|auth| auth.api_auth_mode()),
-    )
+pub(crate) async fn load_cli_auth_manager(config: &Config) -> Result<Arc<AuthManager>> {
+    Ok(AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await?)
 }
 
 struct PluginSelection {
@@ -673,6 +818,96 @@ fn parse_plugin_selection(
         (Err(_), None) => {
             bail!("plugin requires --marketplace unless passed as <plugin>@<marketplace>")
         }
+    }
+}
+
+#[derive(Default)]
+struct RemoteMarketplaceListing {
+    marketplaces: Vec<RemoteMarketplace>,
+    // A successful global catalog replaces the local curated catalog even when it is empty.
+    uses_global_catalog: bool,
+    catalog_cache_used: bool,
+}
+
+async fn fetch_remote_marketplaces(
+    context: &PluginCommandContext,
+    marketplace_name: Option<&str>,
+    cache_mode: RemotePluginCatalogCacheMode,
+) -> Result<RemoteMarketplaceListing> {
+    if marketplace_name.is_some_and(|name| name != REMOTE_GLOBAL_MARKETPLACE_NAME) {
+        return Ok(RemoteMarketplaceListing::default());
+    }
+    if !context.plugins_input.plugins_enabled {
+        ensure!(marketplace_name.is_none(), "remote plugins are not enabled");
+        return Ok(RemoteMarketplaceListing::default());
+    }
+    let auth = context.auth.as_ref();
+    if !auth.is_some_and(CodexAuth::uses_codex_backend) {
+        ensure!(
+            marketplace_name.is_none(),
+            "chatgpt authentication required for remote plugin catalog"
+        );
+        return Ok(RemoteMarketplaceListing::default());
+    }
+    let service = context.plugins_input.remote_plugin_service_config();
+    let result = if context.plugins_input.remote_plugin_enabled {
+        remote::fetch_remote_marketplaces(
+            &service,
+            auth,
+            &[RemoteMarketplaceSource::Global],
+            /*catalog_cache_root*/ Some(context.codex_home.as_path()),
+            cache_mode,
+        )
+        .await
+        .map(|outcome| RemoteMarketplaceListing {
+            marketplaces: outcome.marketplaces,
+            uses_global_catalog: true,
+            catalog_cache_used: outcome.catalog_cache_used,
+        })
+    } else {
+        remote::fetch_openai_curated_remote_collection_marketplace(
+            &service,
+            auth,
+            /*catalog_cache_root*/ Some(context.codex_home.as_path()),
+            cache_mode,
+        )
+        .await
+        .map(|outcome| RemoteMarketplaceListing {
+            marketplaces: outcome.marketplace.into_iter().collect(),
+            uses_global_catalog: false,
+            catalog_cache_used: outcome.catalog_cache_used,
+        })
+    };
+    match result {
+        Ok(listing) => Ok(listing),
+        Err(err) if marketplace_name.is_none() => {
+            eprintln!("Warning: failed to list remote marketplace plugins: {err}");
+            Ok(RemoteMarketplaceListing::default())
+        }
+        Err(err) => Err(err).context("failed to list remote marketplace plugins"),
+    }
+}
+
+fn resolve_remote_plugin(
+    marketplaces: Vec<RemoteMarketplace>,
+    selection: &PluginSelection,
+) -> Result<RemotePluginSummary> {
+    let matches = marketplaces
+        .into_iter()
+        .flat_map(|marketplace| marketplace.plugins)
+        .filter(|plugin| plugin.name == selection.plugin_name)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [plugin] => Ok(plugin.clone()),
+        [] => bail!(
+            "plugin `{}` was not found in remote marketplace `{}`",
+            selection.plugin_name,
+            selection.marketplace_name
+        ),
+        _ => bail!(
+            "plugin `{}` matched multiple remote plugins",
+            selection.plugin_key
+        ),
     }
 }
 
@@ -756,10 +991,8 @@ pub(crate) fn configured_marketplace_snapshot_issues(
     load_errors: &[MarketplaceListError],
     marketplace_name: Option<&str>,
 ) -> Vec<ConfiguredMarketplaceSnapshotIssue> {
-    let Some(user_config) = plugins_input.config_layer_stack.effective_user_config() else {
-        return Vec::new();
-    };
-    let Some(configured_marketplaces) = user_config
+    let effective_config = plugins_input.config_layer_stack.effective_config();
+    let Some(configured_marketplaces) = effective_config
         .get("marketplaces")
         .and_then(toml::Value::as_table)
     else {

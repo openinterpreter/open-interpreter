@@ -1,3 +1,5 @@
+//! Shared tool-mention syntax and history encoding. Callers decide which linked paths to accept.
+
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
@@ -15,10 +17,19 @@ pub(crate) struct LinkedMention {
 pub(crate) struct DecodedHistoryText {
     pub(crate) text: String,
     pub(crate) mentions: Vec<LinkedMention>,
+    pub(crate) task_mention_ranges: Vec<std::ops::Range<usize>>,
 }
 
 #[allow(dead_code)]
 pub(crate) fn encode_history_mentions(text: &str, mentions: &[LinkedMention]) -> String {
+    encode_history_mentions_at_elements(text, mentions, &[])
+}
+
+pub(crate) fn encode_history_mentions_at_elements(
+    text: &str,
+    mentions: &[LinkedMention],
+    elements: &[codex_protocol::user_input::TextElement],
+) -> String {
     if mentions.is_empty() || text.is_empty() {
         return text.to_string();
     }
@@ -47,6 +58,23 @@ pub(crate) fn encode_history_mentions(text: &str, mentions: &[LinkedMention]) ->
             byte if byte == TOOL_MENTION_SIGIL as u8 || byte == PLUGIN_TEXT_MENTION_SIGIL as u8
         ) {
             let sigil = bytes[index] as char;
+            if sigil == PLUGIN_TEXT_MENTION_SIGIL
+                && let Some(element) = elements
+                    .iter()
+                    .find(|element| element.byte_range.start == index)
+                && let Some(name) = text.get(index + 1..element.byte_range.end)
+                && mentions_by_token
+                    .get(&(sigil, name))
+                    .and_then(VecDeque::front)
+                    .is_some_and(|path| crate::task_mentions::valid_thread_path(path).is_some())
+                && let Some(path) = mentions_by_token
+                    .get_mut(&(sigil, name))
+                    .and_then(VecDeque::pop_front)
+            {
+                out.push_str(&crate::task_mentions::format_task_link(name, path));
+                index += 1 + name.len();
+                continue;
+            }
             if sigil == TOOL_MENTION_SIGIL || starts_plaintext_mention(text, index) {
                 let name_start = index + 1;
                 if let Some(first) = bytes.get(name_start)
@@ -61,6 +89,12 @@ pub(crate) fn encode_history_mentions(text: &str, mentions: &[LinkedMention]) ->
 
                     let name = &text[name_start..name_end];
                     if (sigil == TOOL_MENTION_SIGIL || ends_plaintext_mention(bytes, name_end))
+                        && mentions_by_token
+                            .get(&(sigil, name))
+                            .and_then(VecDeque::front)
+                            .is_some_and(|path| {
+                                crate::task_mentions::valid_thread_path(path).is_none()
+                            })
                         && let Some(path) = mentions_by_token
                             .get_mut(&(sigil, name))
                             .and_then(VecDeque::pop_front)
@@ -95,12 +129,29 @@ pub(crate) fn decode_history_mentions_with_at_mentions(
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut mentions = Vec::new();
+    let mut task_mention_ranges = Vec::new();
     let mut index = 0usize;
 
     while index < bytes.len() {
+        if at_mentions_enabled
+            && let Some((name, path, end_index)) =
+                crate::task_mentions::parse_task_link(text, index)
+        {
+            let start = out.len();
+            out.push('@');
+            out.push_str(&name);
+            task_mention_ranges.push(start..out.len());
+            mentions.push(LinkedMention {
+                sigil: '@',
+                mention: name,
+                path,
+            });
+            index = end_index;
+            continue;
+        }
         if bytes[index] == b'['
             && let Some((sigil, name, path, end_index)) =
-                parse_history_linked_mention(text, bytes, index, at_mentions_enabled)
+                parse_history_linked_mention(text, index, at_mentions_enabled)
         {
             out.push(sigil);
             out.push_str(name);
@@ -123,19 +174,19 @@ pub(crate) fn decode_history_mentions_with_at_mentions(
     DecodedHistoryText {
         text: out,
         mentions,
+        task_mention_ranges,
     }
 }
 
-fn parse_history_linked_mention<'a>(
-    text: &'a str,
-    text_bytes: &[u8],
+fn parse_history_linked_mention(
+    text: &str,
     start: usize,
     at_mentions_enabled: bool,
-) -> Option<(char, &'a str, &'a str, usize)> {
+) -> Option<(char, &str, &str, usize)> {
     // TUI historically wrote `$name`, but selected unified `@` mentions should preserve `@` on
     // history round-trip for any canonical tool path.
     if let Some((name, path, end_index)) =
-        parse_linked_tool_mention(text, text_bytes, start, TOOL_MENTION_SIGIL)
+        parse_linked_tool_mention(text, start, TOOL_MENTION_SIGIL)
         && !is_common_env_var(name)
         && is_tool_path(path)
     {
@@ -144,14 +195,14 @@ fn parse_history_linked_mention<'a>(
 
     if at_mentions_enabled {
         if let Some((name, path, end_index)) =
-            parse_linked_tool_mention(text, text_bytes, start, PLUGIN_TEXT_MENTION_SIGIL)
+            parse_linked_tool_mention(text, start, PLUGIN_TEXT_MENTION_SIGIL)
             && !is_common_env_var(name)
             && is_tool_path(path)
         {
             return Some((PLUGIN_TEXT_MENTION_SIGIL, name, path, end_index));
         }
     } else if let Some((name, path, end_index)) =
-        parse_linked_tool_mention(text, text_bytes, start, PLUGIN_TEXT_MENTION_SIGIL)
+        parse_linked_tool_mention(text, start, PLUGIN_TEXT_MENTION_SIGIL)
         && !is_common_env_var(name)
         && path.starts_with("plugin://")
     {
@@ -161,12 +212,13 @@ fn parse_history_linked_mention<'a>(
     None
 }
 
-fn parse_linked_tool_mention<'a>(
-    text: &'a str,
-    text_bytes: &[u8],
+/// Parse a linked mention at an opening `[` byte, returning its name, path, and end offset.
+pub(crate) fn parse_linked_tool_mention(
+    text: &str,
     start: usize,
     sigil: char,
-) -> Option<(&'a str, &'a str, usize)> {
+) -> Option<(&str, &str, usize)> {
+    let text_bytes = text.as_bytes();
     let sigil_index = start + 1;
     if text_bytes.get(sigil_index) != Some(&(sigil as u8)) {
         return None;
@@ -218,7 +270,7 @@ fn parse_linked_tool_mention<'a>(
     Some((name, path, path_end + 1))
 }
 
-fn is_mention_name_char(byte: u8) -> bool {
+pub(crate) fn is_mention_name_char(byte: u8) -> bool {
     matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-')
 }
 
@@ -284,6 +336,45 @@ fn is_tool_path(path: &str) -> bool {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn parse_linked_mentions_preserves_byte_offsets_and_trims_paths() {
+        let prefix = "before 🦀 ";
+        for sigil in [TOOL_MENTION_SIGIL, PLUGIN_TEXT_MENTION_SIGIL] {
+            let text =
+                format!("{prefix}[{sigil}tool_1-name] \n\t( skill://路径/SKILL.md ) trailing");
+            assert_eq!(
+                parse_linked_tool_mention(&text, prefix.len(), sigil),
+                Some((
+                    "tool_1-name",
+                    "skill://路径/SKILL.md",
+                    text.len() - " trailing".len()
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn parse_linked_mentions_rejects_malformed_links() {
+        for text in [
+            "[",
+            "[$",
+            "[$](app://tool)",
+            "[$tool.name](app://tool)",
+            "[$tool(app://tool)",
+            "[$tool]app://tool)",
+            "[$tool](app://tool",
+            "[$tool]()",
+            "[$tool]( \t )",
+            "[@tool](app://tool)",
+        ] {
+            assert_eq!(
+                parse_linked_tool_mention(text, /*start*/ 0, TOOL_MENTION_SIGIL),
+                None,
+                "{text}"
+            );
+        }
+    }
 
     #[test]
     fn decode_history_mentions_restores_visible_tokens() {

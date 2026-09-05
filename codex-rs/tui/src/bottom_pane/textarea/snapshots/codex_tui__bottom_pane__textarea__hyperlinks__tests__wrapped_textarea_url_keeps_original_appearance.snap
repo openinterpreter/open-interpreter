@@ -1,0 +1,7 @@
+---
+source: tui/src/bottom_pane/textarea/hyperlinks_tests.rs
+expression: visible
+---
+Fix CI on https://
+github.com/openai/codex/
+pull/20252

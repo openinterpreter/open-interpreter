@@ -1,0 +1,13 @@
+---
+source: tui/src/bottom_pane/tests/actionable_banner_tests.rs
+assertion_line: 32
+expression: rendered
+---
+                                                                      
+  Usage limit reached                                                 
+  You can change models or request more usage.                        
+                                                                      
+                                                                      
+› Ask Codex to do anything                                            
+                                                                      
+  ? for shortcuts                                  100% context left

@@ -2,6 +2,7 @@ mod layer_io;
 mod local;
 #[cfg(target_os = "macos")]
 mod macos;
+mod project_discovery;
 #[cfg(test)]
 mod tests;
 
@@ -37,7 +38,10 @@ use crate::thread_config::ThreadConfigContext;
 use crate::thread_config::ThreadConfigLoader;
 use codex_file_system::ExecutorFileSystem;
 use codex_git_utils::resolve_root_git_project_for_trust;
+use codex_network_proxy::credential_broker_provider_context_env_keys;
+use codex_network_proxy::is_credential_broker_provider_env_key;
 use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::EnvironmentVariablePattern;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::protocol::AskForApproval;
@@ -46,6 +50,7 @@ use codex_utils_absolute_path::AbsolutePathBufGuard;
 use codex_utils_path_uri::PathUri;
 use dunce::canonicalize as normalize_path;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 #[cfg(windows)]
@@ -94,11 +99,12 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 /// - system    `/etc/codex/requirements.toml` (Unix) or
 ///   `%ProgramData%\OpenAI\Codex\requirements.toml` (Windows)
 /// - cloud:    enterprise-managed cloud config bundle requirements
-/// - legacy:   managed_config.toml reinterpreted as requirements.toml
+/// - legacy:   `/etc/codex/managed_config.toml` (Unix) reinterpreted as
+///   requirements.toml
 /// - admin:    managed preferences (*)
 ///
-/// For backwards compatibility, we also load from
-/// `managed_config.toml` and map it to `requirements.toml`.
+/// For backwards compatibility, Unix continues to load
+/// `/etc/codex/managed_config.toml` and map it to `requirements.toml`.
 ///
 /// Configuration is built up from multiple layers in the following order:
 ///
@@ -235,10 +241,12 @@ pub async fn load_config_layers_state(
     let loaded_config_layers =
         layer_io::load_config_layers_internal(fs, codex_home, overrides.clone(), strict_config)
             .await?;
+    let mut startup_warnings = (!loaded_config_layers.startup_warnings.is_empty())
+        .then(|| loaded_config_layers.startup_warnings.clone());
     if !ignore_managed_requirements {
         requirements_layers.extend(system_requirements_layer);
         requirements_layers.extend(bundle_requirements_layers);
-        // Continue to support the legacy `managed_config.toml` locations as
+        // Continue to support loaded legacy `managed_config.toml` sources as
         // requirements layers for backwards compatibility.
         requirements_layers.extend(requirements_layers_from_legacy_scheme(
             loaded_config_layers.clone(),
@@ -355,7 +363,6 @@ pub async fn load_config_layers_state(
         );
     }
 
-    let mut startup_warnings = None;
     if !ignore_project_config && let Some(cwd) = cwd {
         let mut merged_so_far = TomlValue::Table(toml::map::Map::new());
         for layer in &layers {
@@ -364,6 +371,13 @@ pub async fn load_config_layers_state(
         if let Some(cli_overrides_layer) = cli_overrides_layer.as_ref() {
             merge_toml_values(&mut merged_so_far, cli_overrides_layer);
         }
+        // Managed config wins over CLI config. Apply it before choosing the
+        // project root and trust, but keep its final layers above project config.
+        project_discovery::merge_managed_config_for_discovery(
+            &mut merged_so_far,
+            &loaded_config_layers,
+            codex_home,
+        )?;
 
         let project_root_markers = match project_root_markers_from_config(&merged_so_far) {
             Ok(markers) => markers.unwrap_or_else(default_project_root_markers),
@@ -378,9 +392,14 @@ pub async fn load_config_layers_state(
                 return Err(err);
             }
         };
-        let project_trust_context = match project_trust_context(
+        let mut project_trust_context = match project_trust_context(
             fs,
             &merged_so_far,
+            &credential_broker_trusted_config(
+                &merged_so_far,
+                &thread_config_layers,
+                &loaded_config_layers,
+            ),
             &cwd,
             &project_root_markers,
             codex_home,
@@ -404,6 +423,7 @@ pub async fn load_config_layers_state(
                 return Err(err);
             }
         };
+        apply_credential_broker_requirements(&mut project_trust_context, &config_requirements_toml);
         let project_layers = load_project_layers(
             fs,
             &cwd,
@@ -414,7 +434,9 @@ pub async fn load_config_layers_state(
         )
         .await?;
         layers.extend(project_layers.layers);
-        startup_warnings = Some(project_layers.startup_warnings);
+        startup_warnings
+            .get_or_insert_with(Vec::new)
+            .extend(project_layers.startup_warnings);
     }
 
     // Add a layer for runtime overrides from the CLI or UI, if any exist.
@@ -437,6 +459,7 @@ pub async fn load_config_layers_state(
     let LoadedConfigLayers {
         managed_config,
         managed_config_from_mdm,
+        ..
     } = loaded_config_layers;
     if let Some(config) = managed_config {
         let managed_parent = config.file.as_path().parent().ok_or_else(|| {
@@ -583,7 +606,10 @@ async fn load_config_toml_for_required_layer_raw(
     })?;
     let base_dir = AbsolutePathBuf::from_absolute_path(config_parent)?;
     let toml_file_uri = PathUri::from_abs_path(toml_file);
-    let toml_value = match fs.read_file_text(&toml_file_uri, /*sandbox*/ None).await {
+    let toml_value = match fs
+        .read_file_text(&toml_file_uri, Default::default(), /*sandbox*/ None)
+        .await
+    {
         Ok(contents) => {
             let config: TomlValue = toml::from_str(&contents).map_err(|err| {
                 let config_error =
@@ -674,7 +700,11 @@ pub async fn load_requirements_toml(
 ) -> io::Result<Option<RequirementsLayerEntry>> {
     let requirements_toml_file_uri = PathUri::from_abs_path(requirements_toml_file);
     match fs
-        .read_file_text(&requirements_toml_file_uri, /*sandbox*/ None)
+        .read_file_text(
+            &requirements_toml_file_uri,
+            Default::default(),
+            /*sandbox*/ None,
+        )
         .await
     {
         Ok(contents) => {
@@ -738,9 +768,26 @@ fn system_requirements_toml_file_with_overrides(
 /// Filesystem or managed-preference errors are returned so callers can conservatively avoid
 /// assuming that administrator-controlled configuration is absent.
 pub fn has_local_managed_configuration(codex_home: &Path) -> io::Result<bool> {
-    if layer_io::managed_config_default_path(codex_home).try_exists()?
-        || system_requirements_toml_file()?.as_path().try_exists()?
-    {
+    let system_requirements_file = system_requirements_toml_file()?;
+    has_local_managed_configuration_with_system_requirements_path(
+        codex_home,
+        system_requirements_file.as_path(),
+    )
+}
+
+fn has_local_managed_configuration_with_system_requirements_path(
+    codex_home: &Path,
+    system_requirements_path: &Path,
+) -> io::Result<bool> {
+    #[cfg(windows)]
+    let _ = codex_home;
+
+    #[cfg(not(windows))]
+    if layer_io::managed_config_default_path(codex_home).try_exists()? {
+        return Ok(true);
+    }
+
+    if system_requirements_path.try_exists()? {
         return Ok(true);
     }
 
@@ -854,6 +901,7 @@ fn requirements_layers_from_legacy_scheme(
     let LoadedConfigLayers {
         managed_config,
         managed_config_from_mdm,
+        ..
     } = loaded_config_layers;
 
     let layer_count =
@@ -950,6 +998,38 @@ fn toml_value_from_serializable<T: serde::Serialize>(value: T) -> io::Result<Tom
     TomlValue::try_from(value).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CredentialBrokerProjectState {
+    Unconfigured,
+    Disabled,
+    Enabled,
+}
+
+fn apply_credential_broker_requirements(
+    context: &mut ProjectTrustContext,
+    requirements: &crate::ConfigRequirementsWithSources,
+) {
+    if context.credential_broker == CredentialBrokerProjectState::Unconfigured {
+        return;
+    }
+    let enabled = requirements
+        .feature_requirements
+        .as_ref()
+        .and_then(|requirements| requirements.entries.get("network_proxy"))
+        .copied()
+        .unwrap_or(context.credential_broker == CredentialBrokerProjectState::Enabled);
+    context.credential_broker = if enabled
+        && requirements
+            .network
+            .as_ref()
+            .is_none_or(|network| network.enabled != Some(false))
+    {
+        CredentialBrokerProjectState::Enabled
+    } else {
+        CredentialBrokerProjectState::Disabled
+    };
+}
+
 struct ProjectTrustContext {
     project_root: AbsolutePathBuf,
     project_root_key: String,
@@ -960,6 +1040,8 @@ struct ProjectTrustContext {
     repo_root_lookup_keys: Option<Vec<String>>,
     projects_trust: std::collections::HashMap<String, TrustLevel>,
     user_config_file: AbsolutePathBuf,
+    credential_broker: CredentialBrokerProjectState,
+    credential_broker_binding_env: HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -1032,9 +1114,11 @@ impl ProjectTrustContext {
         let gated_features = "project-local config, hooks, and exec policies";
         let trust_key = decision.trust_key.as_str();
         let user_config_file = self.user_config_file.as_path().display();
+        // Trust may come from managed config. Keep the explicit-untrusted prefix
+        // stable because the remote TUI uses it to recognize existing decisions.
         match decision.trust_level {
             Some(TrustLevel::Untrusted) => Some(format!(
-                "{trust_key} is marked as untrusted in {user_config_file}. To load {gated_features}, mark it trusted."
+                "{trust_key} is marked as untrusted in the effective configuration. To load {gated_features}, update its trust setting. If that setting is managed by your organization, contact your administrator."
             )),
             _ => Some(format!(
                 "To load {gated_features}, add {trust_key} as a trusted project in {user_config_file}."
@@ -1084,21 +1168,140 @@ fn project_layer_entry(
     entry.with_hooks_config_folder_override(hooks_config_folder_override)
 }
 
-fn sanitize_project_config(config: &mut TomlValue) -> Vec<String> {
+fn sanitize_project_config(
+    config: &mut TomlValue,
+    credential_broker: CredentialBrokerProjectState,
+    trusted_binding_env: &HashMap<String, String>,
+) -> Vec<String> {
     let Some(table) = config.as_table_mut() else {
         return Vec::new();
     };
 
+    let credential_broker_configured =
+        credential_broker != CredentialBrokerProjectState::Unconfigured;
     let mut ignored_keys = Vec::new();
     for key in PROJECT_LOCAL_CONFIG_DENYLIST {
         if table.remove(*key).is_some() {
             ignored_keys.push((*key).to_string());
         }
     }
-    if let Some(features) = table.get_mut("features").and_then(TomlValue::as_table_mut)
-        && features.remove("respect_system_proxy").is_some()
+    if let Some(features) = table.get_mut("features").and_then(TomlValue::as_table_mut) {
+        if credential_broker == CredentialBrokerProjectState::Enabled
+            && features.remove("shell_snapshot").is_some()
+        {
+            ignored_keys.push("features.shell_snapshot".to_string());
+        }
+        if features.remove("respect_system_proxy").is_some() {
+            ignored_keys.push("features.respect_system_proxy".to_string());
+        }
+        if credential_broker_configured
+            && features
+                .get("network_proxy")
+                .is_some_and(|network_proxy| network_proxy.as_bool().is_some())
+        {
+            features.remove("network_proxy");
+            ignored_keys.push("features.network_proxy".to_string());
+        } else if let Some(network_proxy) = features
+            .get_mut("network_proxy")
+            .and_then(TomlValue::as_table_mut)
+        {
+            if network_proxy.remove("credential_broker").is_some() {
+                ignored_keys.push("features.network_proxy.credential_broker".to_string());
+            }
+            if credential_broker_configured && network_proxy.remove("enabled").is_some() {
+                ignored_keys.push("features.network_proxy.enabled".to_string());
+            }
+        }
+    }
+    if credential_broker == CredentialBrokerProjectState::Enabled
+        && let Some(policy) = table
+            .get_mut("shell_environment_policy")
+            .and_then(TomlValue::as_table_mut)
     {
-        ignored_keys.push("features.respect_system_proxy".to_string());
+        if policy.remove("experimental_use_profile").is_some() {
+            ignored_keys.push("shell_environment_policy.experimental_use_profile".to_string());
+        }
+        let binding_keys = credential_broker_provider_context_env_keys().collect::<Vec<_>>();
+        if let Some(overrides) = policy.get_mut("set").and_then(TomlValue::as_table_mut) {
+            overrides.retain(|key, _| {
+                if key.eq_ignore_ascii_case("ZDOTDIR")
+                    || key.eq_ignore_ascii_case("BASH_ENV")
+                    || is_credential_broker_provider_env_key(key)
+                    || binding_keys
+                        .iter()
+                        .any(|binding_key| key.eq_ignore_ascii_case(binding_key))
+                {
+                    ignored_keys.push(format!("shell_environment_policy.set.{key}"));
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
+        if let Some(include_only) = policy
+            .get_mut("include_only")
+            .and_then(TomlValue::as_array_mut)
+            && !include_only.is_empty()
+        {
+            for binding_key in &binding_keys {
+                if !include_only.iter().any(|pattern| {
+                    pattern.as_str().is_some_and(|pattern| {
+                        EnvironmentVariablePattern::new_case_insensitive(pattern)
+                            .matches(binding_key)
+                    })
+                }) {
+                    include_only.push(TomlValue::String(binding_key.to_string()));
+                }
+            }
+        }
+
+        if let Some(filters) = policy.get_mut("filters").and_then(TomlValue::as_table_mut)
+            && filters
+                .values()
+                .any(|action| action.as_str() == Some("include"))
+        {
+            for binding_key in &binding_keys {
+                if !filters.iter().any(|(pattern, action)| {
+                    action.as_str() == Some("include")
+                        && EnvironmentVariablePattern::new_case_insensitive(pattern)
+                            .matches(binding_key)
+                }) {
+                    filters.insert(
+                        binding_key.to_string(),
+                        TomlValue::String("include".to_string()),
+                    );
+                }
+            }
+        }
+
+        if !trusted_binding_env.is_empty()
+            && ["inherit", "exclude", "include_only", "filters"]
+                .iter()
+                .any(|key| policy.contains_key(*key))
+        {
+            let overrides = policy
+                .entry("set".to_string())
+                .or_insert_with(|| TomlValue::Table(toml::map::Map::new()));
+            if let Some(overrides) = overrides.as_table_mut() {
+                for (key, value) in trusted_binding_env {
+                    overrides.insert(key.clone(), TomlValue::String(value.clone()));
+                }
+            }
+        }
+    }
+    // Repository contents must not turn an ordinary key into a permission increase.
+    if let Some(chat) = table
+        .get_mut("tui")
+        .and_then(|tui| tui.get_mut("keymap"))
+        .and_then(|keymap| keymap.get_mut("chat"))
+        .and_then(TomlValue::as_table_mut)
+    {
+        for key in ["previous_permission_mode", "next_permission_mode"] {
+            if chat.remove(key).is_some() {
+                ignored_keys.push(format!("tui.keymap.chat.{key}"));
+            }
+        }
     }
 
     ignored_keys
@@ -1124,6 +1327,7 @@ fn project_ignored_config_keys_warning(
 async fn project_trust_context(
     fs: &dyn ExecutorFileSystem,
     merged_config: &TomlValue,
+    trusted_broker_config: &TomlValue,
     cwd: &AbsolutePathBuf,
     project_root_markers: &[String],
     config_base_dir: &Path,
@@ -1158,6 +1362,58 @@ async fn project_trust_context(
         .into_iter()
         .filter_map(|(key, project)| project.trust_level.map(|trust_level| (key, trust_level)))
         .collect();
+    let network_proxy = trusted_broker_config
+        .get("features")
+        .and_then(|features| features.get("network_proxy"))
+        .and_then(TomlValue::as_table);
+    let credential_broker_configured = network_proxy.is_some_and(|network_proxy| {
+        network_proxy.get("credential_broker") == Some(&TomlValue::Boolean(true))
+    });
+    let credential_broker = if credential_broker_configured {
+        if network_proxy
+            .and_then(|network_proxy| network_proxy.get("enabled"))
+            .and_then(TomlValue::as_bool)
+            .unwrap_or(false)
+        {
+            CredentialBrokerProjectState::Enabled
+        } else {
+            CredentialBrokerProjectState::Disabled
+        }
+    } else {
+        CredentialBrokerProjectState::Unconfigured
+    };
+    let credential_broker_binding_env = if credential_broker_configured {
+        let trusted_policy_overrides = trusted_broker_config
+            .get("shell_environment_policy")
+            .and_then(|policy| policy.get("set"))
+            .and_then(TomlValue::as_table);
+        credential_broker_provider_context_env_keys()
+            .filter_map(|key| {
+                let trusted_override = trusted_policy_overrides
+                    .and_then(|overrides| {
+                        overrides.iter().find(|(candidate, _)| {
+                            if cfg!(windows) {
+                                candidate.eq_ignore_ascii_case(key)
+                            } else {
+                                candidate.as_str() == key
+                            }
+                        })
+                    })
+                    .and_then(|(name, value)| {
+                        value
+                            .as_str()
+                            .map(|value| (name.clone(), value.to_string()))
+                    });
+                trusted_override.or_else(|| {
+                    std::env::var(key)
+                        .ok()
+                        .map(|value| (key.to_string(), value))
+                })
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
 
     Ok(ProjectTrustContext {
         project_root,
@@ -1169,7 +1425,27 @@ async fn project_trust_context(
         repo_root_lookup_keys,
         projects_trust,
         user_config_file: user_config_file.clone(),
+        credential_broker,
+        credential_broker_binding_env,
     })
+}
+
+fn credential_broker_trusted_config(
+    merged_config: &TomlValue,
+    thread_config_layers: &[ConfigLayerEntry],
+    loaded_config_layers: &LoadedConfigLayers,
+) -> TomlValue {
+    let mut trusted_config = merged_config.clone();
+    for layer in thread_config_layers {
+        merge_toml_values(&mut trusted_config, &layer.config);
+    }
+    if let Some(config) = loaded_config_layers.managed_config.as_ref() {
+        merge_toml_values(&mut trusted_config, &config.managed_config);
+    }
+    if let Some(config) = loaded_config_layers.managed_config_from_mdm.as_ref() {
+        merge_toml_values(&mut trusted_config, &config.managed_config);
+    }
+    trusted_config
 }
 
 /// Canonicalize the path and convert it to a string to be used as a key in the
@@ -1295,13 +1571,26 @@ async fn find_project_root(
         for marker in project_root_markers {
             let marker_path = ancestor.join(marker);
             let marker_path_uri = PathUri::from_abs_path(&marker_path);
-            if fs
-                .get_metadata(&marker_path_uri, /*sandbox*/ None)
+            let Ok(metadata) = fs
+                .get_metadata(&marker_path_uri, Default::default(), /*sandbox*/ None)
                 .await
-                .is_ok()
+            else {
+                continue;
+            };
+            if marker == ".git"
+                && metadata.is_directory
+                && fs
+                    .get_metadata(
+                        &PathUri::from_abs_path(&marker_path.join("HEAD")),
+                        Default::default(),
+                        /*sandbox*/ None,
+                    )
+                    .await
+                    .is_err()
             {
-                return Ok(ancestor);
+                continue;
             }
+            return Ok(ancestor);
         }
     }
     Ok(cwd.clone())
@@ -1312,7 +1601,10 @@ async fn find_git_checkout_root(
     cwd: &AbsolutePathBuf,
 ) -> Option<AbsolutePathBuf> {
     let cwd_uri = PathUri::from_abs_path(cwd);
-    let base = match fs.get_metadata(&cwd_uri, /*sandbox*/ None).await {
+    let base = match fs
+        .get_metadata(&cwd_uri, Default::default(), /*sandbox*/ None)
+        .await
+    {
         Ok(metadata) if metadata.is_directory => cwd.clone(),
         _ => cwd.parent()?,
     };
@@ -1320,13 +1612,25 @@ async fn find_git_checkout_root(
     for dir in base.ancestors() {
         let dot_git = dir.join(".git");
         let dot_git_uri = PathUri::from_abs_path(&dot_git);
-        if fs
-            .get_metadata(&dot_git_uri, /*sandbox*/ None)
+        let Ok(metadata) = fs
+            .get_metadata(&dot_git_uri, Default::default(), /*sandbox*/ None)
             .await
-            .is_ok()
+        else {
+            continue;
+        };
+        if metadata.is_directory
+            && fs
+                .get_metadata(
+                    &PathUri::from_abs_path(&dot_git.join("HEAD")),
+                    Default::default(),
+                    /*sandbox*/ None,
+                )
+                .await
+                .is_err()
         {
-            return Some(dir);
+            continue;
         }
+        return Some(dir);
     }
     None
 }
@@ -1434,7 +1738,7 @@ async fn discover_project_layers(
         let dot_codex_abs = dir.join(project_config_dir_name());
         let dot_codex_uri = PathUri::from_abs_path(&dot_codex_abs);
         if !fs
-            .get_metadata(&dot_codex_uri, /*sandbox*/ None)
+            .get_metadata(&dot_codex_uri, Default::default(), /*sandbox*/ None)
             .await
             .map(|metadata| metadata.is_directory)
             .unwrap_or(false)
@@ -1452,7 +1756,10 @@ async fn discover_project_layers(
         }
         let config_file = dot_codex_abs.join(CONFIG_TOML_FILE);
         let config_file_uri = PathUri::from_abs_path(&config_file);
-        match fs.read_file_text(&config_file_uri, /*sandbox*/ None).await {
+        match fs
+            .read_file_text(&config_file_uri, Default::default(), /*sandbox*/ None)
+            .await
+        {
             Ok(contents) => {
                 let config: TomlValue = match toml::from_str(&contents) {
                     Ok(config) => config,
@@ -1485,7 +1792,11 @@ async fn discover_project_layers(
                         dot_codex_abs.as_path(),
                     )?;
                 }
-                let ignored_project_config_keys = sanitize_project_config(&mut config);
+                let ignored_project_config_keys = sanitize_project_config(
+                    &mut config,
+                    trust_context.credential_broker,
+                    &trust_context.credential_broker_binding_env,
+                );
                 if disabled_reason.is_none() && !ignored_project_config_keys.is_empty() {
                     startup_warnings.push(project_ignored_config_keys_warning(
                         &dot_codex_abs,
@@ -1564,7 +1875,11 @@ async fn load_root_checkout_project_config(
     let hooks_config_file_uri = PathUri::from_abs_path(&hooks_config_file);
     Ok(
         match fs
-            .read_file_text(&hooks_config_file_uri, /*sandbox*/ None)
+            .read_file_text(
+                &hooks_config_file_uri,
+                Default::default(),
+                /*sandbox*/ None,
+            )
             .await
         {
             Ok(contents) => {

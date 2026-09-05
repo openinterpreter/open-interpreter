@@ -190,8 +190,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::select;
@@ -207,32 +205,48 @@ mod agent_message_consolidation;
 mod agent_navigation;
 mod agent_picker;
 mod agent_status_feed;
+mod agents_overview;
+mod agents_overview_threads;
+mod agents_overview_view;
+pub(crate) use agents_overview::AGENTS_OVERVIEW_VIEW_ID;
 mod app_server_event_targets;
 mod app_server_events;
 pub(crate) mod app_server_requests;
+mod backend_banner_fallback;
 mod background_requests;
 mod config_persistence;
+mod connector_mentions;
 mod event_dispatch;
+mod exit_summary;
+mod file_change_approvals;
 mod history_pagination;
 mod history_ui;
 mod input;
 mod loaded_threads;
 mod pending_interactive_replay;
+mod permission_shortcuts;
 mod pets;
 mod platform_actions;
 mod plugin_mentions;
+mod rate_limit_refresh;
+mod recap;
+mod reconnect;
 mod replay_filter;
 mod resize_reflow;
+mod resume_config;
 mod safety_buffering;
 mod session_lifecycle;
 mod side;
 mod startup_prompts;
+mod thread_event_buffer;
 mod thread_events;
 mod thread_goal_actions;
 mod thread_routing;
 mod thread_session_state;
 mod thread_settings;
+mod thread_title;
 mod transcript_export;
+mod working_directory;
 
 use self::agent_navigation::AgentNavigationDirection;
 use self::agent_navigation::AgentNavigationState;
@@ -410,7 +424,8 @@ const COMMIT_ANIMATION_TICK: Duration = tui::TARGET_FRAME_INTERVAL;
 pub struct AppExitInfo {
     pub token_usage: TokenUsage,
     pub thread_id: Option<ThreadId>,
-    pub resume_hint: Option<String>,
+    pub resume_hint: Option<ResumableThread>,
+    pub disconnect_info: Option<DisconnectInfo>,
     pub update_action: Option<UpdateAction>,
     pub exit_reason: ExitReason,
 }
@@ -421,11 +436,15 @@ impl AppExitInfo {
             token_usage: TokenUsage::default(),
             thread_id: None,
             resume_hint: None,
+            disconnect_info: None,
             update_action: None,
             exit_reason: ExitReason::Fatal(message.into()),
         }
     }
 }
+
+pub use exit_summary::DisconnectInfo;
+pub use exit_summary::ResumableThread;
 
 #[derive(Debug)]
 pub(crate) enum AppRunControl {
@@ -436,6 +455,10 @@ pub(crate) enum AppRunControl {
 #[derive(Debug, Clone)]
 pub enum ExitReason {
     UserRequested,
+    Archived(ThreadId),
+    TurnInterrupted,
+    /// The current thread was deleted, rather than disconnected.
+    ThreadRemoved,
     Fatal(String),
 }
 
@@ -456,12 +479,6 @@ fn session_summary(
         usage_line,
         resume_hint,
     })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResumableThread {
-    thread_id: ThreadId,
-    thread_name: Option<String>,
 }
 
 fn resumable_thread(
@@ -521,12 +538,14 @@ pub(crate) struct App {
     /// Config is stored here so we can recreate ChatWidgets as needed.
     pub(crate) config: Config,
     launch_cwd: PathBuf,
+    /// Resume anchor selected by `/cd`; ordinary resumes retain the immutable launch cwd.
+    runtime_working_directory_override: Option<PathBuf>,
     pub(crate) state_db: Option<StateDbHandle>,
     cli_kv_overrides: Vec<(String, TomlValue)>,
     harness_overrides: ConfigOverrides,
     loader_overrides: LoaderOverrides,
     cloud_config_bundle: CloudConfigBundleLoader,
-    runtime_approval_policy_override: Option<AskForApproval>,
+    runtime_approval_policy_override: Option<RuntimeApprovalPolicyOverride>,
     runtime_permission_profile_override: Option<RuntimePermissionProfileOverride>,
 
     pub(crate) file_search: FileSearchManager,
@@ -548,8 +567,8 @@ pub(crate) struct App {
     pub(crate) keymap: RuntimeKeymap,
     pub(crate) key_chord_matcher: KeyChordMatcher,
 
-    /// Controls the animation thread that sends CommitTick events.
-    pub(crate) commit_anim_running: Arc<AtomicBool>,
+    /// The foreground loop owns stream pacing; stopped animations have no timer.
+    pub(crate) commit_animation: Option<tokio::time::Interval>,
     // Shared across ChatWidget instances so invalid status-line config warnings only emit once.
     status_line_invalid_items_warned: Arc<AtomicBool>,
     // Shared across ChatWidget instances so invalid terminal-title config warnings only emit once.
@@ -568,6 +587,7 @@ pub(crate) struct App {
     feedback_audience: FeedbackAudience,
     environment_manager: Arc<EnvironmentManager>,
     app_server_target: AppServerTarget,
+    reconnect: reconnect::ReconnectState,
     /// Set when the user confirms an update; propagated on exit.
     pub(crate) pending_update_action: Option<UpdateAction>,
 
@@ -584,8 +604,10 @@ pub(crate) struct App {
     windows_sandbox: WindowsSandboxState,
 
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
+    temporary_structured_requests: HashMap<ThreadId, mpsc::UnboundedSender<ServerNotification>>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
+    agents_overview: agents_overview::AgentsOverviewState,
     side_threads: HashMap<ThreadId, SideThreadState>,
     abandoned_side_threads: HashSet<ThreadId>,
     active_thread_id: Option<ThreadId>,
@@ -595,6 +617,9 @@ pub(crate) struct App {
     primary_session_configured: Option<ThreadSessionState>,
     pending_primary_events: VecDeque<ThreadBufferedEvent>,
     pending_app_server_requests: PendingAppServerRequests,
+    dynamic_tool_status_updates:
+        tokio::sync::broadcast::Sender<codex_app_server_protocol::ThreadStatusChangedNotification>,
+    dynamic_tool_tasks: HashMap<codex_app_server_protocol::RequestId, (String, JoinHandle<()>)>,
     pending_startup_thread_start: bool,
     /// Keeps protected screens quarantined until initialized chat receives genuine user input.
     startup_protected_input_boundary: bool,
@@ -602,6 +627,7 @@ pub(crate) struct App {
     startup_pending_protected_request: bool,
     /// Invalidates in-flight full rate-limit reads when a newer rolling hard stop arrives.
     rate_limit_hard_stop_generation: u64,
+    rate_limit_refresh_state: rate_limit_refresh::RateLimitRefreshState,
     // Serialize plugin enablement writes per plugin so stale completions cannot
     // overwrite a newer toggle, even if the plugin is toggled from different
     // cwd contexts.
@@ -609,6 +635,7 @@ pub(crate) struct App {
     // Serialize hook enablement writes per hook so stale completions cannot
     // persist an older toggle after a newer one.
     pending_hook_enabled_writes: HashMap<String, Option<bool>>,
+    recap: recap::RecapState,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -616,6 +643,35 @@ struct RuntimePermissionProfileOverride {
     permission_profile: PermissionProfile,
     active_permission_profile: Option<ActivePermissionProfile>,
     network: Option<crate::legacy_core::config::NetworkProxySpec>,
+    approvals_reviewer: ApprovalsReviewer,
+    turn_override: RuntimePermissionProfileTurnOverride,
+}
+
+/// Separates user choices from settings inherited when attaching to another task.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RuntimeApprovalPolicyOverride {
+    Explicit(AskForApproval),
+    Restored(AskForApproval),
+}
+
+impl RuntimeApprovalPolicyOverride {
+    fn policy(self) -> AskForApproval {
+        match self {
+            Self::Explicit(policy) | Self::Restored(policy) => policy,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuntimePolicyOverrideScope {
+    All,
+    ExplicitOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimePermissionProfileTurnOverride {
+    Preserve,
+    LegacySandbox,
 }
 
 impl RuntimePermissionProfileOverride {
@@ -624,7 +680,31 @@ impl RuntimePermissionProfileOverride {
             permission_profile: config.permissions.permission_profile().clone(),
             active_permission_profile: config.permissions.active_permission_profile(),
             network: config.permissions.network.clone(),
+            approvals_reviewer: config.approvals_reviewer,
+            turn_override: RuntimePermissionProfileTurnOverride::LegacySandbox,
         }
+    }
+
+    fn from_restored_config(config: &Config) -> Self {
+        Self {
+            turn_override: RuntimePermissionProfileTurnOverride::Preserve,
+            ..Self::from_config(config)
+        }
+    }
+
+    fn matches_config(&self, config: &Config) -> bool {
+        self.permission_profile == *config.permissions.permission_profile()
+            && self.active_permission_profile == config.permissions.active_permission_profile()
+            && self.network == config.permissions.network
+            && self.approvals_reviewer == config.approvals_reviewer
+    }
+
+    fn turn_permission_profile(&self) -> Option<&PermissionProfile> {
+        matches!(
+            self.turn_override,
+            RuntimePermissionProfileTurnOverride::LegacySandbox
+        )
+        .then_some(&self.permission_profile)
     }
 }
 
@@ -659,15 +739,16 @@ fn spawn_startup_thread_start(
     let request_handle = app_server.request_handle();
     let thread_params_mode = app_server.thread_params_mode();
     let remote_cwd_override = app_server.remote_cwd_override().map(Path::to_path_buf);
+    let thread_tool_transport = app_server.thread_tool_transport();
     tokio::spawn(async move {
         let result = crate::app_server_session::start_thread_with_request_handle(
             request_handle,
             config,
             thread_params_mode,
             remote_cwd_override,
+            thread_tool_transport,
         )
-        .await
-        .map_err(|err| format!("{err:#}"));
+        .await;
         app_event_tx.send(AppEvent::StartupThreadStarted { result });
     });
 }
@@ -733,7 +814,6 @@ fn archived_session_guidance(err: &color_eyre::eyre::Report) -> Option<String> {
         ),
     ))
 }
-
 fn active_turn_interrupt_race(error: &TypedRequestError) -> Option<String> {
     let TypedRequestError::Server { method, source } = error else {
         return None;
@@ -765,6 +845,17 @@ impl App {
                     .pending_primary_events
                     .iter()
                     .any(|event| matches!(event, ThreadBufferedEvent::Request(_))))
+    }
+
+    /// Wait until visible and queued startup decisions cannot consume a delayed OSC response.
+    #[cfg(any(windows, test))]
+    pub(super) fn ready_for_terminal_color_probe(&self, has_pending_app_events: bool) -> bool {
+        !has_pending_app_events
+            && !self.chat_widget.has_active_view()
+            && !self.windows_sandbox.startup_world_writable_scan_pending
+            && !self.startup_pending_protected_request
+            && !self.has_queued_startup_protected_request()
+            && !self.chat_widget.has_pending_protected_request()
     }
 
     pub fn chatwidget_init_for_forked_or_resumed_thread(
@@ -931,13 +1022,22 @@ impl App {
             &session_selection,
             SessionSelection::StartFresh | SessionSelection::Exit
         );
+        let start_in_agents_overview =
+            matches!(&session_selection, SessionSelection::AgentsOverview);
         let (mut chat_widget, initial_started_thread) = match session_selection {
-            SessionSelection::StartFresh | SessionSelection::Exit => {
-                spawn_startup_thread_start(&app_server, config.clone(), app_event_tx.clone());
+            SessionSelection::StartFresh
+            | SessionSelection::Exit
+            | SessionSelection::AgentsOverview => {
+                if !start_in_agents_overview {
+                    spawn_startup_thread_start(&app_server, config.clone(), app_event_tx.clone());
+                }
                 // Count a startup tooltip once the initial chat widget can render it.
-                let startup_tooltip_override =
+                let startup_tooltip_override = if start_in_agents_overview {
+                    None
+                } else {
                     prepare_startup_tooltip_override(&mut config, &available_models, is_first_run)
-                        .await;
+                        .await
+                };
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
@@ -966,7 +1066,9 @@ impl App {
                     session_telemetry: session_telemetry.clone(),
                 };
                 let mut chat_widget = ChatWidget::new_with_app_event(init);
-                chat_widget.set_queue_submissions_until_session_configured(/*queue*/ true);
+                chat_widget.set_queue_submissions_until_session_configured(
+                    /*queue*/ !start_in_agents_overview,
+                );
                 (chat_widget, None)
             }
             SessionSelection::Resume(target_session) => {
@@ -1062,6 +1164,7 @@ See the keymap documentation for supported actions and examples."
         })?;
         #[cfg(not(debug_assertions))]
         let upgrade_version = crate::updates::get_upgrade_version(&config);
+        let dynamic_tool_status_updates = tokio::sync::broadcast::channel(/*capacity*/ 64).0;
 
         let mut app = Self {
             model_catalog,
@@ -1071,6 +1174,7 @@ See the keymap documentation for supported actions and examples."
             workspace_command_runner: Some(workspace_command_runner),
             config,
             launch_cwd,
+            runtime_working_directory_override: None,
             state_db,
             cli_kv_overrides,
             harness_overrides,
@@ -1092,7 +1196,7 @@ See the keymap documentation for supported actions and examples."
             transcript_reflow: TranscriptReflowState::default(),
             initial_history_replay_buffer: None,
             scrollback_has_older_history: false,
-            commit_anim_running: Arc::new(AtomicBool::new(false)),
+            commit_animation: None,
             status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
             terminal_title_invalid_items_warned: terminal_title_invalid_items_warned.clone(),
             skill_load_warnings: SkillLoadWarningState::default(),
@@ -1102,12 +1206,15 @@ See the keymap documentation for supported actions and examples."
             feedback_audience,
             environment_manager,
             app_server_target,
+            reconnect: Default::default(),
             pending_update_action: None,
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
+            temporary_structured_requests: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
+            agents_overview: Default::default(),
             side_threads: HashMap::new(),
             abandoned_side_threads: HashSet::new(),
             active_thread_id: None,
@@ -1117,13 +1224,20 @@ See the keymap documentation for supported actions and examples."
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
+            dynamic_tool_status_updates,
+            dynamic_tool_tasks: HashMap::new(),
             pending_startup_thread_start,
             startup_protected_input_boundary: false,
             startup_pending_protected_request: false,
             rate_limit_hard_stop_generation: 0,
+            rate_limit_refresh_state: Default::default(),
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
+            recap: recap::RecapState::default(),
         };
+        if start_in_agents_overview {
+            app.open_agents_overview(&app_server);
+        }
         if let Some(entry) = startup_hooks_browser {
             app.chat_widget.open_hooks_browser(entry);
         }
@@ -1168,9 +1282,19 @@ See the keymap documentation for supported actions and examples."
                     env_map,
                     logs_base_dir,
                     startup_permission_profile,
+                    app.session_telemetry.clone(),
                     tx,
+                    /*startup_scan*/ true,
                 );
             }
+        }
+
+        #[cfg(windows)]
+        let mut terminal_color_probe_pending = true;
+        #[cfg(windows)]
+        if app.ready_for_terminal_color_probe(!app_event_rx.is_empty()) {
+            tui.probe_default_colors_after_protected_startup();
+            terminal_color_probe_pending = false;
         }
 
         let event_stream_started_at = Instant::now();
@@ -1284,7 +1408,15 @@ See the keymap documentation for supported actions and examples."
                     waiting_for_initial_session_configured = false;
                 }
                 match control {
-                    AppRunControl::Continue => {}
+                    AppRunControl::Continue => {
+                        #[cfg(windows)]
+                        if terminal_color_probe_pending
+                            && app.ready_for_terminal_color_probe(!app_event_rx.is_empty())
+                        {
+                            tui.probe_default_colors_after_protected_startup();
+                            terminal_color_probe_pending = false;
+                        }
+                    }
                     AppRunControl::Exit(reason) => break Ok(reason),
                 }
             }
@@ -1311,7 +1443,7 @@ See the keymap documentation for supported actions and examples."
             }
         };
         let thread_id = app.chat_widget.thread_id().or(app.primary_thread_id);
-        let resume_hint = resume_hint_for_resumable_thread(
+        let resume_hint = resumable_thread(
             thread_id,
             app.chat_widget.thread_name(),
             app.chat_widget.rollout_path().as_deref(),
@@ -1320,6 +1452,7 @@ See the keymap documentation for supported actions and examples."
             token_usage: app.token_usage(),
             thread_id,
             resume_hint,
+            disconnect_info: None,
             update_action: app.pending_update_action,
             exit_reason,
         })
@@ -1331,8 +1464,23 @@ See the keymap documentation for supported actions and examples."
         app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<AppRunControl> {
+        if self.reconnect.offline
+            && let TuiEvent::Key(key) = &event
+            && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && let KeyCode::Char(character) = key.code
+            && (character.eq_ignore_ascii_case(&'c')
+                || (character.eq_ignore_ascii_case(&'d')
+                    && self.chat_widget.composer_is_empty()
+                    && self.chat_widget.no_modal_or_popup_active()))
+        {
+            return Ok(AppRunControl::Exit(ExitReason::UserRequested));
+        }
         let screen_size = tui.screen_size_for_event(&event)?;
-        if !matches!(&event, TuiEvent::Key(_) | TuiEvent::Paste(_)) {
+        if !matches!(
+            &event,
+            TuiEvent::Key(_) | TuiEvent::Paste(_) | TuiEvent::FocusLost
+        ) {
             self.expire_pending_key_chord();
             self.handle_draw_pre_render(tui, screen_size)?;
         }
@@ -1345,6 +1493,34 @@ See the keymap documentation for supported actions and examples."
         } else {
             event
         };
+
+        if self.reconnect.offline
+            && let TuiEvent::Key(key) = &event
+        {
+            if self.reconnect.presentation == reconnect::ReconnectPresentation::Overview {
+                self.chat_widget.handle_disconnected_view_key(*key);
+            } else {
+                self.chat_widget.handle_disconnected_key(*key);
+            }
+            return Ok(AppRunControl::Continue);
+        }
+
+        match &event {
+            TuiEvent::FocusLost => {
+                let now = Instant::now();
+                let thread_id = self.current_displayed_thread_id();
+
+                self.recap.note_focus_lost(now);
+
+                if let Some(thread_id) = thread_id {
+                    self.schedule_recap_check(thread_id, now);
+                }
+            }
+            TuiEvent::FocusGained => {
+                self.recap.note_focus_gained();
+            }
+            _ => {}
+        }
 
         if self.overlay.is_some() {
             let _ = self
@@ -1362,8 +1538,17 @@ See the keymap documentation for supported actions and examples."
                     // [iTerm2]: https://github.com/gnachman/iTerm2/blob/5d0c0d9f68523cbd0494dad5422998964a2ecd8d/sources/iTermPasteHelper.m#L206-L216
                     let pasted = pasted.replace("\r", "\n");
                     self.chat_widget.handle_paste(pasted);
+                    if self.reconnect.offline
+                        && self.reconnect.presentation
+                            == reconnect::ReconnectPresentation::Conversation
+                    {
+                        self.chat_widget.handle_disconnected_key(KeyEvent::new(
+                            KeyCode::Null,
+                            KeyModifiers::NONE,
+                        ));
+                    }
                 }
-                TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) => {
+                TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained => {
                     if self.backtrack_render_pending {
                         self.rebuild_transcript_after_backtrack(tui, screen_size.into())?;
                         self.backtrack_render_pending = false;
@@ -1408,6 +1593,7 @@ See the keymap documentation for supported actions and examples."
                         self.app_event_tx.send(AppEvent::LaunchExternalEditor);
                     }
                 }
+                TuiEvent::FocusLost => {}
             }
         }
         Ok(AppRunControl::Continue)
@@ -1424,7 +1610,24 @@ See the keymap documentation for supported actions and examples."
     }
 
     fn render_chat_widget_frame(&mut self, tui: &mut tui::Tui, screen_size: Size) -> Result<Rect> {
+        let dashboard_visible = self
+            .chat_widget
+            .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)
+            .is_some();
+        if std::mem::replace(
+            &mut self.agents_overview.rendered_full_screen,
+            dashboard_visible,
+        ) && !dashboard_visible
+        {
+            self.schedule_immediate_resize_reflow(tui);
+            self.maybe_run_resize_reflow(tui, screen_size)?;
+        }
         self.with_chat_widget_frame(screen_size.width, |desired_height, chat_widget| {
+            let desired_height = if dashboard_visible {
+                screen_size.height
+            } else {
+                desired_height
+            };
             let mut rendered_area = Rect::default();
             tui.draw_with_resize_reflow(desired_height, screen_size, |frame| {
                 let area = frame.area();

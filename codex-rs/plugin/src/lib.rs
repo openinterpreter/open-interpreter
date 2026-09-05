@@ -4,13 +4,16 @@ use std::collections::HashSet;
 
 pub use codex_utils_plugins::mention_syntax;
 
+mod bundled_hooks;
 mod load_outcome;
 pub mod manifest;
 mod plugin_id;
 mod provider;
 
+pub use bundled_hooks::is_allowlisted_bundled_cleanup_hook;
 use codex_config::HookEventsToml;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 pub use load_outcome::LoadedPlugin;
 pub use load_outcome::PluginLoadOutcome;
 pub use load_outcome::prompt_safe_plugin_description;
@@ -22,6 +25,8 @@ pub use provider::PluginResourceLocator;
 pub use provider::ResolvedPlugin;
 pub use provider::ResolvedPluginError;
 pub use provider::ResolvedPluginLocation;
+use serde_json::Map;
+use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AppConnectorId(pub String);
@@ -63,6 +68,21 @@ pub struct PluginHookSource {
     pub plugin_root: AbsolutePathBuf,
     pub plugin_data_root: AbsolutePathBuf,
     pub source_path: AbsolutePathBuf,
+    pub source_relative_path: String,
+    pub hooks: HookEventsToml,
+}
+
+/// Inline plugin hooks discovered in an executor environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutorPluginHookSource {
+    pub plugin_id: PluginId,
+    pub environment_id: String,
+    /// An admitted MCP target can run outside the plugin's source environment.
+    pub mcp_environment_id: Option<String>,
+    /// Trusted MCP routing metadata for this cleanup target.
+    pub mcp_metadata: Option<Map<String, Value>>,
+    pub plugin_root: PathUri,
+    pub manifest_path: PathUri,
     pub source_relative_path: String,
     pub hooks: HookEventsToml,
 }

@@ -1,0 +1,15 @@
+---
+source: tui/src/app/tests/backend_banner_fallback_tests.rs
+assertion_line: 76
+expression: rendered
+---
+  Selected model usage exhausted
+  Add credits to use this model again.
+
+› 1. View usage
+
+  Press a number to choose · esc to dismiss · type to continue
+
+› Ask Codex to do anything
+
+  gpt-5.2 medium · /tmp/project

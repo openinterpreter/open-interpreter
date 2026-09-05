@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -6,14 +7,21 @@ use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::McpServerConfig;
 use codex_config::McpServerToolConfig;
 use codex_config::McpServerTransportConfig;
+use codex_protocol::mcp_policy::EnvironmentMcpPolicy;
+use codex_protocol::mcp_policy::PluginMcpRequirements;
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 
+use crate::CODEX_APPS_MCP_SERVER_NAME;
+
+use super::McpEnvironmentAuthority;
 use super::McpPluginAttribution;
 use super::McpServerConflict;
 use super::McpServerConflictAction;
 use super::McpServerRegistration;
 use super::McpServerSource;
 use super::ResolvedMcpCatalog;
+use super::ResolvedMcpServer;
 
 fn server(url: &str) -> McpServerConfig {
     McpServerConfig {
@@ -43,6 +51,7 @@ fn server(url: &str) -> McpServerConfig {
             "read".to_string(),
             McpServerToolConfig {
                 approval_mode: Some(AppToolApproval::Approve),
+                ..Default::default()
             },
         )]),
     }
@@ -65,7 +74,10 @@ fn compatibility_source(id: &str) -> McpServerSource {
 }
 
 fn extension_source(id: &str) -> McpServerSource {
-    McpServerSource::Extension { id: id.to_string() }
+    McpServerSource::Extension {
+        id: id.to_string(),
+        host_owned_apps: false,
+    }
 }
 
 fn register(source: McpServerSource) -> McpServerConflictAction {
@@ -74,6 +86,33 @@ fn register(source: McpServerSource) -> McpServerConflictAction {
 
 fn remove(source: McpServerSource) -> McpServerConflictAction {
     McpServerConflictAction::Remove(source)
+}
+
+#[test]
+fn plugin_host_root_is_retained_in_catalog_identity() {
+    let original_root = PathUri::parse("file:///plugins/original").expect("valid plugin root URI");
+    let replacement_root =
+        PathUri::parse("file:///plugins/replacement").expect("valid plugin root URI");
+    let catalog_for_root = |root| {
+        let mut builder = ResolvedMcpCatalog::builder();
+        builder.register(McpServerRegistration::from_plugin(
+            "docs".to_string(),
+            plugin("plugin@test").with_host_root(root),
+            /*plugin_order*/ 0,
+            server("https://plugin.example/mcp"),
+        ));
+        builder.build()
+    };
+    let original = catalog_for_root(original_root.clone());
+    let replacement = catalog_for_root(replacement_root);
+
+    let Some(McpServerSource::Plugin(attribution)) =
+        original.server("docs").map(ResolvedMcpServer::source)
+    else {
+        panic!("expected host-discovered plugin registration");
+    };
+    assert_eq!(attribution.host_root(), Some(&original_root));
+    assert!(!original.has_same_servers(&replacement));
 }
 
 #[test]
@@ -117,6 +156,7 @@ fn source_precedence_preserves_the_winning_registration() {
         resolved.source(),
         &McpServerSource::Extension {
             id: "hosted".to_string(),
+            host_owned_apps: false,
         }
     );
     assert_eq!(resolved.config(), &extension);
@@ -406,4 +446,80 @@ fn equal_precedence_uses_insertion_order_not_source_identity() {
             ],
         }]
     );
+}
+
+#[test]
+fn environment_policy_exempts_only_explicitly_host_owned_apps() {
+    let policy = EnvironmentMcpPolicy {
+        servers: Some(BTreeMap::new()),
+        plugins: None,
+    };
+    for (registration, expected) in [
+        (
+            McpServerRegistration::from_extension(
+                CODEX_APPS_MCP_SERVER_NAME.to_string(),
+                "apps",
+                /*contribution_order*/ 0,
+                server("https://apps.example/mcp"),
+            ),
+            false,
+        ),
+        (
+            McpServerRegistration::from_hosted_apps(
+                "apps",
+                /*contribution_order*/ 0,
+                server("https://apps.example/mcp"),
+            ),
+            true,
+        ),
+    ] {
+        let mut builder = ResolvedMcpCatalog::builder();
+        builder.register(registration);
+        let catalog = builder
+            .build_with_environment_authority(|_| McpEnvironmentAuthority::Restricted(&policy));
+        assert_eq!(
+            catalog
+                .server(CODEX_APPS_MCP_SERVER_NAME)
+                .expect("Apps registration")
+                .config()
+                .enabled,
+            expected
+        );
+    }
+}
+
+#[test]
+fn environment_policy_preserves_selected_plugin_and_empty_server_allowlist_semantics() {
+    let mut builder = ResolvedMcpCatalog::builder();
+    builder.register(McpServerRegistration::from_selected_plugin(
+        "selected".to_string(),
+        plugin("selected-plugin"),
+        /*selection_order*/ 0,
+        server("https://plugin.example/mcp"),
+    ));
+    let metadata_only_policy = EnvironmentMcpPolicy {
+        servers: None,
+        plugins: Some(BTreeMap::from([(
+            "metadata-only-plugin".to_string(),
+            PluginMcpRequirements { mcp_servers: None },
+        )])),
+    };
+    let deny_all_policy = EnvironmentMcpPolicy {
+        servers: Some(BTreeMap::new()),
+        plugins: None,
+    };
+
+    for (policy, expected) in [(&metadata_only_policy, true), (&deny_all_policy, false)] {
+        let resolved = builder
+            .clone()
+            .build_with_environment_authority(|_| McpEnvironmentAuthority::Restricted(policy));
+        assert_eq!(
+            resolved
+                .server("selected")
+                .expect("selected plugin")
+                .config()
+                .enabled,
+            expected
+        );
+    }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use codex_app_server_protocol::AuthRecoveryNotification;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
@@ -191,6 +192,43 @@ async fn experimental_notifications_are_dropped_without_capability() {
         writer_rx.try_recv().is_err(),
         "experimental notifications should not reach clients without capability"
     );
+
+    let recovery = AuthRecoveryNotification {
+        thread_id: "thread-1".to_string(),
+        turn_id: "turn-1".to_string(),
+        provider: "Amazon Bedrock".to_string(),
+        message: "Refreshing AWS authentication.".to_string(),
+    };
+
+    for (method, notification) in [
+        (
+            "modelProvider/authRecoveryStarted",
+            ServerNotification::AuthRecoveryStarted(recovery.clone()),
+        ),
+        (
+            "modelProvider/authRecoveryCompleted",
+            ServerNotification::AuthRecoveryCompleted(recovery),
+        ),
+    ] {
+        route_outgoing_envelope(
+            &mut connections,
+            OutgoingEnvelope::ToConnection {
+                connection_id,
+                message: app_server_notification(notification),
+                write_complete_tx: None,
+            },
+        )
+        .await;
+
+        let message = writer_rx
+            .recv()
+            .await
+            .expect("stable auth recovery notification should reach clients without capability");
+        let OutgoingMessage::AppServerNotification(envelope) = message.message else {
+            panic!("stable auth recovery notification should be delivered");
+        };
+        assert_eq!(envelope.notification.to_string(), method);
+    }
 }
 
 #[tokio::test]
@@ -257,6 +295,7 @@ async fn command_execution_request_approval_strips_additional_permissions_withou
             message: OutgoingMessage::Request(ServerRequest::CommandExecutionRequestApproval {
                 request_id: RequestId::Integer(1),
                 params: codex_app_server_protocol::CommandExecutionRequestApprovalParams {
+                    kind: Default::default(),
                     thread_id: "thr_123".to_string(),
                     turn_id: "turn_123".to_string(),
                     item_id: "call_123".to_string(),
@@ -323,6 +362,7 @@ async fn command_execution_request_approval_keeps_additional_permissions_with_ca
             message: OutgoingMessage::Request(ServerRequest::CommandExecutionRequestApproval {
                 request_id: RequestId::Integer(1),
                 params: codex_app_server_protocol::CommandExecutionRequestApprovalParams {
+                    kind: Default::default(),
                     thread_id: "thr_123".to_string(),
                     turn_id: "turn_123".to_string(),
                     item_id: "call_123".to_string(),

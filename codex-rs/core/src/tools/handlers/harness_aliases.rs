@@ -202,7 +202,10 @@ impl ToolExecutor<ToolInvocation> for HarnessAliasHandler {
         !matches!(self, Self::Edit | Self::Write | Self::AskUserQuestion)
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(self.handle_call(invocation))
     }
 }
@@ -357,11 +360,8 @@ async fn handle_kimi_code_foreground_agent(
         .unwrap_or("coder");
     let task_name = zcode_task_name(&args.description);
     let child_depth = next_thread_spawn_depth(&turn.session_source);
-    let mut config = build_agent_spawn_config(
-        &session.get_base_instructions().await,
-        turn.as_ref(),
-        turn.environments.primary(),
-    )?;
+    let mut config =
+        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
     apply_requested_spawn_agent_model_overrides(
         &session,
         turn.as_ref(),
@@ -373,14 +373,8 @@ async fn handle_kimi_code_foreground_agent(
     apply_role_to_config(&mut config, Some(role_name))
         .await
         .map_err(FunctionCallError::RespondToModel)?;
-    apply_spawn_agent_service_tier(
-        &session,
-        &mut config,
-        turn.config.service_tier.as_deref(),
-        /*requested_service_tier*/ None,
-    )
-    .await?;
-    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref(), turn.environments.primary())?;
+    apply_spawn_agent_service_tier(&session, &mut config).await?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
 
     let parent_thread_id = session.thread_id();
     let spawn_source = thread_spawn_source(
@@ -450,11 +444,8 @@ async fn handle_zcode_agent(
         .unwrap_or("Explore");
     let task_name = zcode_task_name(&args.description);
     let child_depth = next_thread_spawn_depth(&turn.session_source);
-    let mut config = build_agent_spawn_config(
-        &session.get_base_instructions().await,
-        turn.as_ref(),
-        turn.environments.primary(),
-    )?;
+    let mut config =
+        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
     apply_requested_spawn_agent_model_overrides(
         &session,
         turn.as_ref(),
@@ -466,14 +457,8 @@ async fn handle_zcode_agent(
     apply_role_to_config(&mut config, Some(role_name))
         .await
         .map_err(FunctionCallError::RespondToModel)?;
-    apply_spawn_agent_service_tier(
-        &session,
-        &mut config,
-        turn.config.service_tier.as_deref(),
-        /*requested_service_tier*/ None,
-    )
-    .await?;
-    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref(), turn.environments.primary())?;
+    apply_spawn_agent_service_tier(&session, &mut config).await?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
 
     let parent_thread_id = session.thread_id();
     let spawn_source = thread_spawn_source(
@@ -705,6 +690,7 @@ async fn execute_harness_command(
             .enabled(codex_features::Feature::ExecPermissionApprovals),
         include_environment_id: false,
         include_shell_parameter: false,
+        include_windows_shell_guidance: false,
     });
     let output = handler
         .handle(ToolInvocation {
@@ -1627,7 +1613,7 @@ fn zcode_history_has_current_file_state_for_items(
                 call_id: output_call_id,
                 output,
                 ..
-            } if output_call_id == call_id => Some(output),
+            } if output_call_id.as_deref() == Some(call_id.as_str()) => Some(output),
             _ => None,
         });
         current = match name.as_str() {
@@ -2683,7 +2669,9 @@ fn build_zcode_read_session_context_prompt(
                         call_id: output_call_id,
                         output,
                         ..
-                    } if output_call_id == call_id => output.body.to_text(),
+                    } if output_call_id.as_deref() == Some(call_id.as_str()) => {
+                        output.body.to_text()
+                    }
                     _ => None,
                 }) {
                     let input_text = zcode_tool_input_text(name, arguments);
@@ -2900,11 +2888,7 @@ async fn handle_opencode_task(
         text: OPENCODE_SEARCH_AGENT_BASE_INSTRUCTIONS.to_string(),
         provenance: None,
     };
-    let mut config = build_agent_spawn_config(
-        &base_instructions,
-        turn.as_ref(),
-        turn.environments.primary(),
-    )?;
+    let mut config = build_agent_spawn_config(&base_instructions, turn.as_ref())?;
     config.base_instructions = Some(OPENCODE_SEARCH_AGENT_BASE_INSTRUCTIONS.to_string());
     let role_name = args.subagent_type.as_deref();
     let parent_thread_id = session.thread_id();
@@ -3032,6 +3016,8 @@ fn zcode_agent_rollout_stats(
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)
+            | RolloutItem::TokenUsageRecord(_)
+            | RolloutItem::RealtimeItem(_)
             | RolloutItem::EventMsg(_) => {}
         }
     }
@@ -4202,7 +4188,7 @@ mod tests {
         let file_system_sandbox_policy =
             FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
                 FileSystemPath::Path {
-                    path: workspace_root,
+                    path: workspace_root.into(),
                 },
                 FileSystemAccessMode::Write,
             )]);
@@ -4252,7 +4238,7 @@ mod tests {
     ) -> Result<String, FunctionCallError> {
         let invocation = invocation(workspace, tool_name, args).await;
         let output = handler.handle(invocation).await?;
-        Ok(output.log_preview())
+        Ok(output.log_output())
     }
 
     async fn handle_response_item(
@@ -4692,12 +4678,12 @@ mod tests {
             .handle(first_invocation)
             .await
             .expect("first read succeeds")
-            .log_preview();
+            .log_output();
         let second = HarnessAliasHandler::Read
             .handle(second_invocation)
             .await
             .expect("second read succeeds")
-            .log_preview();
+            .log_output();
 
         assert_eq!(
             first,
@@ -4733,7 +4719,7 @@ mod tests {
             .handle(read_invocation)
             .await
             .expect("read succeeds")
-            .log_preview();
+            .log_output();
 
         assert_eq!(
             output,
@@ -4772,7 +4758,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "call-write".to_string(),
+                call_id: Some("call-write".to_string()),
+                name: None,
+                namespace: None,
                 output: codex_protocol::models::FunctionCallOutputPayload::from_text(
                     "File written successfully. The file state is current in your context."
                         .to_string(),
@@ -4934,7 +4922,7 @@ mod tests {
             .handle(invocation)
             .await
             .expect("read output")
-            .log_preview();
+            .log_output();
 
         assert_eq!(
             output,
@@ -5245,7 +5233,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "call-write".to_string(),
+                call_id: Some("call-write".to_string()),
+                name: None,
+                namespace: None,
                 output: codex_protocol::models::FunctionCallOutputPayload {
                     body: codex_protocol::models::FunctionCallOutputBody::Text(
                         "File written successfully.".to_string(),

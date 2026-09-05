@@ -3,10 +3,15 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use codex_extension_api::ApprovalAssessment;
 use codex_extension_api::ApprovalReviewContributor;
+use codex_extension_api::ApprovalReviewError;
+use codex_extension_api::ApprovalReviewInput;
 use codex_extension_api::ConfigContributor;
+use codex_extension_api::ContentItemKind;
 use codex_extension_api::ContextContributor;
 use codex_extension_api::ContextualUserFragment;
+use codex_extension_api::ConversationHistorySnapshot;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ExtensionEventSink;
@@ -16,7 +21,7 @@ use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
 use codex_extension_api::McpServerContributionContext;
 use codex_extension_api::PromptFragment;
-use codex_extension_api::PromptSlot;
+use codex_extension_api::ResponseItem;
 use codex_extension_api::SkillInvocationContributor;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::TokenUsageContributor;
@@ -30,6 +35,10 @@ use codex_extension_api::TurnInputContributor;
 use codex_extension_api::TurnItemContributor;
 use codex_extension_api::TurnLifecycleContributor;
 use codex_extension_api::empty_extension_registry;
+use codex_protocol::ThreadId;
+use codex_protocol::approvals::GuardianAssessmentOutcome;
+use codex_protocol::approvals::GuardianRiskLevel;
+use codex_protocol::approvals::GuardianUserAuthorization;
 use codex_protocol::items::HookPromptItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::Event;
@@ -39,6 +48,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::WarningEvent;
 use pretty_assertions::assert_eq;
+use serde_json::json;
 
 struct AllContributors;
 
@@ -86,10 +96,36 @@ impl TokenUsageContributor for AllContributors {}
 
 impl SkillInvocationContributor for AllContributors {}
 
+struct ExecutorOnlySkillContributor;
+
+impl SkillInvocationContributor for ExecutorOnlySkillContributor {
+    fn requires_host_skill_discovery(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn host_skill_discovery_preserves_legacy_and_host_contributor_behavior() {
+    assert!(
+        ExtensionRegistryBuilder::<()>::new()
+            .build()
+            .requires_host_skill_discovery()
+    );
+
+    let mut executor_only = ExtensionRegistryBuilder::<()>::new();
+    executor_only.skill_invocation_contributor(Arc::new(ExecutorOnlySkillContributor));
+    assert!(!executor_only.build().requires_host_skill_discovery());
+
+    let mut mixed = ExtensionRegistryBuilder::<()>::new();
+    mixed.skill_invocation_contributor(Arc::new(ExecutorOnlySkillContributor));
+    mixed.skill_invocation_contributor(Arc::new(AllContributors));
+    assert!(mixed.build().requires_host_skill_discovery());
+}
+
 impl TurnInputContributor for AllContributors {
     fn contribute<'a>(
         &'a self,
-        input: TurnInputContext,
+        input: TurnInputContext<'a>,
         _extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
         _session_store: &'a ExtensionData,
         _thread_store: &'a ExtensionData,
@@ -108,7 +144,7 @@ impl ToolContributor for AllContributors {
         &self,
         _session_store: &ExtensionData,
         _thread_store: &ExtensionData,
-    ) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
+    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
         Vec::new()
     }
 }
@@ -130,16 +166,33 @@ impl TurnItemContributor for AllContributors {
 }
 
 impl ApprovalReviewContributor for AllContributors {
-    fn contribute<'a>(
+    fn fast_decision<'a>(
         &'a self,
         _session_store: &'a ExtensionData,
         _thread_store: &'a ExtensionData,
         _prompt: &'a str,
+        _extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
     ) -> ExtensionFuture<'a, Option<ReviewDecision>> {
         Box::pin(async move {
             let _self = self;
             Some(ReviewDecision::ApprovedForSession)
         })
+    }
+
+    fn full_review<'a>(
+        &'a self,
+        input: &'a ApprovalReviewInput<'_>,
+    ) -> ExtensionFuture<'a, Option<Result<ApprovalAssessment, ApprovalReviewError>>> {
+        assert_eq!(
+            (input.approval_reason, input.retry_reason),
+            (Some("A policy rule requires approval."), None)
+        );
+        Box::pin(std::future::ready(Some(Ok(ApprovalAssessment {
+            outcome: GuardianAssessmentOutcome::Allow,
+            risk_level: GuardianRiskLevel::Low,
+            user_authorization: GuardianUserAuthorization::High,
+            rationale: "approved".to_string(),
+        }))))
     }
 }
 
@@ -172,14 +225,109 @@ async fn build_round_trips_every_contributor_category() {
     assert_eq!(registry.turn_item_contributors().len(), 1);
     assert_eq!(
         registry
-            .approval_review(
+            .fast_approval_decision(
                 &ExtensionData::new("session"),
                 &ExtensionData::new("thread"),
                 "review this",
+                /*extension_metrics*/ None,
             )
             .await,
         Some(ReviewDecision::ApprovedForSession)
     );
+}
+
+impl ConversationHistorySnapshot for AllContributors {
+    fn history_version(&self) -> u64 {
+        0
+    }
+
+    fn user_message_revision(&self) -> u64 {
+        0
+    }
+
+    fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
+        Box::new(std::iter::empty())
+    }
+}
+
+#[tokio::test]
+async fn full_approval_review_returns_first_claim_and_short_circuits() {
+    let assessment = ApprovalAssessment {
+        outcome: GuardianAssessmentOutcome::Allow,
+        risk_level: GuardianRiskLevel::Low,
+        user_authorization: GuardianUserAuthorization::High,
+        rationale: "approved".to_string(),
+    };
+    let action = json!({
+        "tool": "exec_command",
+        "command": ["echo", "hello"],
+    });
+    let thread_store = ExtensionData::new("thread");
+    let input = ApprovalReviewInput {
+        action: &action,
+        conversation_history: Arc::new(AllContributors),
+        thread_id: ThreadId::default(),
+        thread_store: &thread_store,
+        turn_id: "turn",
+        approval_reason: Some("A policy rule requires approval."),
+        retry_reason: None,
+    };
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut builder = ExtensionRegistryBuilder::<()>::new();
+    for (name, result) in [
+        ("first", None),
+        ("second", Some(Ok(assessment.clone()))),
+        (
+            "third",
+            Some(Err(ApprovalReviewError::Failed(
+                "should not run".to_string(),
+            ))),
+        ),
+    ] {
+        builder.approval_review_contributor(Arc::new(RecordingStructuredApprovalContributor {
+            name,
+            result,
+            calls: Arc::clone(&calls),
+        }));
+    }
+
+    assert_eq!(
+        builder.build().full_approval_review(input).await,
+        Some(Ok(assessment))
+    );
+    assert_eq!(
+        calls.lock().expect("approval calls lock").as_slice(),
+        ["first", "second"]
+    );
+}
+
+struct RecordingStructuredApprovalContributor {
+    name: &'static str,
+    result: Option<Result<ApprovalAssessment, ApprovalReviewError>>,
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl ApprovalReviewContributor for RecordingStructuredApprovalContributor {
+    fn full_review<'a>(
+        &'a self,
+        input: &'a ApprovalReviewInput<'_>,
+    ) -> ExtensionFuture<'a, Option<Result<ApprovalAssessment, ApprovalReviewError>>> {
+        Box::pin(async move {
+            assert_eq!(
+                input.action,
+                &json!({
+                    "tool": "exec_command",
+                    "command": ["echo", "hello"],
+                })
+            );
+            self.calls
+                .lock()
+                .expect("approval calls lock should not be poisoned")
+                .push(self.name);
+            self.result.clone()
+        })
+    }
 }
 
 struct NamedContextContributor(&'static str);
@@ -192,6 +340,7 @@ impl ContextContributor for NamedContextContributor {
     ) -> ExtensionFuture<'a, Vec<PromptFragment>> {
         Box::pin(std::future::ready(vec![PromptFragment::developer_policy(
             self.0,
+            ContentItemKind("test.thread_context".to_string()),
         )]))
     }
 }
@@ -203,10 +352,12 @@ impl ContextContributor for NamedTurnContextContributor {
         &'a self,
         _input: TurnContextContributionInput<'a>,
     ) -> ExtensionFuture<'a, Vec<PromptFragment>> {
-        Box::pin(std::future::ready(vec![PromptFragment::new(
-            PromptSlot::ContextualUser,
-            self.0,
-        )]))
+        Box::pin(std::future::ready(vec![
+            PromptFragment::developer_capability(
+                self.0,
+                ContentItemKind("test.turn_context".to_string()),
+            ),
+        ]))
     }
 }
 
@@ -287,10 +438,22 @@ async fn contributors_preserve_registration_order() {
     assert_eq!(
         fragments,
         vec![
-            PromptFragment::developer_policy("first"),
-            PromptFragment::developer_policy("second"),
-            PromptFragment::new(PromptSlot::ContextualUser, "turn-first"),
-            PromptFragment::new(PromptSlot::ContextualUser, "turn-second"),
+            PromptFragment::developer_policy(
+                "first",
+                ContentItemKind("test.thread_context".to_string()),
+            ),
+            PromptFragment::developer_policy(
+                "second",
+                ContentItemKind("test.thread_context".to_string()),
+            ),
+            PromptFragment::developer_capability(
+                "turn-first",
+                ContentItemKind("test.turn_context".to_string()),
+            ),
+            PromptFragment::developer_capability(
+                "turn-second",
+                ContentItemKind("test.turn_context".to_string()),
+            ),
         ]
     );
     assert_eq!(
@@ -317,11 +480,12 @@ struct RecordingApprovalContributor {
 }
 
 impl ApprovalReviewContributor for RecordingApprovalContributor {
-    fn contribute<'a>(
+    fn fast_decision<'a>(
         &'a self,
         session_store: &'a ExtensionData,
         thread_store: &'a ExtensionData,
         prompt: &'a str,
+        _extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
     ) -> ExtensionFuture<'a, Option<ReviewDecision>> {
         Box::pin(async move {
             self.calls
@@ -339,7 +503,7 @@ impl ApprovalReviewContributor for RecordingApprovalContributor {
 }
 
 #[tokio::test]
-async fn approval_review_returns_first_claim_and_short_circuits() {
+async fn fast_approval_decision_returns_first_claim_and_short_circuits() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut builder = ExtensionRegistryBuilder::<()>::new();
     for (name, decision) in [
@@ -359,10 +523,11 @@ async fn approval_review_returns_first_claim_and_short_circuits() {
     let registry = builder.build();
 
     let decision = registry
-        .approval_review(
+        .fast_approval_decision(
             &ExtensionData::new("session-1"),
             &ExtensionData::new("thread-1"),
             "allow command?",
+            /*extension_metrics*/ None,
         )
         .await;
 
@@ -442,15 +607,16 @@ fn custom_event_sink_survives_registry_build() {
 }
 
 #[tokio::test]
-async fn empty_registry_does_not_claim_approval_review() {
+async fn empty_registry_does_not_claim_fast_approval_decision() {
     let registry = empty_extension_registry::<()>();
 
     assert_eq!(
         registry
-            .approval_review(
+            .fast_approval_decision(
                 &ExtensionData::new("session"),
                 &ExtensionData::new("thread"),
                 "unclaimed",
+                /*extension_metrics*/ None,
             )
             .await,
         None

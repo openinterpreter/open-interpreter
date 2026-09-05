@@ -1,0 +1,6 @@
+---
+source: tui/src/app/tests/recap_generation_tests.rs
+expression: lines_to_single_string(&rendered)
+---
+
+› Finish the recap implementation

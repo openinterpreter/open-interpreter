@@ -1,10 +1,10 @@
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
+use app_test_support::create_command_execution_sse_response;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
-use app_test_support::create_shell_command_sse_response;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
@@ -195,7 +195,7 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
 #[ignore = "TODO(owenlin0): flaky"]
 async fn review_start_exec_approval_item_id_matches_command_execution_item() -> Result<()> {
     let responses = vec![
-        create_shell_command_sse_response(
+        create_command_execution_sse_response(
             vec![
                 "git".to_string(),
                 "rev-parse".to_string(),
@@ -212,7 +212,7 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
         .with_provider_name("Mock provider")
-        .with_approval_policy("untrusted")
+        .with_approval_policy("on-request")
         .disable_feature(Feature::ShellSnapshot)
         .write(codex_home.path())?;
 
@@ -365,7 +365,19 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
-    let thread_id = start_default_thread(&mut mcp).await?;
+    let ThreadStartResponse { thread, .. } = mcp
+        .start_thread(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            history_mode: Some(ThreadHistoryMode::Legacy),
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("thread/started"),
+    )
+    .await??;
+    let thread_id = thread.id;
     materialize_thread_rollout(&mut mcp, &thread_id).await?;
     let ReviewStartResponse {
         turn,

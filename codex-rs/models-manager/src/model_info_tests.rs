@@ -4,11 +4,15 @@ use codex_protocol::config_types::Personality;
 use codex_protocol::openai_models::ApprovalMessages;
 use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::openai_models::CollaborationModeMessages;
+use codex_protocol::openai_models::ConfirmationPolicies;
+use codex_protocol::openai_models::GuardianV2ModelConfig;
 use codex_protocol::openai_models::ModelTokenBudgetConfig;
 use codex_protocol::openai_models::MultiAgentMessages;
 use codex_protocol::openai_models::MultiAgentModeMessages;
 use codex_protocol::openai_models::MultiAgentRoleMessages;
 use codex_protocol::openai_models::PermissionMessages;
+use codex_protocol::openai_models::ToolMessage;
+use codex_protocol::openai_models::ToolMessages;
 use pretty_assertions::assert_eq;
 
 fn config_with_personality(personality: Option<Personality>) -> ModelsManagerConfig {
@@ -64,6 +68,8 @@ fn reasoning_summaries_override_false_is_noop_when_model_is_false() {
 #[test]
 fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
     let override_instructions = "override {{ personality }}";
+    let persistent_instructions = "Follow up on the active task.";
+    let async_message_description = "Catalog async message description.";
     let mut model = model_info_from_slug("unknown-model");
     let approvals = ApprovalMessages {
         on_request: Some("user approvals".to_string()),
@@ -78,6 +84,9 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
     let auto_review = AutoReviewMessages {
         policy: Some("review policy".to_string()),
         policy_template: Some("review policy template".to_string()),
+        node_repl_policy: None,
+        rejection_instructions: Some("rejection instructions".to_string()),
+        timeout_instructions: Some(String::new()),
     };
     let permissions = PermissionMessages {
         danger_full_access: Some("danger".to_string()),
@@ -91,17 +100,34 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
         }),
         mode: Some(MultiAgentModeMessages {
             explicit: Some("explicit mode".to_string()),
+            proactive: Some("proactive mode".to_string()),
             hint_text: Some("mode hint".to_string()),
         }),
     };
     let token_budget = ModelTokenBudgetConfig {
+        enabled: false,
+        use_history_notes_extension: false,
         reminder_threshold_tokens: 128,
         reminder_message_template: "budget reminder".to_string(),
         guidance_message: "budget guidance".to_string(),
         auto_compact_fallback_prompt: "compact prompt".to_string(),
         auto_compact_fallback_buffer_tokens: 64,
     };
+    let guardian_v2 = GuardianV2ModelConfig {
+        classifier_instructions: Some("Guardian experiment".to_string()),
+        ..Default::default()
+    };
+    let confirmation_policies = ConfirmationPolicies {
+        browser_use: Some("# Browser policy\n\n{{literal_markdown}}\n".to_string()),
+        computer_use: Some("  # Native policy\r\n\n${native_markdown}\n".to_string()),
+    };
     model.model_messages = Some(ModelMessages {
+        persistent_instructions: Some(persistent_instructions.to_string()),
+        tools: Some(ToolMessages {
+            send_user_message_async: Some(ToolMessage {
+                description: Some(async_message_description.to_string()),
+            }),
+        }),
         instructions_template: Some("template".to_string()),
         instructions_variables: Some(ModelInstructionsVariables {
             personality_default: Some("default".to_string()),
@@ -114,6 +140,8 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
         permissions: Some(permissions.clone()),
         multi_agent: Some(multi_agent.clone()),
         token_budget: Some(token_budget.clone()),
+        confirmation_policies: Some(confirmation_policies.clone()),
+        guardian_v2: Some(guardian_v2.clone()),
     });
     let config = ModelsManagerConfig {
         base_instructions: Some(override_instructions.to_string()),
@@ -125,6 +153,12 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
     assert_eq!(
         updated.model_messages,
         Some(ModelMessages {
+            persistent_instructions: Some(persistent_instructions.to_string()),
+            tools: Some(ToolMessages {
+                send_user_message_async: Some(ToolMessage {
+                    description: Some(async_message_description.to_string()),
+                }),
+            }),
             instructions_template: Some(override_instructions.to_string()),
             instructions_variables: None,
             approvals: Some(approvals),
@@ -133,6 +167,8 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
             permissions: Some(permissions),
             multi_agent: Some(multi_agent),
             token_budget: Some(token_budget),
+            confirmation_policies: Some(confirmation_policies),
+            guardian_v2: Some(guardian_v2),
         })
     );
     assert_eq!(
@@ -151,6 +187,12 @@ fn disabled_personality_bakes_default_and_preserves_catalog_approval_messages() 
         unless_trusted: None,
     };
     model.model_messages = Some(ModelMessages {
+        persistent_instructions: Some(String::new()),
+        tools: Some(ToolMessages {
+            send_user_message_async: Some(ToolMessage {
+                description: Some(String::new()),
+            }),
+        }),
         instructions_template: Some("before {{ personality }} after".to_string()),
         instructions_variables: Some(ModelInstructionsVariables {
             personality_default: Some("default".to_string()),
@@ -163,6 +205,8 @@ fn disabled_personality_bakes_default_and_preserves_catalog_approval_messages() 
         permissions: None,
         multi_agent: None,
         token_budget: None,
+        confirmation_policies: None,
+        guardian_v2: None,
     });
     let config = ModelsManagerConfig {
         personality_enabled: false,
@@ -174,6 +218,12 @@ fn disabled_personality_bakes_default_and_preserves_catalog_approval_messages() 
     assert_eq!(
         updated.model_messages,
         Some(ModelMessages {
+            persistent_instructions: Some(String::new()),
+            tools: Some(ToolMessages {
+                send_user_message_async: Some(ToolMessage {
+                    description: Some(String::new()),
+                }),
+            }),
             instructions_template: Some("before default after".to_string()),
             instructions_variables: None,
             approvals: Some(approvals),
@@ -182,6 +232,8 @@ fn disabled_personality_bakes_default_and_preserves_catalog_approval_messages() 
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
+            guardian_v2: None,
         })
     );
 }
@@ -200,6 +252,8 @@ fn disabled_personality_uses_plain_base_instructions_for_local_personality_model
         assert_eq!(
             updated.model_messages,
             Some(ModelMessages {
+                persistent_instructions: None,
+                tools: None,
                 instructions_template: Some(BASE_INSTRUCTIONS.to_string()),
                 instructions_variables: None,
                 approvals: None,
@@ -208,6 +262,8 @@ fn disabled_personality_uses_plain_base_instructions_for_local_personality_model
                 permissions: None,
                 multi_agent: None,
                 token_budget: None,
+                confirmation_policies: None,
+                guardian_v2: None,
             }),
             "unexpected model messages for {slug}"
         );
@@ -240,6 +296,8 @@ fn personality_none_strips_catalog_instruction_sources_through_the_next_h1() {
     for (instructions, expected) in cases {
         let mut model = model_info_from_slug("unknown-model");
         model.model_messages = Some(ModelMessages {
+            persistent_instructions: None,
+            tools: None,
             instructions_template: Some(instructions.to_string()),
             instructions_variables: None,
             approvals: None,
@@ -248,6 +306,8 @@ fn personality_none_strips_catalog_instruction_sources_through_the_next_h1() {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
+            guardian_v2: None,
         });
 
         let updated = with_config_overrides(model, &config);

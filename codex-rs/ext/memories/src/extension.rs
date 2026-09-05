@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use codex_core::config::Config;
 use codex_extension_api::ConfigContributor;
+use codex_extension_api::ContentItemKind;
 use codex_extension_api::ContextContributor;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionFuture;
@@ -63,7 +64,12 @@ impl ContextContributor for MemoriesExtension {
 
             build_memory_tool_developer_instructions(&config.codex_home)
                 .await
-                .map(PromptFragment::developer_policy)
+                .map(|instructions| {
+                    PromptFragment::developer_policy(
+                        instructions,
+                        ContentItemKind("memories.instructions".to_string()),
+                    )
+                })
                 .into_iter()
                 .collect()
         })
@@ -100,7 +106,9 @@ impl ToolContributor for MemoriesExtension {
         &self,
         _session_store: &ExtensionData,
         thread_store: &ExtensionData,
-    ) -> Vec<Arc<dyn codex_extension_api::ToolExecutor<codex_extension_api::ToolCall>>> {
+    ) -> Vec<
+        Arc<dyn for<'call> codex_extension_api::ToolExecutor<codex_extension_api::ToolCall<'call>>>,
+    > {
         let Some(config) = thread_store.get::<MemoriesExtensionConfig>() else {
             return Vec::new();
         };

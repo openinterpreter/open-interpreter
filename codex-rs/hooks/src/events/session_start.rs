@@ -540,12 +540,13 @@ mod tests {
 
     fn handler_for(event_name: HookEventName) -> ConfiguredHandler {
         ConfiguredHandler {
+            builtin: false,
             event_name,
             matcher: None,
             timeout_sec: 600,
             status_message: None,
             additional_context_limit: Default::default(),
-            source_path: test_path_buf("/tmp/hooks.json").abs(),
+            source_path: test_path_buf("/tmp/hooks.json").abs().into(),
             source: codex_protocol::protocol::HookSource::User,
             display_order: 0,
             kind: crate::engine::ConfiguredHandlerKind::Command {

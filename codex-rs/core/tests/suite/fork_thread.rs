@@ -2,18 +2,19 @@ use std::sync::Arc;
 
 use codex_core::ForkSnapshot;
 use codex_core::NewThread;
-use codex_core::ThreadConfigSnapshot;
 use codex_core::TurnInputRequest;
 use codex_core::parse_turn_item;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
+use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
@@ -95,6 +96,7 @@ async fn fork_thread_twice_drops_to_first_message() {
 
     // Fork once with n=1 → drops the last user input and everything after.
     let NewThread {
+        thread_id: fork1_thread_id,
         thread: codex_fork1,
         ..
     } = thread_manager
@@ -110,7 +112,8 @@ async fn fork_thread_twice_drops_to_first_message() {
 
     let fork1_path = codex_fork1.rollout_path().expect("rollout path");
     expected_after_first.push(thread_settings_applied_item(
-        codex_fork1.config_snapshot().await,
+        fork1_thread_id,
+        codex_fork1.thread_settings_snapshot().await,
     ));
 
     // GetHistory on fork1 flushed; the file is ready.
@@ -122,6 +125,7 @@ async fn fork_thread_twice_drops_to_first_message() {
 
     // Fork again with n=0 → drops the (new) last user message, leaving only the first.
     let NewThread {
+        thread_id: fork2_thread_id,
         thread: codex_fork2,
         ..
     } = thread_manager
@@ -145,7 +149,8 @@ async fn fork_thread_twice_drops_to_first_message() {
         .unwrap_or(0);
     let mut expected_after_second: Vec<RolloutItem> = fork1_items[..cut_last_on_fork1].to_vec();
     expected_after_second.push(thread_settings_applied_item(
-        codex_fork2.config_snapshot().await,
+        fork2_thread_id,
+        codex_fork2.thread_settings_snapshot().await,
     ));
     let fork2_items = read_rollout_items(&fork2_path);
     pretty_assertions::assert_eq!(
@@ -154,10 +159,14 @@ async fn fork_thread_twice_drops_to_first_message() {
     );
 }
 
-fn thread_settings_applied_item(snapshot: ThreadConfigSnapshot) -> RolloutItem {
+fn thread_settings_applied_item(
+    thread_id: ThreadId,
+    snapshot: ThreadSettingsSnapshot,
+) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
         ThreadSettingsAppliedEvent {
-            thread_settings: snapshot.into_thread_settings_snapshot(),
+            thread_id: Some(thread_id),
+            thread_settings: snapshot,
         },
     ))
 }
@@ -228,6 +237,7 @@ async fn assert_copied_fork_persists_inherited_history(history_mode: ThreadHisto
             /*thread_source*/ None,
             /*parent_trace*/ None,
             ClientMcpExtensions::default(),
+            /*reserved_thread_id*/ None,
         )
         .await
         .expect("fork from stored history");

@@ -18,6 +18,8 @@ fn failed_turn_does_not_overwrite_output_last_message_file() {
                 text: "partial answer".to_string(),
                 phase: None,
                 memory_citation: None,
+                delivery: None,
+                questions: None,
             },
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
@@ -37,6 +39,7 @@ fn failed_turn_does_not_overwrite_output_last_message_file() {
                 items: Vec::new(),
                 status: TurnStatus::Failed,
                 error: Some(codex_app_server_protocol::TurnError {
+                    misalignment: None,
                     message: "turn failed".to_string(),
                     additional_details: None,
                     codex_error_info: None,

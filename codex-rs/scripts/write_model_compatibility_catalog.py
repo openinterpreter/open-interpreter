@@ -15,7 +15,9 @@ LITELLM_CATALOG_URL = (
 )
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_PATH = REPO_ROOT / "codex-rs" / "codex-api" / "model_compatibility_catalog.json"
-OVERRIDES_PATH = REPO_ROOT / "codex-rs" / "codex-api" / "model_compatibility_overrides.json"
+OVERRIDES_PATH = (
+    REPO_ROOT / "codex-rs" / "codex-api" / "model_compatibility_overrides.json"
+)
 
 
 def load_litellm_catalog() -> dict[str, dict]:
@@ -53,8 +55,7 @@ def supports_chat_or_responses(metadata: dict) -> bool:
         return False
 
     return any(
-        endpoint in {"/v1/chat/completions", "/v1/responses"}
-        for endpoint in endpoints
+        endpoint in {"/v1/chat/completions", "/v1/responses"} for endpoint in endpoints
     )
 
 

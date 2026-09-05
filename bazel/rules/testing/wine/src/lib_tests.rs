@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::collections::HashMap;
-use std::future::Future;
 use std::fs;
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::path::PathBuf;
@@ -20,9 +20,9 @@ use tokio::io::BufReader;
 use tokio::process::Command as TokioCommand;
 use tokio::time::timeout;
 
+use super::WineRuntimePaths;
 use super::WineTestCommand;
 use super::WineTestProcess;
-use super::WineRuntimePaths;
 use super::install_powershell_runtime;
 
 async fn waiting_smoke_process() -> Result<WineTestProcess> {
@@ -314,7 +314,10 @@ async fn pinned_powershell_runs_under_wine_with_a_pty() -> Result<()> {
     let mut env = std::env::vars().collect::<HashMap<_, _>>();
     env.remove("DISPLAY");
     env.extend([
-        ("HOME".to_string(), prefix.path().to_string_lossy().into_owned()),
+        (
+            "HOME".to_string(),
+            prefix.path().to_string_lossy().into_owned(),
+        ),
         (
             "XDG_RUNTIME_DIR".to_string(),
             prefix.path().to_string_lossy().into_owned(),
@@ -431,7 +434,11 @@ async fn pinned_powershell_runs_under_wine_with_a_pty() -> Result<()> {
         .context("PowerShell smoke marker line was incomplete")?
         .trim_end_matches('\r');
     let fields = smoke.split('|').collect::<Vec<_>>();
-    assert_eq!(fields.len(), 5, "unexpected PowerShell smoke output: {smoke}");
+    assert_eq!(
+        fields.len(),
+        5,
+        "unexpected PowerShell smoke output: {smoke}"
+    );
     assert_eq!(fields[0], POWERSHELL_SMOKE_MARKER);
     assert_eq!(
         fields[1].split('.').next(),

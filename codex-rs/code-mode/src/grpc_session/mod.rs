@@ -27,6 +27,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tonic::transport::Channel;
+use tracing::Instrument;
 
 use self::operations::WaitSlot;
 use self::state::SessionState;
@@ -48,6 +49,15 @@ mod transport;
 type GrpcClient = CodeModeHostClient<GrpcTransport>;
 
 const SHUTDOWN_ERROR: &str = "code mode session is shutting down";
+
+fn inject_span_traceparent<T>(request: &mut tonic::Request<T>, span: &tracing::Span) {
+    if let Some(traceparent) =
+        codex_otel::span_w3c_trace_context(span).and_then(|trace| trace.traceparent)
+        && let Ok(traceparent) = traceparent.parse()
+    {
+        request.metadata_mut().insert("traceparent", traceparent);
+    }
+}
 
 /// Creates code-mode sessions over an HTTP/2 gRPC connection.
 #[derive(Clone)]
@@ -83,6 +93,7 @@ impl GrpcCodeModeSessionProvider {
         }
     }
 
+    #[tracing::instrument(name = "code_mode.grpc.open_binding", level = "info", skip_all)]
     async fn open_binding(
         &self,
         delegate: Arc<dyn CodeModeSessionDelegate>,
@@ -100,17 +111,23 @@ impl GrpcCodeModeSessionProvider {
         let cell_execution_limits = (limits.max_yield_time_ms.is_some()
             || limits.max_heap_size_bytes.is_some())
         .then_some(limits);
-        let mut lease = deadline::startup(
-            "session opening",
-            client.open_session(grpc::OpenSessionRequest {
-                cell_execution_limits,
-            }),
-        )
-        .await?
-        .into_inner();
-        let first = deadline::startup("session lease opening", lease.message())
-            .await?
-            .ok_or_else(|| "gRPC code-mode session lease ended before opening".to_string())?;
+        let open_session_span = tracing::info_span!("code_mode.grpc.open_session");
+        let mut open_session_request = tonic::Request::new(grpc::OpenSessionRequest {
+            cell_execution_limits,
+        });
+        inject_span_traceparent(&mut open_session_request, &open_session_span);
+        let (lease, first) = async {
+            let mut lease =
+                deadline::startup("session opening", client.open_session(open_session_request))
+                    .await?
+                    .into_inner();
+            let first = deadline::startup("session lease opening", lease.message())
+                .await?
+                .ok_or_else(|| "gRPC code-mode session lease ended before opening".to_string())?;
+            Ok::<_, String>((lease, first))
+        }
+        .instrument(open_session_span)
+        .await?;
         let Some(grpc::session_event::Event::Opened(opened)) = first.event else {
             return Err("gRPC code-mode session lease omitted its opening event".to_string());
         };
@@ -134,13 +151,19 @@ impl GrpcCodeModeSessionProvider {
         };
         inner.spawn_session_events(lease);
 
-        let request = grpc::SubscribeToToolCallsRequest {
+        let subscribe_span = tracing::info_span!(
+            "code_mode.grpc.subscribe_to_tool_calls",
+            session.id = %inner.id,
+        );
+        let mut request = tonic::Request::new(grpc::SubscribeToToolCallsRequest {
             session_id: inner.id.clone(),
             tool_names: Vec::new(),
-        };
+        });
+        inject_span_traceparent(&mut request, &subscribe_span);
         let mut client = inner.client();
         let response =
             match deadline::startup("tool subscription", client.subscribe_to_tool_calls(request))
+                .instrument(subscribe_span)
                 .await
             {
                 Ok(response) => response,

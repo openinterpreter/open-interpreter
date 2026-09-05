@@ -12,6 +12,7 @@ use codex_api::Compression;
 use codex_api::Provider;
 use codex_api::ResponsesApiRequest;
 use codex_api::ResponsesClient;
+use codex_api::ResponsesEndpoint;
 use codex_api::ResponsesOptions;
 use codex_client::HttpTransport;
 use codex_client::Request;
@@ -307,6 +308,26 @@ async fn responses_client_uses_responses_path() -> Result<()> {
 }
 
 #[tokio::test]
+async fn responses_client_uses_guardian_path() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::new(state.clone());
+    let client = ResponsesClient::new(transport, provider("openai"), Arc::new(NoAuth))
+        .with_endpoint(ResponsesEndpoint::Guardian);
+
+    let _stream = client
+        .stream(
+            serde_json::json!({ "echo": true }),
+            HeaderMap::new(),
+            Compression::None,
+            /*turn_state*/ None,
+        )
+        .await?;
+
+    assert_path_ends_with(&state.take_stream_requests(), "/guardian");
+    Ok(())
+}
+
+#[tokio::test]
 async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
     let state = RecordingState::default();
     let transport = RecordingTransport::new(state.clone());
@@ -333,6 +354,7 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
         prompt_cache_key: None,
         text: None,
         client_metadata: None,
+        access_programs: None,
     };
     let expected = serde_json::to_value(&request)?;
 
@@ -420,6 +442,7 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
         prompt_cache_key: None,
         text: None,
         client_metadata: None,
+        access_programs: None,
     };
     let client = ResponsesClient::new(transport.clone(), provider, Arc::new(NoAuth));
 
@@ -540,6 +563,7 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
         prompt_cache_key: None,
         text: None,
         client_metadata: None,
+        access_programs: None,
     };
 
     let mut extra_headers = HeaderMap::new();

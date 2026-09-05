@@ -1,3 +1,5 @@
+use codex_config::AppToolApproval;
+use codex_config::McpServerToolConfig;
 use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
@@ -14,6 +16,7 @@ use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -52,6 +55,10 @@ async fn selected_plugin_servers_use_managed_requirements_for_the_selected_root_
     "unlisted": {"command":"unlisted-command"}
   }
 }"#,
+    )?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        "[plugins.\"selected-root\".mcp_servers.mismatched]\nenabled = true\n[plugins.\"selected-root\".mcp_servers.unlisted]\nenabled = true",
     )?;
     let config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
@@ -127,6 +134,7 @@ async fn selected_plugin_package_is_contributed_without_servers_or_connectors() 
             plugin_id,
             plugin_display_name,
             connector_ids,
+            ..
         } = contribution
         else {
             return None;
@@ -150,6 +158,61 @@ async fn selected_plugin_package_is_contributed_without_servers_or_connectors() 
 }
 
 #[tokio::test]
+async fn managed_plugins_requirement_disables_selected_executor_plugin_capabilities() -> TestResult
+{
+    let codex_home = tempfile::tempdir()?;
+    let plugin_root = tempfile::tempdir()?;
+    std::fs::create_dir_all(plugin_root.path().join(".codex-plugin"))?;
+    std::fs::write(
+        plugin_root.path().join(".codex-plugin/plugin.json"),
+        r#"{"name":"selected-root","interface":{"displayName":"Selected Root"}}"#,
+    )?;
+    std::fs::write(
+        plugin_root.path().join(".mcp.json"),
+        r#"{"mcpServers":{"probe":{"command":"probe-command"}}}"#,
+    )?;
+    let mut config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"
+[features]
+plugins = false
+"#,
+            ),
+        )
+        .build()
+        .await?;
+    assert!(!config.features.enabled(Feature::Plugins));
+
+    let direct = raw_selected_plugin_contributions(&config, plugin_root.path()).await?;
+    assert!(
+        matches!(
+            direct.as_slice(),
+            [McpServerContribution::SelectedPluginPackage { selected_root_id, .. }]
+                if selected_root_id == "selected-root"
+        ),
+        "managed Plugins disable should preserve only the direct selected-root identity"
+    );
+
+    config
+        .features
+        .enable(Feature::ExecutorCapabilityDiscovery)
+        .expect("test config should allow feature update");
+    let discovered = raw_selected_plugin_contributions(&config, plugin_root.path()).await?;
+    assert!(
+        matches!(
+            discovered.as_slice(),
+            [McpServerContribution::SelectedPluginPackage { selected_root_id, .. }]
+                if selected_root_id == "selected-root"
+        ),
+        "managed Plugins disable should preserve only the discovered selected-root identity"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn high_level_discovery_matches_the_existing_plugin_provider() -> TestResult {
     let codex_home = tempfile::tempdir()?;
     let plugin_root = tempfile::tempdir()?;
@@ -160,7 +223,50 @@ async fn high_level_discovery_matches_the_existing_plugin_provider() -> TestResu
     )?;
     std::fs::write(
         plugin_root.path().join("servers.json"),
-        r#"{"mcpServers":{"first":{"command":"first"},"second":{"command":"second"}}}"#,
+        r#"{
+  "mcpServers": {
+    "first": {
+      "command": "first",
+      "default_tools_approval_mode": "writes",
+      "enabled_tools": ["read", "deploy", "trusted", "package-only"],
+      "disabled_tools": ["package-denied"],
+      "tools": {
+        "read": {"approval_mode": "prompt", "output_token_limit": 12000},
+        "deploy": {"approval_mode": "approve", "output_token_limit": 4000},
+        "trusted": {"approval_mode": "approve"}
+      }
+    },
+    "second": {
+      "command": "second",
+      "enabled": false,
+      "default_tools_approval_mode": "prompt"
+    }
+  }
+}"#,
+    )?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"
+[plugins."selected-root".mcp_servers.first]
+enabled = false
+default_tools_approval_mode = "prompt"
+enabled_tools = ["read", "deploy", "trusted", "host-only"]
+disabled_tools = ["write"]
+
+[plugins."selected-root".mcp_servers.first.tools.read]
+approval_mode = "approve"
+output_token_limit = 8000
+
+[plugins."selected-root".mcp_servers.first.tools.deploy]
+output_token_limit = 9000
+
+[plugins."selected-root".mcp_servers.first.tools.trusted]
+approval_mode = "approve"
+
+[plugins."selected-root".mcp_servers.second]
+enabled = true
+default_tools_approval_mode = "auto"
+"#,
     )?;
     let mut config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
@@ -168,6 +274,66 @@ async fn high_level_discovery_matches_the_existing_plugin_provider() -> TestResu
         .build()
         .await?;
     let existing = selected_plugin_contributions(&config, plugin_root.path()).await?;
+    let mut servers = raw_selected_plugin_contributions(&config, plugin_root.path())
+        .await?
+        .into_iter()
+        .filter_map(|contribution| match contribution {
+            McpServerContribution::SelectedPlugin { name, config, .. } => Some((name, config)),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let server = servers
+        .remove("first")
+        .expect("disabled selected server remains registered");
+    let declared_disabled_server = servers
+        .remove("second")
+        .expect("package-disabled server remains registered");
+    assert_eq!(
+        (
+            server.enabled,
+            server.default_tools_approval_mode,
+            server.enabled_tools,
+            server.disabled_tools,
+            server.tools,
+            declared_disabled_server.enabled,
+            declared_disabled_server.default_tools_approval_mode,
+        ),
+        (
+            false,
+            Some(AppToolApproval::Prompt),
+            Some(vec![
+                "read".to_string(),
+                "deploy".to_string(),
+                "trusted".to_string(),
+            ]),
+            Some(vec!["package-denied".to_string(), "write".to_string()]),
+            HashMap::from([
+                (
+                    "read".to_string(),
+                    McpServerToolConfig {
+                        approval_mode: Some(AppToolApproval::Prompt),
+                        output_token_limit: std::num::NonZeroUsize::new(8_000),
+                    },
+                ),
+                (
+                    "deploy".to_string(),
+                    McpServerToolConfig {
+                        approval_mode: Some(AppToolApproval::Prompt),
+                        output_token_limit: std::num::NonZeroUsize::new(4_000),
+                    },
+                ),
+                (
+                    "trusted".to_string(),
+                    McpServerToolConfig {
+                        approval_mode: Some(AppToolApproval::Approve),
+                        ..Default::default()
+                    },
+                ),
+            ]),
+            false,
+            Some(AppToolApproval::Prompt),
+        )
+    );
     config
         .features
         .enable(Feature::ExecutorCapabilityDiscovery)
@@ -200,7 +366,9 @@ async fn selected_plugin_contributions(
                 enabled: config.enabled,
             }),
             McpServerContribution::SelectedPluginPackage { .. } => None,
-            McpServerContribution::Set { .. } | McpServerContribution::Remove { .. } => {
+            McpServerContribution::Set { .. }
+            | McpServerContribution::HostedApps { .. }
+            | McpServerContribution::Remove { .. } => {
                 panic!("expected selected plugin contribution")
             }
         })

@@ -31,20 +31,19 @@ use wiremock::matchers::path;
 use core_test_support::skip_if_no_network;
 use mcp_test_support::McpProcess;
 use mcp_test_support::create_apply_patch_sse_response;
+use mcp_test_support::create_command_execution_sse_response;
 use mcp_test_support::create_final_assistant_message_sse_response;
 use mcp_test_support::create_mock_responses_server;
-use mcp_test_support::create_shell_command_sse_response;
 use mcp_test_support::format_with_current_shell;
 
 // Windows CI can spend tens of seconds in session startup before the first
 // mock model request is sent.
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Test that a shell command that is not on the "trusted" list triggers an
-/// elicitation request to the MCP and that sending the approval runs the
-/// command, as expected.
+/// Test that an explicitly escalated exec command triggers MCP elicitation and
+/// that approving the request runs the command.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_shell_command_approval_triggers_elicitation() {
+async fn test_exec_command_approval_triggers_elicitation() {
     if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
         println!(
             "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
@@ -54,14 +53,13 @@ async fn test_shell_command_approval_triggers_elicitation() {
 
     // Apparently `#[tokio::test]` must return `()`, so we create a helper
     // function that returns `Result` so we can use `?` in favor of `unwrap`.
-    shell_command_approval_triggers_elicitation()
+    exec_command_approval_triggers_elicitation()
         .await
-        .expect("shell command approval should trigger elicitation");
+        .expect("exec command approval should trigger elicitation");
 }
 
-async fn shell_command_approval_triggers_elicitation() -> anyhow::Result<()> {
-    // Use a simple, untrusted command that creates a file so we can
-    // observe a side-effect.
+async fn exec_command_approval_triggers_elicitation() -> anyhow::Result<()> {
+    // Use a command that creates a file so we can observe its side effect.
     let workdir_for_shell_function_call = TempDir::new()?;
     let created_filename = "created_by_shell_tool.txt";
     let created_file = workdir_for_shell_function_call
@@ -95,7 +93,7 @@ async fn shell_command_approval_triggers_elicitation() -> anyhow::Result<()> {
         server: _server,
         dir: _dir,
     } = create_mcp_process(vec![
-        create_shell_command_sse_response(
+        create_command_execution_sse_response(
             shell_command.clone(),
             Some(workdir_for_shell_function_call.path()),
             Some(timeout_ms),
@@ -111,6 +109,11 @@ async fn shell_command_approval_triggers_elicitation() -> anyhow::Result<()> {
     let codex_request_id = mcp_process
         .send_codex_tool_call(CodexToolCallParam {
             prompt: "run `git init`".to_string(),
+            // Exercise MCP elicitation even when the surrounding environment enables auto-review.
+            config: Some(HashMap::from([
+                ("approvals_reviewer".to_string(), json!("user")),
+                ("features.guardian_approval".to_string(), json!(false)),
+            ])),
             ..Default::default()
         })
         .await?;
@@ -221,7 +224,7 @@ fn create_expected_elicitation_request_params(
 }
 
 /// Test that patch approval triggers an elicitation request to the MCP and that
-/// sending the approval applies the patch, as expected.
+/// sending a denial leaves the patch unapplied, as expected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_patch_approval_triggers_elicitation() {
     if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
@@ -244,11 +247,14 @@ async fn patch_approval_triggers_elicitation() -> anyhow::Result<()> {
     }
 
     let cwd = TempDir::new()?;
-    let test_file = cwd.path().join("destination_file.txt");
-    std::fs::write(&test_file, "original content\n")?;
+    let test_file = Path::new("/").join(
+        cwd.path()
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("temporary directory must have a file name"))?,
+    );
 
     let patch_content = format!(
-        "*** Begin Patch\n*** Update File: {}\n-original content\n+modified content\n*** End Patch",
+        "*** Begin Patch\n*** Add File: {}\n+new content\n*** End Patch",
         test_file.as_path().to_string_lossy()
     );
 
@@ -258,7 +264,7 @@ async fn patch_approval_triggers_elicitation() -> anyhow::Result<()> {
         dir: _dir,
     } = create_mcp_process(vec![
         create_apply_patch_sse_response(&patch_content, "call1234")?,
-        create_final_assistant_message_sse_response("Patch has been applied successfully!")?,
+        create_final_assistant_message_sse_response("Patch was not applied.")?,
     ])
     .await?;
 
@@ -267,11 +273,12 @@ async fn patch_approval_triggers_elicitation() -> anyhow::Result<()> {
         .send_codex_tool_call(CodexToolCallParam {
             cwd: Some(cwd.path().to_string_lossy().to_string()),
             prompt: "please modify the test file".to_string(),
-            // This test exercises patch approval elicitation, not local sandbox setup.
-            config: Some(HashMap::from([(
-                "sandbox_mode".to_string(),
-                json!("danger-full-access"),
-            )])),
+            // Use the user reviewer so this test exercises MCP elicitation even when auto-review
+            // is enabled by the surrounding environment.
+            config: Some(HashMap::from([
+                ("approvals_reviewer".to_string(), json!("user")),
+                ("features.guardian_approval".to_string(), json!(false)),
+            ])),
             ..Default::default()
         })
         .await?;
@@ -296,9 +303,8 @@ async fn patch_approval_triggers_elicitation() -> anyhow::Result<()> {
     let mut expected_changes = HashMap::new();
     expected_changes.insert(
         test_file.as_path().to_path_buf(),
-        FileChange::Update {
-            unified_diff: "@@ -1 +1 @@\n-original content\n+modified content\n".to_string(),
-            move_path: None,
+        FileChange::Add {
+            content: "new content\n".to_string(),
         },
     );
 
@@ -314,12 +320,12 @@ async fn patch_approval_triggers_elicitation() -> anyhow::Result<()> {
         )?)
     );
 
-    // Accept the patch approval request by responding to the elicitation
+    // Deny the patch approval request so this test does not require the Linux sandbox helper.
     mcp_process
         .send_response(
             elicitation_request_id,
             serde_json::to_value(PatchApprovalResponse {
-                decision: ReviewDecision::Approved,
+                decision: ReviewDecision::denied("rejected by test"),
             })?,
         )
         .await?;
@@ -337,21 +343,20 @@ async fn patch_approval_triggers_elicitation() -> anyhow::Result<()> {
             result: json!({
                 "content": [
                     {
-                        "text": "Patch has been applied successfully!",
+                        "text": "Patch was not applied.",
                         "type": "text"
                     }
                 ],
                 "structuredContent": {
                     "threadId": params.thread_id,
-                    "content": "Patch has been applied successfully!"
+                    "content": "Patch was not applied."
                 }
             }),
         },
         codex_response
     );
 
-    let file_contents = std::fs::read_to_string(test_file.as_path())?;
-    assert_eq!(file_contents, "modified content\n");
+    assert!(!test_file.exists());
 
     Ok(())
 }
@@ -644,8 +649,8 @@ async fn create_mcp_process(responses: Vec<String>) -> anyhow::Result<McpHandle>
 }
 
 /// Create a Codex config that uses the mock server as the model provider.
-/// It also uses `approval_policy = "untrusted"` so that we exercise the
-/// elicitation code path for shell commands.
+/// The command explicitly requests escalation so that we exercise the
+/// elicitation code path.
 fn create_config_toml(codex_home: &Path, server_uri: &str) -> std::io::Result<()> {
     let config_toml = codex_home.join("config.toml");
     std::fs::write(
@@ -653,7 +658,7 @@ fn create_config_toml(codex_home: &Path, server_uri: &str) -> std::io::Result<()
         format!(
             r#"
 model = "mock-model"
-approval_policy = "untrusted"
+approval_policy = "on-request"
 sandbox_policy = "workspace-write"
 
 model_provider = "mock_provider"

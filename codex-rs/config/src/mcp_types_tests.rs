@@ -364,6 +364,7 @@ fn deserialize_streamable_http_server_config_with_oauth_client_id() {
 
             [oauth]
             client_id = "eci-prd-pub-codex-123"
+            callback_url = "http://127.0.0.1/callback/registered"
             callback_port = 9876
         "#,
     )
@@ -373,6 +374,7 @@ fn deserialize_streamable_http_server_config_with_oauth_client_id() {
         cfg.oauth,
         Some(McpServerOAuthConfig {
             client_id: Some("eci-prd-pub-codex-123".to_string()),
+            callback_url: Some("http://127.0.0.1/callback/registered".to_string()),
             callback_port: Some(9876),
         })
     );
@@ -478,6 +480,7 @@ fn deserialize_server_config_with_default_tool_approval_mode() {
 
             [tools.search]
             approval_mode = "prompt"
+            output_token_limit = 30000
         "#,
     )
     .expect("should deserialize default tool approval mode");
@@ -490,15 +493,29 @@ fn deserialize_server_config_with_default_tool_approval_mode() {
         cfg.tools.get("search"),
         Some(&McpServerToolConfig {
             approval_mode: Some(AppToolApproval::Prompt),
+            output_token_limit: std::num::NonZeroUsize::new(30_000),
         })
     );
 
     let serialized = toml::to_string(&cfg).expect("should serialize MCP config");
     assert!(serialized.contains("default_tools_approval_mode = \"approve\""));
+    assert!(serialized.contains("output_token_limit = 30000"));
 
     let round_tripped: McpServerConfig =
         toml::from_str(&serialized).expect("should deserialize serialized MCP config");
     assert_eq!(round_tripped, cfg);
+}
+
+#[test]
+fn deserialize_rejects_nonpositive_mcp_tool_output_limits() {
+    for output_token_limit in [0, -1] {
+        let config = format!(
+            "command = \"echo\"\n[tools.search]\noutput_token_limit = {output_token_limit}\n"
+        );
+        let error = toml::from_str::<McpServerConfig>(&config)
+            .expect_err("MCP tool output limit must be positive");
+        assert!(error.to_string().contains("output_token_limit"));
+    }
 }
 
 #[test]

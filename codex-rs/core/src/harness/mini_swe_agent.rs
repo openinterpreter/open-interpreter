@@ -319,8 +319,28 @@ fn build_messages(items: &[ResponseItem]) -> Result<Vec<Value>, serde_json::Erro
             }
             ResponseItem::FunctionCallOutput {
                 call_id, output, ..
+            } => {
+                let Some(call_id) = call_id.as_ref() else {
+                    continue;
+                };
+                flush_pending_assistant_content(
+                    &mut messages,
+                    &mut pending_assistant_content,
+                    &mut pending_reasoning_content,
+                );
+                flush_pending_tool_calls(
+                    &mut messages,
+                    &mut pending_tool_calls,
+                    &mut pending_tool_call_content,
+                    &mut pending_reasoning_content,
+                );
+                messages.push(json!({
+                    "content": mini_swe_agent_tool_output_content(output),
+                    "tool_call_id": call_id,
+                    "role": "tool",
+                }));
             }
-            | ResponseItem::CustomToolCallOutput {
+            ResponseItem::CustomToolCallOutput {
                 call_id, output, ..
             } => {
                 flush_pending_assistant_content(
@@ -724,7 +744,9 @@ mod tests {
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "bash:0".to_string(),
+                    call_id: Some("bash:0".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text(
                         "{\n  \"returncode\": 0,\n  \"output\": \"/workspace\\n\"\n}".to_string(),
                     ),
@@ -797,6 +819,7 @@ mod tests {
             .send(Ok(ResponseEvent::Completed {
                 response_id: "response".to_string(),
                 token_usage: None,
+                usage_metadata: None,
                 end_turn: None,
             }))
             .await
@@ -875,6 +898,7 @@ mod tests {
             .send(Ok(ResponseEvent::Completed {
                 response_id: "response".to_string(),
                 token_usage: None,
+                usage_metadata: None,
                 end_turn: None,
             }))
             .await

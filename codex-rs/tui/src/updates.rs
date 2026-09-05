@@ -100,6 +100,7 @@ async fn check_for_update(
         }
         Some(UpdateAction::NpmGlobalLatest)
         | Some(UpdateAction::BunGlobalLatest)
+        | Some(UpdateAction::VitePlusGlobalLatest)
         | Some(UpdateAction::PnpmGlobalLatest) => {
             let latest_version =
                 fetch_latest_github_release_version(&client_pool, ProductUpdateSource::Codex)

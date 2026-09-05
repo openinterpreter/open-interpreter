@@ -3,6 +3,7 @@ use codex_code_mode_protocol::CodeModeToolKind;
 use codex_code_mode_protocol::ExecuteRequest;
 use codex_code_mode_protocol::FunctionCallOutputContentItem;
 use codex_code_mode_protocol::ImageDetail;
+use codex_code_mode_protocol::MissingCodeModeHostDuration;
 use codex_code_mode_protocol::RuntimeResponse;
 use codex_code_mode_protocol::ToolDefinition;
 use codex_code_mode_protocol::WaitOutcome;
@@ -79,51 +80,65 @@ fn json_field(value: Option<Vec<u8>>, field: &str) -> Result<Option<JsonValue>, 
         .transpose()
 }
 
-pub(super) fn execution_outcome(response: RuntimeResponse) -> proto::ExecutionOutcome {
-    let (cell_id, content_items, outcome) = match response {
+/// Preserves the response's timing; the host handler must record it first.
+pub(super) fn execution_outcome(
+    response: RuntimeResponse,
+) -> Result<proto::ExecutionOutcome, MissingCodeModeHostDuration> {
+    let (cell_id, content_items, outcome, code_mode_host_duration) = match response {
         RuntimeResponse::Yielded {
             cell_id,
             content_items,
+            code_mode_host_duration,
         } => (
             cell_id,
             content_items,
             proto::execution_outcome::Outcome::Yielded(proto::ExecutionYielded {}),
+            code_mode_host_duration,
         ),
         RuntimeResponse::Terminated {
             cell_id,
             content_items,
+            code_mode_host_duration,
         } => (
             cell_id,
             content_items,
             proto::execution_outcome::Outcome::Terminated(proto::ExecutionTerminated {}),
+            code_mode_host_duration,
         ),
         RuntimeResponse::Result {
             cell_id,
             content_items,
             error_text,
+            code_mode_host_duration,
         } => (
             cell_id,
             content_items,
             proto::execution_outcome::Outcome::Completed(proto::ExecutionCompleted { error_text }),
+            code_mode_host_duration,
         ),
     };
-    proto::ExecutionOutcome {
+    let code_mode_host_duration = code_mode_host_duration.ok_or(MissingCodeModeHostDuration)?;
+    Ok(proto::ExecutionOutcome {
         cell_id: cell_id.to_string(),
         content_items: content_items.into_iter().map(content_item).collect(),
         outcome: Some(outcome),
-    }
+        code_mode_host_duration_ns: u64::try_from(code_mode_host_duration.as_nanos())
+            .unwrap_or(u64::MAX),
+    })
 }
 
-pub(super) fn wait_response(outcome: WaitOutcome) -> proto::WaitResponse {
+pub(super) fn wait_response(
+    outcome: WaitOutcome,
+) -> Result<proto::WaitResponse, MissingCodeModeHostDuration> {
     let state = match outcome {
         WaitOutcome::LiveCell(response) => {
-            proto::wait_response::State::LiveCell(execution_outcome(response))
+            proto::wait_response::State::LiveCell(execution_outcome(response)?)
         }
         WaitOutcome::MissingCell(response) => {
-            proto::wait_response::State::MissingCell(execution_outcome(response))
+            proto::wait_response::State::MissingCell(execution_outcome(response)?)
         }
     };
-    proto::WaitResponse { state: Some(state) }
+    Ok(proto::WaitResponse { state: Some(state) })
 }
 
 fn content_item(item: FunctionCallOutputContentItem) -> proto::ContentItem {

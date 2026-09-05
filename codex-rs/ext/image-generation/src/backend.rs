@@ -82,7 +82,7 @@ impl CodexImagesBackend {
         &self,
         request: ImageGenerationRequest,
         turn_id: &str,
-    ) -> Result<ImageResponse, ImageBackendError> {
+    ) -> Result<(ImageResponse, Option<String>), ImageBackendError> {
         self.client()
             .await?
             .generate(
@@ -98,7 +98,7 @@ impl CodexImagesBackend {
         &self,
         request: ImageEditRequest,
         turn_id: &str,
-    ) -> Result<ImageResponse, ImageBackendError> {
+    ) -> Result<(ImageResponse, Option<String>), ImageBackendError> {
         self.client()
             .await?
             .edit(

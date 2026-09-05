@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::AtomicU64;
@@ -9,6 +10,7 @@ use anyhow::anyhow;
 use chrono::DateTime;
 use chrono::Local;
 use chrono::Utc;
+use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::SleepFuture;
 use codex_core::TimeFuture;
 use codex_core::TimeProvider;
@@ -20,6 +22,7 @@ use codex_features::Feature;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -40,6 +43,7 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use test_case::test_case;
 
 const FIRST_REMINDER: &str =
     "<current_time_reminder>It is 2026-06-17 17:34:15 UTC.</current_time_reminder>";
@@ -50,6 +54,16 @@ const SECOND_REMINDER: &str =
 const THIRD_REMINDER: &str =
     "<current_time_reminder>It is 2026-06-17 17:36:15 UTC.</current_time_reminder>";
 const FIRST_TIME_UNIX_SECONDS: i64 = 1_781_717_655;
+
+#[derive(Clone, Copy)]
+enum ClockSetup {
+    Configured,
+    Persistent,
+    OrdinaryEffort,
+    ModelTools,
+    ExplicitlyDisabled,
+    RequiredOff,
+}
 
 struct TestTimeProvider {
     current_time: AtomicI64,
@@ -153,6 +167,7 @@ async fn environment_context_uses_external_current_time_on_each_turn() -> Result
         .iter()
         .zip([FIRST_TIME_UNIX_SECONDS, FIRST_TIME_UNIX_SECONDS + 86_400])
     {
+        assert!(request.has_content_kinds(&["environments.environment_context"]));
         let current_date = DateTime::<Utc>::from_timestamp(timestamp, 0)
             .expect("test timestamp should be valid")
             .with_timezone(&Local)
@@ -174,8 +189,8 @@ async fn current_time_reminders_follow_time_interval_and_persist_in_history() ->
 
     let server = start_mock_server().await;
     let tool_args = json!({
-        "command": "echo current time",
-        "timeout_ms": 1_000,
+        "cmd": "echo current time",
+        "yield_time_ms": 1_000,
     });
     let responses = mount_sse_sequence(
         &server,
@@ -184,7 +199,7 @@ async fn current_time_reminders_follow_time_interval_and_persist_in_history() ->
                 ev_response_created("resp-1"),
                 ev_function_call(
                     "current-time-tool-call",
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&tool_args)?,
                 ),
                 ev_completed("resp-1"),
@@ -265,8 +280,8 @@ async fn current_time_reminders_can_follow_only_user_or_tool_outputs() -> Result
 
     let server = start_mock_server().await;
     let tool_args = json!({
-        "command": "echo current time",
-        "timeout_ms": 1_000,
+        "cmd": "echo current time",
+        "yield_time_ms": 1_000,
     });
     let mut continue_response = ev_completed("resp-2");
     // Ask for another inference without recording a new user message or tool output.
@@ -278,7 +293,7 @@ async fn current_time_reminders_can_follow_only_user_or_tool_outputs() -> Result
                 ev_response_created("resp-1"),
                 ev_function_call(
                     "current-time-tool-call",
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&tool_args)?,
                 ),
                 ev_completed("resp-1"),
@@ -322,8 +337,14 @@ async fn current_time_reminders_can_follow_only_user_or_tool_outputs() -> Result
     Ok(())
 }
 
+#[test_case(ClockSetup::Configured; "configured")]
+#[test_case(ClockSetup::Persistent; "persistent")]
+#[test_case(ClockSetup::OrdinaryEffort; "ordinary_effort")]
+#[test_case(ClockSetup::ModelTools; "model_tools_without_reminders")]
+#[test_case(ClockSetup::ExplicitlyDisabled; "explicitly_disabled")]
+#[test_case(ClockSetup::RequiredOff; "required_off")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn system_time_source_adds_current_time_reminder() -> Result<()> {
+async fn system_time_source_adds_current_time_reminder(clock_setup: ClockSetup) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -332,22 +353,190 @@ async fn system_time_source_adds_current_time_reminder() -> Result<()> {
         sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
     )
     .await;
-    let test = test_codex()
-        .with_config(|config| {
-            enable_current_time_reminder(config, /*interval*/ 1, CurrentTimeSource::System)
+    let mut builder = test_codex()
+        .with_model_info_override("gpt-5.5", move |model_info| {
+            if matches!(clock_setup, ClockSetup::Configured | ClockSetup::ModelTools) {
+                model_info
+                    .experimental_supported_tools
+                    .push("clock".to_string());
+            }
         })
-        .build(&server)
-        .await?;
+        .with_pre_build_hook(move |home| {
+            let config = match clock_setup {
+                ClockSetup::Configured => Some("[features]\ncurrent_time_reminder = true\n"),
+                ClockSetup::ModelTools | ClockSetup::ExplicitlyDisabled => {
+                    Some("[features]\ncurrent_time_reminder = false\n")
+                }
+                ClockSetup::Persistent | ClockSetup::OrdinaryEffort | ClockSetup::RequiredOff => {
+                    None
+                }
+            };
+            if let Some(config) = config {
+                std::fs::write(home.join("config.toml"), config)
+                    .expect("clock configuration should be written");
+            }
+        })
+        .with_config(move |config| {
+            config.include_environment_context = false;
+            config.model_reasoning_effort = Some(match clock_setup {
+                ClockSetup::OrdinaryEffort | ClockSetup::ModelTools => ReasoningEffort::High,
+                ClockSetup::Configured
+                | ClockSetup::Persistent
+                | ClockSetup::ExplicitlyDisabled
+                | ClockSetup::RequiredOff => ReasoningEffort::Persistent,
+            });
+        });
+    if matches!(clock_setup, ClockSetup::RequiredOff) {
+        builder = builder.with_cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                "[features]\ncurrent_time_reminder = false\n",
+            ),
+        );
+    }
+    let test = builder.build_with_auto_env(&server).await?;
 
-    test.submit_turn("what time is it?").await?;
+    test.submit_text_turn("what time is it?").await?;
 
-    let reminders = current_time_reminders(&responses.single_request());
+    let request = responses.single_request();
+    assert_eq!(
+        ["curr_time", "sleep"].map(|name| request.tool_by_name("clock", name).is_some()),
+        match clock_setup {
+            ClockSetup::Configured => [true, false],
+            ClockSetup::Persistent | ClockSetup::ModelTools => [true, true],
+            ClockSetup::OrdinaryEffort
+            | ClockSetup::ExplicitlyDisabled
+            | ClockSetup::RequiredOff => [false, false],
+        }
+    );
+    if matches!(
+        clock_setup,
+        ClockSetup::OrdinaryEffort
+            | ClockSetup::ModelTools
+            | ClockSetup::ExplicitlyDisabled
+            | ClockSetup::RequiredOff
+    ) {
+        assert!(current_time_reminders(&request).is_empty());
+        return Ok(());
+    }
+    assert!(request.has_content_kinds(&["current_time.reminder"]));
+    let reminders = current_time_reminders(&request);
     assert_eq!(reminders.len(), 1);
     assert_regex_match(
         r"^<current_time_reminder>It is \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\.</current_time_reminder>$",
         &reminders[0],
     );
 
+    Ok(())
+}
+
+#[test_case(ReasoningEffort::High, true; "model_enabled")]
+#[test_case(ReasoningEffort::High, false; "model_disabled")]
+#[test_case(ReasoningEffort::Persistent, true; "persistent_enabled")]
+#[test_case(ReasoningEffort::Persistent, false; "persistent_disabled")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_feature_map_can_disable_sleep_tool(
+    reasoning_effort: ReasoningEffort,
+    sleep_tool_enabled: bool,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let reminders_enabled = reasoning_effort == ReasoningEffort::Persistent;
+
+    let server = start_mock_server().await;
+    let responses = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let test = test_codex()
+        .with_model_info_override("gpt-5.5", |model_info| {
+            model_info
+                .experimental_supported_tools
+                .push("clock".to_string());
+        })
+        .with_config(move |config| {
+            config.model_reasoning_effort = Some(reasoning_effort);
+            let mut features = config.features.get().clone();
+            features.apply_map(&BTreeMap::from([(
+                "sleep_tool".to_string(),
+                sleep_tool_enabled,
+            )]));
+            config
+                .features
+                .set(features)
+                .expect("test features should be allowed");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    test.submit_text_turn("what time is it?").await?;
+
+    let request = responses.single_request();
+    assert_eq!(
+        ["curr_time", "sleep"].map(|name| request.tool_by_name("clock", name).is_some()),
+        [true, sleep_tool_enabled]
+    );
+    assert_eq!(
+        current_time_reminders(&request).is_empty(),
+        !reminders_enabled
+    );
+    Ok(())
+}
+
+#[test_case("[features]\nsleep_tool = true", Some(true), [true, true]; "boolean_enabled")]
+#[test_case("[features]\nsleep_tool = false", Some(true), [true, false]; "boolean_disabled")]
+#[test_case("[features.sleep_tool]\nmode = 'always_on'", None, [false, true]; "always_on_without_model_clock")]
+#[test_case("[features.sleep_tool]\nenabled = false\nmode = 'always_on'", Some(true), [true, false]; "disabled_overrides_always_on")]
+#[test_case("[features.sleep_tool]\nmode = 'model_driven'", None, [false, false]; "model_driven_without_model_clock")]
+#[test_case("[features.sleep_tool]\nmode = 'model_driven'", Some(false), [true, false]; "model_driven_preserves_legacy_disable")]
+#[test_case("[features.sleep_tool]\nmode = 'always_on'", Some(false), [true, true]; "always_on_overrides_legacy_disable")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sleep_tool_configuration_controls_registration(
+    sleep_config: &str,
+    legacy_sleep_tool: Option<bool>,
+    expected_tools: [bool; 2],
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let responses = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let mut config_toml = sleep_config.to_string();
+    if let Some(sleep_tool) = legacy_sleep_tool {
+        config_toml.push_str(&format!(
+            "\n[features.current_time_reminder]\nenabled = true\nsleep_tool = {sleep_tool}\n"
+        ));
+    }
+    let test = test_codex()
+        .with_model_info_override("gpt-5.5", |model_info| {
+            model_info
+                .experimental_supported_tools
+                .retain(|tool| tool != "clock");
+        })
+        .with_pre_build_hook(move |home| {
+            std::fs::write(home.join("config.toml"), config_toml)
+                .expect("sleep tool configuration should be written");
+        })
+        .with_config(|config| {
+            config.model_reasoning_effort = Some(ReasoningEffort::High);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    test.submit_text_turn("check the available clock tools")
+        .await?;
+
+    let request = responses.single_request();
+    assert_eq!(
+        ["curr_time", "sleep"].map(|name| request.tool_by_name("clock", name).is_some()),
+        expected_tools
+    );
+    assert_eq!(
+        current_time_reminders(&request).is_empty(),
+        legacy_sleep_tool.is_none()
+    );
     Ok(())
 }
 

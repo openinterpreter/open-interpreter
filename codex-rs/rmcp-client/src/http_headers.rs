@@ -6,6 +6,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -38,6 +40,7 @@ use url::Origin;
 use url::Url;
 
 use crate::utils::create_env_for_mcp_server;
+use crate::www_authenticate::insufficient_scope_challenge;
 
 const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HELPER_OUTPUT_BYTES: usize = 64 * 1024;
@@ -45,7 +48,22 @@ type CachedHeaders = Shared<BoxFuture<'static, std::result::Result<Arc<HeaderMap
 
 struct HttpHeadersProvider {
     server_origin: Origin,
-    cached: CachedHeaders,
+    command: String,
+    cwd: PathBuf,
+    cache: Mutex<HeadersCache>,
+}
+
+struct HeadersCache {
+    // Identifies a cohort of rejected requests, not a credential version. Advance even after
+    // failed or unchanged refreshes so concurrent rejections share one helper invocation.
+    refresh_epoch: u64,
+    current: CachedHeaders,
+    refresh: Option<CachedHeaders>,
+}
+
+struct RequestHeaders {
+    refresh_epoch: u64,
+    values: Arc<HeaderMap>,
 }
 
 struct HttpHeadersClient {
@@ -118,29 +136,89 @@ impl Drop for HelperProcess {
 impl HttpHeadersProvider {
     fn new(server_url: &str, command: &str, cwd: PathBuf) -> Result<Self> {
         let command = command.to_string();
-        let cached = async move {
-            run_helper(&command, &cwd)
-                .await
-                .map(Arc::new)
-                .map_err(|error| Arc::<str>::from(error.to_string()))
-        }
-        .boxed()
-        .shared();
+        let cached = Self::helper_attempt(command.clone(), cwd.clone());
         Ok(Self {
             server_origin: Url::parse(server_url)?.origin(),
-            cached,
+            command,
+            cwd,
+            cache: Mutex::new(HeadersCache {
+                refresh_epoch: 0,
+                current: cached,
+                refresh: None,
+            }),
         })
     }
 
-    async fn headers(&self) -> Result<Arc<HeaderMap>, ExecServerError> {
-        self.cached
-            .clone()
+    fn helper_attempt(command: String, cwd: PathBuf) -> CachedHeaders {
+        async move {
+            // Keep helper cleanup running after caller cancellation; dropping the set aborts it.
+            let mut tasks = tokio::task::JoinSet::new();
+            tasks.spawn(async move {
+                run_helper(&command, &cwd)
+                    .await
+                    .map(Arc::new)
+                    .map_err(|error| Arc::<str>::from(error.to_string()))
+            });
+            tasks
+                .join_next()
+                .await
+                .ok_or_else(|| Arc::<str>::from("MCP HTTP headers helper task was unavailable"))?
+                .map_err(|_| Arc::<str>::from("MCP HTTP headers helper task failed"))?
+        }
+        .boxed()
+        .shared()
+    }
+
+    async fn headers(&self) -> Result<RequestHeaders, ExecServerError> {
+        let (refresh_epoch, current) = {
+            let cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+            (cache.refresh_epoch, cache.current.clone())
+        };
+        current
             .await
+            .map(|values| RequestHeaders {
+                refresh_epoch,
+                values,
+            })
             .map_err(|error| ExecServerError::HttpRequest(error.to_string()))
+    }
+
+    async fn refresh(&self, rejected_epoch: u64) -> Result<Arc<HeaderMap>, ExecServerError> {
+        let attempt = {
+            let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+            if cache.refresh_epoch != rejected_epoch {
+                cache.current.clone()
+            } else {
+                cache
+                    .refresh
+                    .get_or_insert_with(|| {
+                        Self::helper_attempt(self.command.clone(), self.cwd.clone())
+                    })
+                    .clone()
+            }
+        };
+        let result = attempt.clone().await;
+        let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+        if cache.refresh_epoch == rejected_epoch
+            && cache
+                .refresh
+                .as_ref()
+                .is_some_and(|refresh| refresh.ptr_eq(&attempt))
+        {
+            cache.refresh_epoch = rejected_epoch.saturating_add(/*rhs*/ 1);
+            if result.is_ok() {
+                cache.current = attempt;
+            }
+            cache.refresh = None;
+        }
+        result.map_err(|error| ExecServerError::HttpRequest(error.to_string()))
     }
 }
 
-/// No rejection-driven refresh: 401/403 may be OAuth challenges, and reconnecting loses sessions.
+/// Refreshes helper headers once after a same-origin POST returns 401/403, retrying only
+/// when helper-provided values change. OAuth challenges survive failed or unchanged refreshes.
+/// Helper Authorization is used only when the request has no explicit bearer/OAuth credential.
+/// The helper is a short-lived process; independently managed daemons remain caller-owned.
 pub fn with_http_headers_helper(
     inner: Arc<dyn HttpClient>,
     server_url: &str,
@@ -154,16 +232,14 @@ pub fn with_http_headers_helper(
 impl HttpHeadersClient {
     async fn prepare_request(
         &self,
-        mut params: HttpRequestParams,
-    ) -> Result<HttpRequestParams, ExecServerError> {
+        params: HttpRequestParams,
+    ) -> Result<(HttpRequestParams, Option<RequestHeaders>, Option<Instant>), ExecServerError> {
         let Ok(url) = Url::parse(&params.url) else {
-            return Ok(params);
+            return Ok((params, None, None));
         };
         if self.provider.server_origin != url.origin() {
-            return Ok(params);
+            return Ok((params, None, None));
         }
-        // TODO: Follow same-origin redirects once later hops cannot leak helper headers.
-        params.redirect_policy = HttpRedirectPolicy::Stop;
 
         let deadline = params
             .timeout_ms
@@ -176,7 +252,28 @@ impl HttpHeadersClient {
                 })??,
             None => self.provider.headers().await?,
         };
-        for (name, value) in headers.iter() {
+        let params = self.apply_headers(params, &headers.values, deadline)?;
+        Ok((params, Some(headers), deadline))
+    }
+
+    fn apply_headers(
+        &self,
+        mut params: HttpRequestParams,
+        headers: &HeaderMap,
+        deadline: Option<Instant>,
+    ) -> Result<HttpRequestParams, ExecServerError> {
+        // TODO: Follow same-origin redirects once later hops cannot leak helper headers.
+        params.redirect_policy = HttpRedirectPolicy::Stop;
+        for (name, value) in headers {
+            // Explicit bearer tokens, MCP OAuth and token-endpoint client authentication win.
+            if name == http::header::AUTHORIZATION
+                && params
+                    .headers
+                    .iter()
+                    .any(|header| header.name.eq_ignore_ascii_case("authorization"))
+            {
+                continue;
+            }
             params
                 .headers
                 .retain(|header| !header.name.eq_ignore_ascii_case(name.as_str()));
@@ -185,6 +282,7 @@ impl HttpHeadersClient {
                 value: std::str::from_utf8(value.as_bytes())
                     .map_err(|error| ExecServerError::HttpRequest(error.to_string()))?
                     .to_string(),
+                value_env_var: None,
             });
         }
         if let Some(deadline) = deadline {
@@ -197,6 +295,113 @@ impl HttpHeadersClient {
         }
         Ok(params)
     }
+
+    fn reject_proxy_authorization_redirect(
+        response: &HttpRequestResponse,
+    ) -> Result<(), ExecServerError> {
+        if (300..400).contains(&response.status)
+            && response
+                .headers
+                .iter()
+                .any(|header| header.name.eq_ignore_ascii_case("location"))
+        {
+            return Err(ExecServerError::HttpRequest(
+                "MCP HTTP redirect cannot safely replay Proxy-Authorization credentials"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn retry_request(
+        &self,
+        params: HttpRequestParams,
+        rejected: RequestHeaders,
+        deadline: Option<Instant>,
+        response: &HttpRequestResponse,
+    ) -> Option<HttpRequestParams> {
+        if !matches!(response.status, 401 | 403)
+            || response.status == 403 && insufficient_scope_challenge(&response.headers).is_some()
+        {
+            return None;
+        }
+        // A rejection may be an OAuth challenge, so preserve it if the helper cannot improve it.
+        let refreshed = match deadline {
+            Some(deadline) => {
+                tokio::time::timeout_at(deadline, self.provider.refresh(rejected.refresh_epoch))
+                    .await
+                    .ok()?
+                    .ok()?
+            }
+            None => self.provider.refresh(rejected.refresh_epoch).await.ok()?,
+        };
+        // Header names are user-defined. Compare effective helper values, excluding an
+        // Authorization that would be overridden, without treating JSON key order as a change.
+        let explicit_authorization = params
+            .headers
+            .iter()
+            .any(|header| header.name.eq_ignore_ascii_case("authorization"));
+        let differs = |left: &HeaderMap, right: &HeaderMap| {
+            left.iter().any(|(name, value)| {
+                (!explicit_authorization || name != http::header::AUTHORIZATION)
+                    && right.get(name) != Some(value)
+            })
+        };
+        if !differs(&rejected.values, &refreshed) && !differs(&refreshed, &rejected.values) {
+            return None;
+        }
+        self.apply_headers(params, &refreshed, deadline).ok()
+    }
+
+    async fn request<'a, T>(
+        &'a self,
+        params: HttpRequestParams,
+        send: impl Fn(HttpRequestParams) -> BoxFuture<'a, Result<T, ExecServerError>>,
+        response_headers: impl Fn(&T) -> &HttpRequestResponse,
+    ) -> Result<T, ExecServerError> {
+        // OAuth validates redirect responses itself; only intercept MCP replay.
+        let mcp_redirect_was_stopped = params.redirect_policy == HttpRedirectPolicy::Stop
+            && !params.request_id.starts_with("oauth-request-");
+        let original_headers = params
+            .method
+            .eq_ignore_ascii_case("POST")
+            .then(|| params.headers.clone());
+        let (params, headers, deadline) = self.prepare_request(params).await?;
+        let original = original_headers
+            .filter(|_| headers.is_some())
+            .map(|headers| {
+                let mut original = params.clone();
+                original.headers = headers;
+                original
+            });
+        let needs_redirect_check = |params: &HttpRequestParams| {
+            mcp_redirect_was_stopped
+                && Url::parse(&params.url).is_ok_and(|url| url.scheme() == "http")
+                && params
+                    .headers
+                    .iter()
+                    .any(|header| header.name.eq_ignore_ascii_case("proxy-authorization"))
+        };
+        let prevent_proxy_authorization_redirect = needs_redirect_check(&params);
+        let response = send(params).await?;
+        if prevent_proxy_authorization_redirect {
+            Self::reject_proxy_authorization_redirect(response_headers(&response))?;
+        }
+        if let (Some(original), Some(headers)) = (original, headers)
+            && let Some(retry) = self
+                .retry_request(original, headers, deadline, response_headers(&response))
+                .await
+        {
+            drop(response);
+            let prevent_proxy_authorization_redirect = needs_redirect_check(&retry);
+            let response = send(retry).await?;
+            if prevent_proxy_authorization_redirect {
+                Self::reject_proxy_authorization_redirect(response_headers(&response))?;
+            }
+            return Ok(response);
+        }
+        Ok(response)
+    }
 }
 
 impl HttpClient for HttpHeadersClient {
@@ -204,10 +409,11 @@ impl HttpClient for HttpHeadersClient {
         &self,
         params: HttpRequestParams,
     ) -> BoxFuture<'_, Result<HttpRequestResponse, ExecServerError>> {
-        async move {
-            let params = self.prepare_request(params).await?;
-            self.inner.http_request(params).await
-        }
+        self.request(
+            params,
+            |params| self.inner.http_request(params),
+            |response| response,
+        )
         .boxed()
     }
 
@@ -215,10 +421,11 @@ impl HttpClient for HttpHeadersClient {
         &self,
         params: HttpRequestParams,
     ) -> BoxFuture<'_, Result<(HttpRequestResponse, HttpResponseBodyStream), ExecServerError>> {
-        async move {
-            let params = self.prepare_request(params).await?;
-            self.inner.http_request_stream(params).await
-        }
+        self.request(
+            params,
+            |params| self.inner.http_request_stream(params),
+            |response| &response.0,
+        )
         .boxed()
     }
 }
@@ -321,13 +528,12 @@ fn parse_helper_output(stdout: Vec<u8>) -> Result<HeaderMap> {
     for (name, value) in headers.entries {
         let name = HeaderName::from_bytes(name.as_bytes())
             .map_err(|_| anyhow!("MCP HTTP headers helper returned an invalid header name"))?;
-        // Helper values replace same-name configured headers; bearer/OAuth owns Authorization.
+        // Helper values replace same-name configured headers, except explicit Authorization.
         // Google IAP uses Proxy-Authorization alongside application Authorization. For HTTPS MCP
         // URLs it is sent through the forward-proxy tunnel to IAP, not used as CONNECT auth.
         if matches!(
             name.as_str(),
             "accept"
-                | "authorization"
                 | "connection"
                 | "content-encoding"
                 | "content-length"

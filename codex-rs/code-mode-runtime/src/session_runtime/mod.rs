@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use opentelemetry::context::FutureExt;
 use serde_json::Value as JsonValue;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -163,6 +164,7 @@ impl<D: SessionRuntimeDelegate> SessionRuntime<D> {
         let host = Arc::new(RuntimeCellHost {
             cell_id: cell_id.clone(),
             inner: Arc::clone(&self.inner),
+            execution_context: opentelemetry::Context::current(),
         });
         let mut cells = self.inner.cells.lock().await;
         if self.inner.shutdown_token.is_cancelled() {
@@ -235,6 +237,9 @@ impl PendingEvent {
 struct RuntimeCellHost<D: SessionRuntimeDelegate> {
     cell_id: CellId,
     inner: Arc<Inner<D>>,
+    // Callbacks outlive the initial request and run in separate tasks. Preserve
+    // their trace parent without retaining the request's tracing span.
+    execution_context: opentelemetry::Context,
 }
 
 impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
@@ -255,6 +260,7 @@ impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
                 },
                 cancellation_token,
             )
+            .with_context(self.execution_context.clone())
             .await
     }
 

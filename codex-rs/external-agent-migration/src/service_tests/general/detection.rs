@@ -70,6 +70,190 @@ async fn detect_home_lists_config_skills_and_agents_md() {
 }
 
 #[tokio::test]
+async fn detect_and_import_claude_commands_without_frontmatter() {
+    let (root, external_agent_home, codex_home) = fixture_paths();
+    let repo_root = root.path().join("repo");
+    fs::create_dir_all(repo_root.join(".git")).expect("create git dir");
+    let service = service_for_paths(external_agent_home.clone(), codex_home);
+
+    for (cwd, source_commands, target_skills) in [
+        (
+            None,
+            external_agent_home.join("commands"),
+            root.path().join(".agents").join("skills"),
+        ),
+        (
+            Some(repo_root.clone()),
+            repo_root.join(EXTERNAL_AGENT_DIR).join("commands"),
+            repo_root.join(".agents").join("skills"),
+        ),
+    ] {
+        fs::create_dir_all(source_commands.join("pr")).expect("create commands");
+        fs::write(
+            source_commands.join("pr").join("review.md"),
+            format!("Review changes with {SOURCE_EXTERNAL_AGENT_PRODUCT_NAME} and {EXTERNAL_AGENT_CONFIG_MD}.\n"),
+        )
+        .expect("write plain command");
+        fs::write(source_commands.join("deploy.md"), "Deploy $ARGUMENTS.\n")
+            .expect("write unsupported command");
+
+        let options = ExternalAgentConfigDetectOptions {
+            include_home: cwd.is_none(),
+            include_memory: false,
+            cwds: cwd.clone().map(|cwd| vec![cwd]),
+        };
+        let items = service.detect(options.clone()).await.expect("detect");
+        assert_eq!(
+            items,
+            vec![ExternalAgentConfigMigrationItem {
+                item_type: ExternalAgentConfigMigrationItemType::Commands,
+                description: format!(
+                    "Migrate commands from {} to {}",
+                    source_commands.display(),
+                    target_skills.display()
+                ),
+                cwd,
+                details: Some(MigrationDetails {
+                    commands: named_migrations(vec!["source-command-pr-review".to_string()]),
+                    ..Default::default()
+                }),
+            }]
+        );
+
+        service.import(items).await;
+        assert_eq!(
+            fs::read_to_string(
+                target_skills
+                    .join("source-command-pr-review")
+                    .join("SKILL.md")
+            )
+            .expect("read migrated command"),
+            "---\nname: \"source-command-pr-review\"\ndescription: \"Migrated source command `pr-review`\"\n---\n\n# source-command-pr-review\n\nUse this skill when the user asks to run the migrated source command `pr-review`.\n\n## Command Template\n\nReview changes with Codex and AGENTS.md.\n"
+        );
+        assert!(!target_skills.join("source-command-deploy").exists());
+        assert_eq!(
+            service.detect(options).await.expect("detect after import"),
+            Vec::<ExternalAgentConfigMigrationItem>::new()
+        );
+    }
+}
+
+#[tokio::test]
+async fn detect_and_import_claude_commands_preserves_described_commands_on_collision() {
+    let (root, external_agent_home, codex_home) = fixture_paths();
+    let repo_root = root.path().join("repo");
+    fs::create_dir_all(repo_root.join(".git")).expect("create git dir");
+    let service = service_for_paths(external_agent_home.clone(), codex_home);
+
+    for (cwd, source_commands, target_skills) in [
+        (
+            None,
+            external_agent_home.join("commands"),
+            root.path().join(".agents").join("skills"),
+        ),
+        (
+            Some(repo_root.clone()),
+            repo_root.join(EXTERNAL_AGENT_DIR).join("commands"),
+            repo_root.join(".agents").join("skills"),
+        ),
+    ] {
+        fs::create_dir_all(source_commands.join("foo")).expect("create commands");
+        for (path, content) in [
+            ("aaa-fallback.md", "Run the standalone fallback.\n"),
+            (
+                "zzz-described.md",
+                "---\ndescription: Standalone described command\n---\nRun the standalone described command.\n",
+            ),
+            (
+                "foo-bar.md",
+                "---\ndescription: Original description\n---\nRun the described command.\n",
+            ),
+            ("foo bar.md", "Run the plain fallback.\n"),
+            (
+                "foo_bar.md",
+                "---\ndescription: '  '\n---\nRun the blank-description fallback.\n",
+            ),
+            (
+                "foo/bar.md",
+                "---\ndescription: [unusable]\n---\nRun the unusable-description fallback.\n",
+            ),
+            (
+                "ambiguous-name.md",
+                "---\ndescription: First\n---\nRun the first described command.\n",
+            ),
+            (
+                "ambiguous_name.md",
+                "---\ndescription: Second\n---\nRun the second described command.\n",
+            ),
+            ("ambiguous name.md", "Run the ambiguous fallback.\n"),
+            ("fallback-name.md", "Run the first fallback.\n"),
+            ("fallback_name.md", "Run the second fallback.\n"),
+            (
+                "unsupported-name.md",
+                "---\ndescription: Deploy\n---\nDeploy $ARGUMENTS.\n",
+            ),
+            ("unsupported_name.md", "Run the supported fallback.\n"),
+        ] {
+            fs::write(source_commands.join(path), content).expect("write command");
+        }
+
+        let options = ExternalAgentConfigDetectOptions {
+            include_home: cwd.is_none(),
+            include_memory: false,
+            cwds: cwd.clone().map(|cwd| vec![cwd]),
+        };
+        let items = service.detect(options.clone()).await.expect("detect");
+        assert_eq!(
+            items,
+            vec![ExternalAgentConfigMigrationItem {
+                item_type: ExternalAgentConfigMigrationItemType::Commands,
+                description: format!(
+                    "Migrate commands from {} to {}",
+                    source_commands.display(),
+                    target_skills.display()
+                ),
+                cwd,
+                details: Some(MigrationDetails {
+                    commands: named_migrations(vec![
+                        "source-command-aaa-fallback".to_string(),
+                        "source-command-foo-bar".to_string(),
+                        "source-command-unsupported-name".to_string(),
+                        "source-command-zzz-described".to_string(),
+                    ]),
+                    ..Default::default()
+                }),
+            }]
+        );
+
+        service.import(items).await;
+        assert_eq!(
+            fs::read_to_string(
+                target_skills
+                    .join("source-command-foo-bar")
+                    .join("SKILL.md")
+            )
+            .expect("read described command"),
+            "---\nname: \"source-command-foo-bar\"\ndescription: \"Original description\"\n---\n\n# source-command-foo-bar\n\nUse this skill when the user asks to run the migrated source command `foo-bar`.\n\n## Command Template\n\nRun the described command.\n"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                target_skills
+                    .join("source-command-unsupported-name")
+                    .join("SKILL.md")
+            )
+            .expect("read supported fallback command"),
+            "---\nname: \"source-command-unsupported-name\"\ndescription: \"Migrated source command `unsupported_name`\"\n---\n\n# source-command-unsupported-name\n\nUse this skill when the user asks to run the migrated source command `unsupported_name`.\n\n## Command Template\n\nRun the supported fallback.\n"
+        );
+        assert!(!target_skills.join("source-command-ambiguous-name").exists());
+        assert!(!target_skills.join("source-command-fallback-name").exists());
+        assert_eq!(
+            service.detect(options).await.expect("detect after import"),
+            Vec::<ExternalAgentConfigMigrationItem>::new()
+        );
+    }
+}
+
+#[tokio::test]
 async fn detect_cursor_home_lists_user_and_managed_skills() {
     let root = TempDir::new().expect("create tempdir");
     let external_agent_home = root.path().join(".cursor");

@@ -1,0 +1,10 @@
+---
+source: tui/src/app/tests/active_reconnect_tests.rs
+expression: "render_bottom_popup(&app.chat_widget, 80)"
+---
+• Reconnect failed — check the endpoint, then relaunch (0s)
+
+
+› Ask Codex to do anything
+
+   ctrl+c quit

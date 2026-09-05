@@ -17,6 +17,7 @@ use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::session::INITIAL_SUBMIT_ID;
 use crate::session::session::Session;
 use crate::session::turn::build_prompt;
+use codex_features::Feature;
 use codex_otel::STARTUP_PREWARM_AGE_AT_FIRST_TURN_METRIC;
 use codex_otel::STARTUP_PREWARM_DURATION_METRIC;
 use codex_otel::SessionTelemetry;
@@ -183,6 +184,17 @@ impl SessionStartupPrewarmHandle {
 
 impl Session {
     pub(crate) async fn schedule_startup_prewarm(self: &Arc<Self>, base_instructions: String) {
+        if self.features().enabled(Feature::CodeModePrewarm)
+            && self.services.code_mode_service.is_available()
+        {
+            let session = Arc::clone(self);
+            tokio::spawn(async move {
+                if session.services.code_mode_service.session().await.is_err() {
+                    warn!("code-mode host startup prewarm failed");
+                }
+            });
+        }
+
         if !self.services.model_client.responses_websocket_enabled() {
             // Without websocket prewarm, resolve auth once so Agent Identity bootstrap can
             // register or engage this session's bearer fallback before the first user request.
@@ -301,24 +313,19 @@ async fn schedule_startup_prewarm_inner(
         build_prompt_started_at.elapsed(),
         /*status*/ None,
     );
-    let window_id = session.current_window_id().await;
-    let responses_metadata = startup_turn_context
-        .turn_metadata_state
-        .to_responses_metadata(
-            session.installation_id.clone(),
-            window_id,
-            CodexResponsesRequestKind::Prewarm,
-        );
+    let responses_metadata = session
+        .responses_metadata(&startup_turn_context, CodexResponsesRequestKind::Prewarm)
+        .await;
     let mut client_session = session.services.model_client.new_session();
     let websocket_warmup_started_at = Instant::now();
     client_session
         .prewarm_websocket(
             &startup_prompt,
-            &step_context.model_info,
+            &step_context.settings.model_info,
             &step_context.session_telemetry,
-            step_context.reasoning_effort.clone(),
-            step_context.reasoning_summary,
-            step_context.service_tier.clone(),
+            step_context.settings.reasoning_effort().cloned(),
+            step_context.settings.reasoning_summary,
+            step_context.settings.service_tier.clone(),
             &responses_metadata,
         )
         .await?;

@@ -2,8 +2,12 @@ use codex_config::ConfigRequirements;
 use codex_config::RequirementSource;
 use codex_config::Sourced;
 use codex_config::config_toml::ConfigToml;
+use codex_config::types::ApprovalsReviewer;
 use codex_config::types::FeedbackConfigToml;
+use codex_features::FeatureToml;
+use codex_login::default_client::RESIDENCY_HEADER_NAME;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Applies managed requirements to regular config before final config construction.
@@ -26,16 +30,43 @@ pub(super) fn apply_to_config(
         };
     }
 
+    apply_exact!(cli_auth_credentials_store);
+    apply_exact!(chatgpt_base_url);
     apply_exact!(sqlite_home);
     apply_exact!(log_dir);
     apply_exact!(model_catalog_json);
     apply_exact!(check_for_update_on_startup);
     apply_exact!(allow_login_shell);
+    if requirements
+        .approvals_reviewer
+        .can_set(&ApprovalsReviewer::User)
+        .is_err()
+    {
+        config.features.get_or_insert_default().guardianv2 = Some(FeatureToml::Enabled(false));
+    }
     apply_feedback_requirement(
         &mut config.feedback,
         requirements.feedback.as_ref(),
         startup_warnings,
     );
+    if requirements.enforce_residency.value().is_some() {
+        for (provider_name, provider) in &config.model_providers {
+            let has_residency_header = provider
+                .http_headers
+                .iter()
+                .flat_map(HashMap::keys)
+                .chain(provider.env_http_headers.iter().flat_map(HashMap::keys))
+                .any(|name| name.eq_ignore_ascii_case(RESIDENCY_HEADER_NAME));
+
+            if has_residency_header {
+                let warning = format!(
+                    "Ignoring `{RESIDENCY_HEADER_NAME}` in `model_providers.{provider_name}` because managed residency is required."
+                );
+                tracing::warn!(provider = provider_name, "{warning}");
+                startup_warnings.push(warning);
+            }
+        }
+    }
     if let Some(requirement) = requirements.windows_sandbox_private_desktop.as_ref() {
         apply_exact_requirement(
             "windows.sandbox_private_desktop",

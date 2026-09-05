@@ -1,10 +1,56 @@
 use super::*;
 use crate::session::tests::make_session_configuration_for_tests;
 use crate::state::AutoCompactWindowSnapshot;
+use codex_protocol::SessionId;
+use codex_protocol::ThreadId;
 use codex_protocol::protocol::CreditsSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::SpendControlLimitSnapshot;
+use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::TokenUsageRecord;
 use pretty_assertions::assert_eq;
+
+#[tokio::test]
+async fn record_token_usage_continues_restored_totals() {
+    let thread_id = ThreadId::new();
+    let session_id = SessionId::from(ThreadId::new());
+    let usage = |total_tokens| TokenUsage {
+        total_tokens,
+        ..TokenUsage::default()
+    };
+    let mut restored = SessionState::new(make_session_configuration_for_tests().await);
+    restored.latest_token_usage_record = Some(TokenUsageRecord {
+        thread_id,
+        turn_id: "turn-b".to_string(),
+        session_id,
+        root_turn_id: "root-turn".to_string(),
+        response_id: "response-c".to_string(),
+        usage: usage(30),
+        turn_token_usage: usage(30),
+        thread_token_usage: usage(230),
+    });
+    let after_resume = restored.record_token_usage(
+        thread_id,
+        "turn-b",
+        session_id,
+        "root-turn".to_string(),
+        "response-d".to_string(),
+        &usage(20),
+    );
+    assert_eq!(
+        after_resume,
+        TokenUsageRecord {
+            thread_id,
+            turn_id: "turn-b".to_string(),
+            session_id,
+            root_turn_id: "root-turn".to_string(),
+            response_id: "response-d".to_string(),
+            usage: usage(20),
+            turn_token_usage: usage(50),
+            thread_token_usage: usage(250),
+        }
+    );
+}
 
 #[tokio::test]
 // Verifies connector merging deduplicates repeated IDs.

@@ -38,6 +38,8 @@
         "enterprise_cbp_usage_based",
         "enterprise",
         "edu",
+        "edu_plus",
+        "edu_pro",
         "unknown"
       ],
       "type": "string"
@@ -275,6 +277,13 @@
     }
   },
   "properties": {
+    "accountId": {
+      "description": "Account associated with this usage snapshot, when supplied by the backend.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "rateLimitResetCredits": {
       "anyOf": [
         {
@@ -284,6 +293,9 @@
           "type": "null"
         }
       ]
+    },
+    "rateLimitUpsell": {
+      "description": "Optional backend-owned banner from the same usage read. Its nested keys retain the backend's snake_case contract; an absent banner leaves the client's existing UI unchanged."
     },
     "rateLimits": {
       "allOf": [

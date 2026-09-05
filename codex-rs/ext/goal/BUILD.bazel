@@ -6,5 +6,8 @@ codex_rust_crate(
         "templates/**",
     ]),
     crate_name = "codex_goal_extension",
-    integration_compile_data_extra = ["src/accounting.rs"],
+    integration_compile_data_extra = [
+        "src/accounting.rs",
+        "src/steering.rs",
+    ] + glob(["templates/**"]),
 )

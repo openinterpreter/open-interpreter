@@ -9,10 +9,12 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::plan_tool::PlanItemArg as CorePlanItemArg;
 use codex_protocol::plan_tool::StepStatus as CorePlanStepStatus;
+use codex_protocol::turn_input::CyberAccessProgram as CoreCyberAccessProgram;
 use codex_protocol::user_input::ByteRange as CoreByteRange;
 use codex_protocol::user_input::TextElement as CoreTextElement;
 use codex_protocol::user_input::UserInput as CoreUserInput;
@@ -35,6 +37,58 @@ pub enum TurnStatus {
 }
 
 // Turn APIs
+/// Experimental settings changes for one running turn, not future turns.
+/// Unsupported fields are rejected rather than silently ignored.
+/// Any live task kind may accept publication. Child sessions and consumers of
+/// frozen initial settings are unchanged.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct TurnSettingsUpdateParams {
+    pub thread_id: String,
+    pub turn_id: String,
+    /// Changes the active turn's reviewer without changing future thread settings.
+    /// Already captured steps and pending approvals retain their original reviewer.
+    #[ts(optional = nullable)]
+    pub approvals_reviewer: Option<ApprovalsReviewer>,
+    /// Omission or `null` leaves the model unchanged.
+    #[ts(optional = nullable)]
+    pub model: Option<String>,
+    /// Omission or `null` leaves the effort unchanged.
+    #[ts(optional = nullable)]
+    pub effort: Option<ReasoningEffort>,
+    /// Omission or `null` leaves the summary preference unchanged.
+    #[ts(optional = nullable)]
+    pub summary: Option<ReasoningSummary>,
+    /// `null` clears the requested tier; omission leaves it unchanged.
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
+        serialize_with = "crate::protocol::serde_helpers::serialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(optional = nullable)]
+    pub service_tier: Option<Option<String>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TurnSettingsUpdateResponse {
+    pub status: TurnSettingsUpdateStatus,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum TurnSettingsUpdateStatus {
+    /// Published for subsequent captures, even if the values were unchanged.
+    /// Already captured steps are unchanged; a later inference is not guaranteed.
+    Applied,
+    /// No matching live task remained available for publication.
+    TargetUnavailable,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -63,6 +117,37 @@ pub struct AdditionalContextEntry {
     pub kind: AdditionalContextKind,
 }
 
+/// Requested cyber treatment for a ChatGPT-authenticated Codex turn.
+/// Authorization and model-tier restrictions remain server-owned.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum CyberAccessProgram {
+    Standard,
+    DaybreakBlue,
+    DaybreakRed,
+}
+
+impl From<CyberAccessProgram> for CoreCyberAccessProgram {
+    fn from(value: CyberAccessProgram) -> Self {
+        match value {
+            CyberAccessProgram::Standard => Self::Standard,
+            CyberAccessProgram::DaybreakBlue => Self::DaybreakBlue,
+            CyberAccessProgram::DaybreakRed => Self::DaybreakRed,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TurnToolOutput {
+    pub name: String,
+    pub namespace: Option<String>,
+    pub output: FunctionCallOutputBody,
+}
+
 #[derive(
     Serialize, Deserialize, Debug, Default, Clone, PartialEq, JsonSchema, TS, ExperimentalApi,
 )]
@@ -73,6 +158,12 @@ pub struct TurnStartParams {
     #[ts(optional = nullable)]
     pub client_user_message_id: Option<String>,
     pub input: Vec<UserInput>,
+    /// Optional source classification for the caller that starts this turn.
+    /// Ignored when this request steers an already-active turn.
+    #[ts(optional = nullable)]
+    pub turn_trigger: Option<String>,
+    #[ts(optional = nullable)]
+    pub tool_output: Option<Box<TurnToolOutput>>,
     /// Optional metadata to enrich Codex's ResponsesAPI turn metadata.
     ///
     /// Entries are flattened into the JSON string sent as
@@ -131,6 +222,11 @@ pub struct TurnStartParams {
     )]
     #[ts(optional = nullable)]
     pub service_tier: Option<Option<String>>,
+    /// Override the service tier only when this request starts a new turn.
+    /// Use "default" for standard speed. Omitted or null inherits the thread's tier.
+    /// Does not change the thread's tier or a turn being steered.
+    #[ts(optional = nullable)]
+    pub service_tier_for_turn: Option<String>,
     /// Override the reasoning effort for this turn and subsequent turns.
     #[ts(optional = nullable)]
     pub effort: Option<ReasoningEffort>,
@@ -158,6 +254,12 @@ pub struct TurnStartParams {
     #[experimental("turn/start.multiAgentMode")]
     #[ts(optional = nullable)]
     pub multi_agent_mode: Option<MultiAgentMode>,
+
+    /// EXPERIMENTAL - Request a workspace-authorized cyber program for this
+    /// turn. Omission preserves automatic behavior. This does not grant access.
+    #[experimental("turn/start.cyberAccessProgram")]
+    #[ts(optional = nullable)]
+    pub cyber_access_program: Option<CyberAccessProgram>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

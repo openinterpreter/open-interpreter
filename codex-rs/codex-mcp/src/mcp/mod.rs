@@ -6,6 +6,7 @@ pub use auth::ResolvedMcpOAuthScopes;
 pub use auth::compute_auth_statuses;
 pub use auth::discover_supported_scopes;
 pub use auth::oauth_login_support;
+pub use auth::resolve_oauth_callback;
 pub use auth::resolve_oauth_scopes;
 pub use auth::should_retry_without_scopes;
 
@@ -40,6 +41,7 @@ use codex_protocol::mcp::Tool;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::McpAuthStatus;
+use codex_rmcp_client::McpOAuthRefreshMode;
 use codex_utils_path_uri::PathUri;
 use rmcp::model::ElicitationCapability;
 use rmcp::model::ReadResourceRequestParams;
@@ -48,6 +50,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::McpProtocolMode;
+use crate::McpServerSource;
 use crate::ResolvedMcpCatalog;
 use crate::connection_manager::McpConnectionSet;
 use crate::runtime::McpPublicationGate;
@@ -126,12 +129,19 @@ pub struct McpConfig {
     pub codex_home: PathBuf,
     /// Preferred credential store for MCP OAuth tokens.
     pub mcp_oauth_credentials_store_mode: OAuthCredentialsStoreMode,
+    /// OAuth refresh ownership selected for new MCP connections.
+    pub oauth_refresh_mode: McpOAuthRefreshMode,
     /// Backend used when MCP OAuth storage is configured for keyring-backed persistence.
     pub auth_keyring_backend_kind: AuthKeyringBackendKind,
     /// Optional fixed localhost callback port for MCP OAuth login.
     pub mcp_oauth_callback_port: Option<u16>,
     /// Optional OAuth redirect URI override for MCP login.
     pub mcp_oauth_callback_url: Option<String>,
+    /// How long a tool catalog capture waits for optional MCP servers to initialize.
+    ///
+    /// A zero duration disables the shared grace and waits for each server's
+    /// configured startup timeout instead.
+    pub optional_mcp_startup_grace: Duration,
     /// Whether skill MCP dependency installation prompts are enabled.
     pub skill_mcp_dependency_install_enabled: bool,
     /// Approval policy used for MCP tool calls and MCP elicitation requests.
@@ -144,9 +154,13 @@ pub struct McpConfig {
     pub approvals_reviewer: ApprovalsReviewer,
     /// Working directories for the exact environment handles used by this runtime.
     pub environment_cwds: HashMap<String, PathUri>,
+    /// Explicit server permissions; unresolved or unavailable servers have no entry.
+    pub server_permission_profiles: HashMap<String, PermissionProfile>,
     /// Optional path to `codex-linux-sandbox` for sandboxed MCP tool execution.
     pub codex_linux_sandbox_exe: Option<PathBuf>,
     /// Whether to use legacy Landlock behavior in the MCP sandbox state.
+    // TODO(anp): Reconcile this runtime-wide copy with TurnEnvironment::sandbox_context
+    // for the environment that owns each MCP server.
     pub use_legacy_landlock: bool,
     /// Whether the app MCP integration is enabled by config.
     ///
@@ -167,6 +181,61 @@ pub struct McpConfig {
     /// Plugin declarations used to attribute connector tools to plugin display names.
     /// MCP registrations retain their own package attribution in the catalog.
     pub connector_snapshot: ConnectorSnapshot,
+}
+
+/// Default amount of time a tool catalog capture waits for optional MCP servers.
+pub const DEFAULT_OPTIONAL_MCP_STARTUP_GRACE: Duration = Duration::from_secs(1);
+
+impl McpConfig {
+    /// Resolves enabled runtime servers against the exact attachment permissions being published.
+    pub fn set_server_permission_profiles(
+        &mut self,
+        servers: &HashMap<String, EffectiveMcpServer>,
+        environment_profiles: impl IntoIterator<Item = (String, PermissionProfile)>,
+    ) {
+        let environment_profiles = environment_profiles.into_iter().collect::<HashMap<_, _>>();
+        self.server_permission_profiles = servers
+            .iter()
+            .filter(|(_, server)| server.enabled())
+            .filter_map(|(server_name, _)| {
+                let server = self.mcp_server_catalog.server(server_name)?;
+                let permission_profile = if server
+                    .source()
+                    .is_host_owned_apps(server_name, server.config())
+                {
+                    &self.permission_profile
+                } else if let Some(permission_profile) =
+                    environment_profiles.get(&server.config().environment_id)
+                {
+                    permission_profile
+                } else if server.config().is_local_environment()
+                    || matches!(server.source(), McpServerSource::SelectedPlugin(_))
+                {
+                    &self.permission_profile
+                } else {
+                    return None;
+                };
+                Some((server_name.clone(), permission_profile.clone()))
+            })
+            .collect();
+    }
+
+    /// Returns this server's published permission authority.
+    pub fn permission_profile_for_server(&self, server_name: &str) -> Option<&PermissionProfile> {
+        self.server_permission_profiles.get(server_name)
+    }
+
+    /// Standalone discovery and resource reads must not inherit thread execution authority.
+    pub fn for_threadless_operations(&self, servers: &HashMap<String, EffectiveMcpServer>) -> Self {
+        let mut config = self.clone();
+        config.permission_profile = PermissionProfile::default();
+        config.server_permission_profiles = servers
+            .iter()
+            .filter(|(_, server)| server.enabled())
+            .map(|(name, _)| (name.clone(), PermissionProfile::default()))
+            .collect();
+        config
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -349,13 +418,12 @@ pub async fn read_mcp_resource(
     codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
     tool_catalog_cache: crate::McpToolCatalogCache,
     server: &str,
-    uri: &str,
+    params: ReadResourceRequestParams,
 ) -> anyhow::Result<ReadResourceResult> {
     let mut mcp_servers = effective_mcp_servers(config, auth);
     mcp_servers.retain(|name, _| name == server);
     let cancel_token = CancellationToken::new();
-    let mut runtime_config = config.clone();
-    runtime_config.permission_profile = PermissionProfile::default();
+    let runtime_config = config.for_threadless_operations(&mcp_servers);
     let manager = McpConnectionSet::new(
         /*previous*/ None,
         McpPublicationGate::already_published(),
@@ -374,7 +442,7 @@ pub async fn read_mcp_resource(
             codex_apps_tools_cache_key: connector_runtime_context_key(auth),
             client_mcp_extensions: ClientMcpExtensions::default(),
             auth: auth.cloned(),
-            codex_apps_auth_manager: None,
+            auth_manager: None,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
         },
@@ -382,9 +450,7 @@ pub async fn read_mcp_resource(
     )
     .await;
 
-    let result = manager
-        .read_resource(server, ReadResourceRequestParams::new(uri))
-        .await;
+    let result = manager.read_resource(server, params).await;
     cancel_token.cancel();
     result
 }
@@ -432,8 +498,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
     let server_names = mcp_servers.keys().cloned().collect();
 
     let cancel_token = CancellationToken::new();
-    let mut runtime_config = config.clone();
-    runtime_config.permission_profile = PermissionProfile::default();
+    let runtime_config = config.for_threadless_operations(&mcp_servers);
     let mcp_connection_manager = McpConnectionSet::new(
         /*previous*/ None,
         McpPublicationGate::already_published(),
@@ -452,7 +517,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
             codex_apps_tools_cache_key: connector_runtime_context_key(auth),
             client_mcp_extensions: ClientMcpExtensions::default(),
             auth: auth.cloned(),
-            codex_apps_auth_manager: None,
+            auth_manager: None,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
         },

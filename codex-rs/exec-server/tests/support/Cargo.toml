@@ -13,5 +13,12 @@ doctest = false
 workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-http-client = { workspace = true }
+futures = { workspace = true }
+prost = "0.14.3"
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "time"] }
+tokio-tungstenite = { workspace = true }
+wiremock = { workspace = true }

@@ -2,6 +2,8 @@ use super::*;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
+use codex_protocol::models::ResponseItem;
+use codex_utils_output_truncation::TruncationPolicy;
 use futures::future::BoxFuture;
 use pretty_assertions::assert_eq;
 use std::sync::atomic::AtomicUsize;
@@ -20,7 +22,10 @@ impl ToolExecutor<ToolInvocation> for TestHandler {
         test_spec(&self.tool_name)
     }
 
-    fn handle(&self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async {
             Ok(
                 Box::new(crate::tools::context::FunctionToolOutput::from_text(
@@ -48,7 +53,10 @@ impl ToolExecutor<ToolInvocation> for ReadinessTestHandler {
         self.handler.spec()
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         self.handler.handle(invocation)
     }
 }
@@ -81,7 +89,10 @@ impl ToolExecutor<ToolInvocation> for LifecycleTestHandler {
         test_spec(&self.tool_name)
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         assert_eq!(
             invocation.tool_name,
             self.tool_name.clone().with_default_namespace()
@@ -127,6 +138,7 @@ enum RecordedToolLifecycle {
     Start {
         call_id: String,
         tool_name: codex_tools::ToolName,
+        root_turn_id: Option<String>,
     },
     Finish {
         call_id: String,
@@ -148,6 +160,7 @@ impl codex_extension_api::ToolLifecycleContributor for ToolLifecycleRecorder {
         let record = RecordedToolLifecycle::Start {
             call_id: input.call_id.to_string(),
             tool_name: input.tool_name.clone(),
+            root_turn_id: input.root_turn_id.map(str::to_owned),
         };
         Box::pin(async move {
             records
@@ -296,39 +309,41 @@ fn registry_preserves_external_winners_and_trusted_synthetic_order() {
 }
 
 #[test]
-fn reserved_shell_command_rejects_external_runtimes_without_a_builtin() {
+fn reserved_command_tools_reject_external_runtimes_without_a_builtin() {
     let handler = |tool_name| Arc::new(TestHandler { tool_name }) as Arc<dyn CoreToolRuntime>;
-    let shell_command_name = codex_tools::ToolName::plain("shell_command");
-    let namespaced_shell_command_name =
-        codex_tools::ToolName::namespaced("client", "shell_command");
     let mut registry = ToolRegistry::default();
 
-    assert!(!registry.register_external(handler(shell_command_name.clone())));
-    assert!(!registry.register_external_with_exposure(
-        handler(shell_command_name.clone()),
-        ToolExposure::Direct,
-    ));
-    assert!(
-        !registry.register_external(handler(codex_tools::ToolName::namespaced(
-            DEFAULT_FUNCTION_NAMESPACE,
-            "shell_command",
-        )))
-    );
-    assert!(registry.tool(&shell_command_name).is_none());
-    assert_eq!(registry.first_collision(), None);
+    for reserved_name in ["exec_command", "shell_command"] {
+        let tool_name = codex_tools::ToolName::plain(reserved_name);
+        let namespaced_tool_name = codex_tools::ToolName::namespaced("client", reserved_name);
 
-    let namespaced_handler = handler(namespaced_shell_command_name.clone());
-    assert!(registry.register_external(Arc::clone(&namespaced_handler)));
-    assert!(
-        registry
-            .tool(&namespaced_shell_command_name)
-            .is_some_and(|runtime| Arc::ptr_eq(&runtime, &namespaced_handler))
-    );
+        assert!(!registry.register_external(handler(tool_name.clone())));
+        assert!(
+            !registry
+                .register_external_with_exposure(handler(tool_name.clone()), ToolExposure::Direct)
+        );
+        assert!(
+            !registry.register_external(handler(codex_tools::ToolName::namespaced(
+                DEFAULT_FUNCTION_NAMESPACE,
+                reserved_name,
+            )))
+        );
+        assert!(registry.tool(&tool_name).is_none());
+        assert_eq!(registry.first_collision(), None);
+
+        let namespaced_handler = handler(namespaced_tool_name.clone());
+        assert!(registry.register_external(Arc::clone(&namespaced_handler)));
+        assert!(
+            registry
+                .tool(&namespaced_tool_name)
+                .is_some_and(|runtime| Arc::ptr_eq(&runtime, &namespaced_handler))
+        );
+    }
 }
 
 #[test]
-fn registry_records_reserved_shell_command_when_a_matching_tool_exists() {
-    let tool_name = codex_tools::ToolName::plain("shell_command");
+fn registry_records_reserved_exec_command_when_a_matching_tool_exists() {
+    let tool_name = codex_tools::ToolName::plain("exec_command");
     let trusted = Arc::new(TestHandler {
         tool_name: tool_name.clone(),
     }) as Arc<dyn CoreToolRuntime>;
@@ -574,6 +589,53 @@ async fn write_stdin_does_not_expose_default_pre_tool_use_payload() {
     assert_eq!(write_stdin.pre_tool_use_payload(&invocation), None);
 }
 
+#[test_case::test_case(TruncationPolicy::Tokens(1), 2; "token budget")]
+#[test_case::test_case(TruncationPolicy::Bytes(401), 121; "scale bytes before converting to tokens")]
+fn post_tool_use_feedback_output_preserves_fallback_token_limit_override(
+    truncation_policy: TruncationPolicy,
+    expected_token_limit: usize,
+) {
+    let result = AnyToolResult {
+        call_id: "call-1".to_string(),
+        payload: ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+        result: Box::new(PostToolUseFeedbackOutput {
+            original: Box::new(crate::tools::context::McpToolOutput {
+                result: codex_protocol::mcp::CallToolResult {
+                    content: Vec::new(),
+                    structured_content: None,
+                    is_error: None,
+                    meta: None,
+                },
+                tool_input: serde_json::json!({}),
+                wall_time: Duration::ZERO,
+                original_image_detail_supported: false,
+                truncation_policy,
+            }),
+            model_visible: crate::tools::context::FunctionToolOutput::from_text(
+                "hook feedback".to_string(),
+                /*success*/ None,
+            ),
+        }),
+        post_tool_use_payload: None,
+    };
+
+    assert_eq!(
+        result.into_response(),
+        ResponseItemEnvelope {
+            item: ResponseItem::from(ResponseInputItem::FunctionCallOutput {
+                call_id: "call-1".to_string(),
+                output: FunctionCallOutputPayload::from_text("hook feedback".to_string()),
+            }),
+            metadata: Some(CodexHarnessMetadata {
+                fallback_token_limit_override: Some(expected_token_limit),
+                ..Default::default()
+            }),
+        }
+    );
+}
+
 #[test]
 fn post_tool_use_feedback_output_keeps_code_mode_result_typed() {
     let result = AnyToolResult {
@@ -595,12 +657,15 @@ fn post_tool_use_feedback_output_keeps_code_mode_result_typed() {
 
     assert_eq!(
         result.into_response(),
-        ResponseInputItem::FunctionCallOutput {
-            call_id: "call-1".to_string(),
-            output: codex_protocol::models::FunctionCallOutputPayload::from_text(
-                "hook feedback".to_string()
-            ),
-        }
+        ResponseItemEnvelope::new(
+            ResponseInputItem::FunctionCallOutput {
+                call_id: "call-1".to_string(),
+                output: codex_protocol::models::FunctionCallOutputPayload::from_text(
+                    "hook feedback".to_string()
+                ),
+            }
+            .into()
+        )
     );
 
     let result = AnyToolResult {
@@ -629,6 +694,8 @@ fn post_tool_use_feedback_output_keeps_code_mode_result_typed() {
 #[tokio::test]
 async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyhow::Result<()> {
     let (mut session, turn) = crate::session::tests::make_session_and_context().await;
+    turn.turn_metadata_state
+        .set_root_turn_id("root-turn".to_string());
     let records = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut builder = codex_extension_api::ExtensionRegistryBuilder::<crate::config::Config>::new();
     builder.tool_lifecycle_contributor(Arc::new(ToolLifecycleRecorder {
@@ -682,6 +749,7 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
         RecordedToolLifecycle::Start {
             call_id: "ok-call".to_string(),
             tool_name: ok_tool.clone().with_default_namespace(),
+            root_turn_id: Some("root-turn".to_string()),
         },
         RecordedToolLifecycle::Finish {
             call_id: "ok-call".to_string(),
@@ -691,6 +759,7 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
         RecordedToolLifecycle::Start {
             call_id: "failing-call".to_string(),
             tool_name: failing_tool.clone(),
+            root_turn_id: Some("root-turn".to_string()),
         },
         RecordedToolLifecycle::Finish {
             call_id: "failing-call".to_string(),

@@ -17,6 +17,7 @@ pub(super) struct ListenerTaskContext {
     pub(super) fallback_model_provider: String,
     pub(super) codex_home: PathBuf,
     pub(super) skills_watcher: Arc<SkillsWatcher>,
+    pub(super) turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
 }
 
 struct UnloadingState {
@@ -241,8 +242,8 @@ pub(super) async fn ensure_listener_task_running(
             &environments,
         )
         .await;
-    let thread_settings_baseline =
-        thread_settings_from_config_snapshot(&conversation.config_snapshot().await);
+    let config_snapshot = conversation.config_snapshot().await;
+    let thread_settings_baseline = thread_settings_from_config_snapshot(&config_snapshot);
     let (mut listener_command_rx, listener_generation) = {
         let mut thread_state = thread_state.lock().await;
         if thread_state.listener_matches(&conversation) {
@@ -274,6 +275,7 @@ pub(super) async fn ensure_listener_task_running(
         thread_list_state_permit,
         fallback_model_provider,
         codex_home,
+        turn_cost_worker,
         ..
     } = listener_task_context;
     let outgoing_for_task = Arc::clone(&outgoing);
@@ -310,6 +312,15 @@ pub(super) async fn ensure_listener_task_running(
                             break;
                         }
                     };
+
+                    if let Some(worker) = &turn_cost_worker {
+                        worker.observe_event(
+                            conversation_id,
+                            config.as_ref(),
+                            &event,
+                            || conversation.session_telemetry(),
+                        );
+                    }
 
                     // Track the event before emitting any typed translations
                     // so thread-local state such as raw event opt-in stays
@@ -650,9 +661,11 @@ pub(super) async fn handle_pending_thread_resume_request(
     } else {
         None
     };
-    let token_usage_turn_id = pending
-        .include_turns
-        .then(|| restored_token_usage_turn_id(&pending.history_items, thread.turns.as_slice()));
+    let token_usage_turn_id = pending.cold_resume_token_usage_turn_id.or_else(|| {
+        pending
+            .include_turns
+            .then(|| restored_token_usage_turn_id(&pending.history_items, thread.turns.as_slice()))
+    });
     if pending.initial_turns_page.is_none() {
         initial_turns_page = None;
     }
@@ -751,8 +764,8 @@ pub(super) async fn handle_pending_thread_resume_request(
     outgoing
         .send_response_with_thread_originator(request_id, response, originator)
         .await;
-    // Match cold resume: metadata-only resume should attach the listener without
-    // paying the cost of turn reconstruction for historical usage replay.
+    // Warm metadata-only resumes skip history reconstruction. Cold paginated children can
+    // replay usage using attribution captured before the listener was attached.
     if let Some(token_usage_turn_id) = token_usage_turn_id {
         // Rejoining a loaded thread has the same UI contract as a cold resume, but
         // uses the live conversation state instead of reconstructing a new session.

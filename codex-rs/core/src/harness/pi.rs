@@ -164,8 +164,27 @@ pub(crate) fn build_messages(items: &[ResponseItem]) -> Result<Vec<Value>, serde
             }
             ResponseItem::FunctionCallOutput {
                 call_id, output, ..
+            } => {
+                let Some(call_id) = call_id.as_ref() else {
+                    continue;
+                };
+                flush_pending_tool_calls(
+                    &mut messages,
+                    &mut pending_tool_calls,
+                    &mut awaiting_tool_call_ids,
+                    &mut pending_assistant_content,
+                    &mut pending_reasoning_content,
+                );
+                if awaiting_tool_call_ids.iter().any(|id| id == call_id) {
+                    messages.push(json!({
+                        "role": "tool",
+                        "content": tool_output_content(output),
+                        "tool_call_id": call_id,
+                    }));
+                    awaiting_tool_call_ids.retain(|id| id != call_id);
+                }
             }
-            | ResponseItem::CustomToolCallOutput {
+            ResponseItem::CustomToolCallOutput {
                 call_id, output, ..
             } => {
                 flush_pending_tool_calls(

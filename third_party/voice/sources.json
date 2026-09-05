@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "name": "meson",
+      "version": "1.12.0",
+      "role": "build-tool",
+      "archive": "meson-1.12.0.tar",
+      "root": "meson-1.12.0",
+      "url": "https://github.com/mesonbuild/meson/releases/download/1.12.0/meson-1.12.0.tar.gz",
+      "sha256": "88afe0c20e52030218924ac37d0c81c59b4b5f3ae3752c8c6d7470c7d365886c",
+      "provenance": "GitHub release asset digest"
+    },
+    {
+      "name": "ninja",
+      "version": "1.13.2",
+      "role": "build-tool",
+      "archive": "ninja-1.13.2.tar",
+      "root": "ninja-3441b633c2fe2c494e958780ba0f4227b1327634",
+      "url": "https://codeload.github.com/ninja-build/ninja/tar.gz/3441b633c2fe2c494e958780ba0f4227b1327634",
+      "sha256": "bccc6197cd8c3ac2a439e26d6bf41506fe49c430cf3d593269a15379f24266ee",
+      "provenance": "GitHub v1.13.2 tag -> commit3441b633c2fe2c494e958780ba0f4227b1327634; archive SHA recorded after fetch"
+    },
+    {
+      "name": "libffi",
+      "version": "3.8.0",
+      "role": "native-library",
+      "archive": "libffi-3.8.0.tar",
+      "root": "libffi-3.8.0",
+      "url": "https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz",
+      "sha256": "7da3e2d9a171eb0a038f592ecad3ff2bb2550f3496d87b3b29ad0cf4430c0db4",
+      "provenance": "GitHub release asset digest"
+    },
+    {
+      "name": "pcre2",
+      "version": "10.47",
+      "role": "native-library",
+      "archive": "pcre2-10.47.tar",
+      "root": "pcre2-10.47",
+      "url": "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.47/pcre2-10.47.tar.gz",
+      "sha256": "c08ae2388ef333e8403e670ad70c0a11f1eed021fd88308d7e02f596fcd9dc16",
+      "provenance": "GitHub release asset digest"
+    },
+    {
+      "name": "zlib",
+      "version": "1.3.2",
+      "role": "native-library",
+      "archive": "zlib-1.3.2.tar",
+      "root": "zlib-1.3.2",
+      "url": "https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz",
+      "sha256": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
+      "provenance": "GitHub release asset digest"
+    },
+    {
+      "name": "opus",
+      "version": "1.6.1",
+      "role": "native-library",
+      "archive": "opus-1.6.1.tar",
+      "root": "opus-1.6.1",
+      "url": "https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz",
+      "sha256": "6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1",
+      "provenance": "https://downloads.xiph.org/releases/opus/SHA256SUMS.txt"
+    },
+    {
+      "name": "glib",
+      "version": "2.88.3",
+      "role": "native-library",
+      "archive": "glib-2.88.3.tar",
+      "root": "glib-2.88.3",
+      "url": "https://download.gnome.org/sources/glib/2.88/glib-2.88.3.tar.xz",
+      "sha256": "ab24d24e698dfa1e408b7bcdb508f4aafc906185a8b8ce72fdf79bbbdc9b383b",
+      "provenance": "https://download.gnome.org/sources/glib/2.88/glib-2.88.3.sha256sum"
+    },
+    {
+      "name": "proxy-libintl",
+      "version": "0.5",
+      "role": "native-library",
+      "archive": "proxy-libintl-0.5.tar",
+      "root": "proxy-libintl-0.5",
+      "url": "https://github.com/frida/proxy-libintl/archive/refs/tags/0.5.tar.gz",
+      "sha256": "f7a1cbd7579baaf575c66f9d99fb6295e9b0684a28b095967cfda17857595303",
+      "provenance": "GStreamer1.28.6 upstream wrap SHA; upstream tag commit33934de09af6a6627eb44e310a8079df009abdbb"
+    },
+    {
+      "name": "gstreamer",
+      "version": "1.28.6",
+      "role": "native-library",
+      "archive": "gstreamer-1.28.6.tar",
+      "root": "gstreamer-1.28.6",
+      "url": "https://gstreamer.freedesktop.org/src/gstreamer/gstreamer-1.28.6.tar.xz",
+      "sha256": "62b6b9f0ad3147a6dd6420ac64a91180b14e990695bddd353b96041611d052ca",
+      "provenance": "Official adjacent .sha256sum"
+    },
+    {
+      "name": "gst-plugins-base",
+      "version": "1.28.6",
+      "role": "native-library",
+      "archive": "gst-plugins-base-1.28.6.tar",
+      "root": "gst-plugins-base-1.28.6",
+      "url": "https://gstreamer.freedesktop.org/src/gst-plugins-base/gst-plugins-base-1.28.6.tar.xz",
+      "sha256": "0ba699c7c6c66f4ba640be78cb38a24715add9683f3e3a199f5369dc5a4f04ac",
+      "provenance": "Official adjacent .sha256sum"
+    },
+    {
+      "name": "gst-plugins-good",
+      "version": "1.28.6",
+      "role": "native-library",
+      "archive": "gst-plugins-good-1.28.6.tar",
+      "root": "gst-plugins-good-1.28.6",
+      "url": "https://gstreamer.freedesktop.org/src/gst-plugins-good/gst-plugins-good-1.28.6.tar.xz",
+      "sha256": "b0c620a4b18b6ee931b4c43bbf1760d308666dc37f730a7e7f1ad327e59ce2df",
+      "provenance": "Official adjacent .sha256sum"
+    }
+  ],
+  "bundled_sources": [
+    {
+      "name": "gvdb",
+      "included_by": "glib",
+      "revision": "2b42fc75f09dbe1cd1057580b5782b08f2dcb400",
+      "path": "subprojects/gvdb",
+      "provenance": "Included in the pinned GLib release archive; no separate fetch"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "reason": {
+      "description": "Optional client-provided reason recorded with the reconciliation attempt.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "PluginReconcileParams",
+  "type": "object"
+}

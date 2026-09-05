@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "PluginReconcileChangedPlugin": {
+      "description": "Runtime categories affected by this change, not just capabilities currently present. Flags describe declarations before runtime policy filtering. Updates OR the old and new bundle flags; enablement changes and cached reinstalls use the cached bundle; removals retain the old bundle's flags.",
+      "properties": {
+        "hasApps": {
+          "type": "boolean"
+        },
+        "hasHooks": {
+          "type": "boolean"
+        },
+        "hasMcps": {
+          "type": "boolean"
+        },
+        "hasSkills": {
+          "description": "Whether either bundle declares skill roots; not a validated inventory of enabled skills.",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "Local plugin ID (`name@marketplace`), matching `PluginSummary.id`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hasApps",
+        "hasHooks",
+        "hasMcps",
+        "hasSkills",
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Bundle and installed-state changes observed by this pass, not a runtime-readiness acknowledgement or a cumulative diff since the client's last request. Other metadata-only changes are not listed.",
+  "properties": {
+    "changedPlugins": {
+      "description": "Plugins affected by bundle changes, enablement changes, or removals. Installed-state changes compare against the previous cached snapshot, including cached reinstalls. Removal hints survive cache cleanup failures; unchanged plugins are omitted.",
+      "items": {
+        "$ref": "#/definitions/PluginReconcileChangedPlugin"
+      },
+      "type": "array"
+    },
+    "failedMaterializationRemotePluginIds": {
+      "description": "Subset of failures for which the requested bundle could not be materialized. A previously cached version may still be available.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "failedRemotePluginIds": {
+      "description": "Backend remote plugin IDs whose bundle or identity update failed.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "changedPlugins",
+    "failedMaterializationRemotePluginIds",
+    "failedRemotePluginIds"
+  ],
+  "title": "PluginReconcileResponse",
+  "type": "object"
+}

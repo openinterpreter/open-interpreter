@@ -112,6 +112,21 @@ impl<'a, C> McpServerContributionContext<'a, C> {
     }
 }
 
+/// Validated plugin identities projected for the current set of selected roots.
+#[derive(Clone, Debug, Default)]
+pub struct SelectedPluginSnapshot {
+    pub plugins: Vec<SelectedPluginIdentity>,
+    /// Selected plugin roots suppressed by the effective plugin feature policy.
+    pub disabled_plugin_roots: Vec<String>,
+}
+
+/// The configured identity of a plugin resolved from one selected root.
+#[derive(Clone, Debug)]
+pub struct SelectedPluginIdentity {
+    pub selected_root_id: String,
+    pub plugin_id: String,
+}
+
 /// One extension-owned overlay for the runtime MCP server configuration.
 #[derive(Clone, Debug)]
 pub enum McpServerContribution {
@@ -120,6 +135,8 @@ pub enum McpServerContribution {
         name: String,
         config: Box<McpServerConfig>,
     },
+    /// Registers the controller-owned Apps server under its reserved name.
+    HostedApps { config: Box<McpServerConfig> },
     /// Registers a server declared by a plugin selected for this thread.
     SelectedPlugin {
         name: String,
@@ -130,6 +147,7 @@ pub enum McpServerContribution {
     },
     /// Records a plugin selected for this thread and any connector IDs it declares.
     SelectedPluginPackage {
+        selected_root_id: String,
         plugin_id: String,
         plugin_display_name: String,
         connector_ids: Vec<String>,

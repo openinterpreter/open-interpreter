@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ use crate::catalog::SkillResourceId;
 use crate::catalog::SkillSearchResult;
 
 pub use executor::ExecutorSkillProvider;
+pub(crate) use executor::attribute_executor_plugins;
 pub use host::HostSkillProvider;
 pub use orchestrator::OrchestratorSkillProvider;
 
@@ -42,7 +44,9 @@ pub struct SkillListQuery {
 }
 
 #[derive(Clone, Debug)]
-pub struct SkillReadRequest {
+pub struct SkillReadRequest<'a> {
+    // TODO(anp): Replace the marker with callback-scoped environment access.
+    pub _lifetime: PhantomData<&'a ()>,
     pub authority: SkillAuthority,
     pub package: SkillPackageId,
     pub resource: SkillResourceId,
@@ -70,7 +74,10 @@ pub type SkillProviderFuture<'a, T> =
 pub trait SkillProvider: Send + Sync {
     fn list(&self, query: SkillListQuery) -> SkillProviderFuture<'_, SkillCatalog>;
 
-    fn read(&self, request: SkillReadRequest) -> SkillProviderFuture<'_, SkillReadResult>;
+    fn read<'a>(
+        &'a self,
+        request: SkillReadRequest<'a>,
+    ) -> SkillProviderFuture<'a, SkillReadResult>;
 
     fn search(&self, request: SkillSearchRequest) -> SkillProviderFuture<'_, SkillSearchResult>;
 }

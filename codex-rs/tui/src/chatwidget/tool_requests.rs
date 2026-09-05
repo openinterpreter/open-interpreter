@@ -14,7 +14,7 @@ impl ChatWidget {
         );
     }
 
-    pub(super) fn on_apply_patch_approval_request(
+    pub(crate) fn on_apply_patch_approval_request(
         &mut self,
         _id: String,
         ev: ApplyPatchApprovalRequestEvent,
@@ -54,6 +54,9 @@ impl ChatWidget {
                     .ok()
                     .or_else(|| Some(command.join(" ")))
             }
+            GuardianAssessmentAction::WriteStdin { .. } => {
+                Some(auto_review_denials::action_summary(action))
+            }
             GuardianAssessmentAction::ApplyPatch { files, .. } => Some(if files.len() == 1 {
                 format!("apply_patch touching {}", files[0].display())
             } else {
@@ -85,7 +88,8 @@ impl ChatWidget {
                 argv.clone()
             })
             .filter(|command| !command.is_empty()),
-            GuardianAssessmentAction::ApplyPatch { .. }
+            GuardianAssessmentAction::WriteStdin { .. }
+            | GuardianAssessmentAction::ApplyPatch { .. }
             | GuardianAssessmentAction::NetworkAccess { .. }
             | GuardianAssessmentAction::McpToolCall { .. }
             | GuardianAssessmentAction::RequestPermissions { .. } => None,
@@ -160,6 +164,12 @@ impl ChatWidget {
                 )
             } else {
                 match &ev.action {
+                    GuardianAssessmentAction::WriteStdin { .. } => {
+                        history_cell::new_guardian_timed_out_action_request(format!(
+                            "codex could {}",
+                            auto_review_denials::action_summary(&ev.action)
+                        ))
+                    }
                     GuardianAssessmentAction::ApplyPatch { files, .. } => {
                         let files = files
                             .iter()
@@ -207,6 +217,12 @@ impl ChatWidget {
             )
         } else {
             match &ev.action {
+                GuardianAssessmentAction::WriteStdin { .. } => {
+                    history_cell::new_guardian_denied_action_request(format!(
+                        "codex to {}",
+                        auto_review_denials::action_summary(&ev.action)
+                    ))
+                }
                 GuardianAssessmentAction::ApplyPatch { files, .. } => {
                     let files = files
                         .iter()
@@ -275,6 +291,7 @@ impl ChatWidget {
 
         let available_decisions = ev.effective_available_decisions();
         let request = ApprovalRequest::Exec(ExecApprovalRequest {
+            kind: ev.kind,
             thread_id: self.thread_id.unwrap_or_default(),
             thread_label: None,
             id: ev.effective_approval_id(),
@@ -360,6 +377,7 @@ impl ChatWidget {
                         .push_approval_request(request, &self.config.features);
                 }
                 McpServerElicitationRequest::OpenAiForm { .. }
+                | McpServerElicitationRequest::OpenAiElicitationForm { .. }
                 | McpServerElicitationRequest::Url { .. } => {
                     self.app_event_tx.resolve_elicitation(
                         thread_id,

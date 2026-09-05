@@ -183,7 +183,8 @@ impl App {
         self.config = config;
 
         if let Some(policy) = approval_policy {
-            self.runtime_approval_policy_override = Some(policy);
+            self.runtime_approval_policy_override =
+                Some(RuntimeApprovalPolicyOverride::Explicit(policy));
             self.chat_widget.set_approval_policy(policy);
         }
         if let Err(err) = self.chat_widget.set_permission_profile_with_active_profile(
@@ -236,7 +237,7 @@ impl App {
         let mut config = self
             .rebuild_config_for_cwd(self.chat_widget.config_ref().cwd.to_path_buf())
             .await?;
-        self.apply_runtime_policy_overrides(&mut config);
+        self.apply_runtime_policy_overrides(&mut config, RuntimePolicyOverrideScope::All);
         self.config = config;
         self.chat_widget.sync_plugin_mentions_config(&self.config);
         Ok(())
@@ -298,16 +299,40 @@ impl App {
         }
     }
 
-    pub(super) fn apply_runtime_policy_overrides(&mut self, config: &mut Config) {
-        if let Some(policy) = self.runtime_approval_policy_override.as_ref()
-            && let Err(err) = config.permissions.approval_policy.set(policy.to_core())
+    pub(super) fn apply_runtime_policy_overrides(
+        &mut self,
+        config: &mut Config,
+        scope: RuntimePolicyOverrideScope,
+    ) {
+        if let Some(policy) = self.runtime_approval_policy_override
+            && (scope == RuntimePolicyOverrideScope::All
+                || matches!(policy, RuntimeApprovalPolicyOverride::Explicit(_)))
+            && let Err(err) = config
+                .permissions
+                .approval_policy
+                .set(policy.policy().to_core())
         {
             tracing::warn!(%err, "failed to carry forward approval policy override");
             self.chat_widget.add_error_message(format!(
                 "Failed to carry forward approval policy override: {err}"
             ));
         }
-        if let Some(profile_override) = self.runtime_permission_profile_override.as_ref() {
+        if let Some(profile_override) = self.runtime_permission_profile_override.as_ref()
+            && (scope == RuntimePolicyOverrideScope::All
+                || profile_override.turn_override
+                    == RuntimePermissionProfileTurnOverride::LegacySandbox)
+        {
+            match config
+                .config_layer_stack
+                .requirements()
+                .approvals_reviewer
+                .can_set(&profile_override.approvals_reviewer)
+            {
+                Ok(()) => config.approvals_reviewer = profile_override.approvals_reviewer,
+                Err(error) => self.chat_widget.add_error_message(format!(
+                    "Failed to carry forward approvals reviewer: {error}"
+                )),
+            }
             match config
                 .permissions
                 .set_permission_profile_from_session_snapshot(

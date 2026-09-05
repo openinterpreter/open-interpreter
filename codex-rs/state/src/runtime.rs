@@ -44,6 +44,7 @@ mod external_agent_config_imports;
 mod goals;
 mod logs;
 mod memories;
+mod projects;
 mod queued_items;
 mod recovery;
 mod remote_control;
@@ -218,7 +219,7 @@ impl StateRuntime {
         let started = Instant::now();
         let thread_timestamp_millis_result: anyhow::Result<(Option<i64>, Option<i64>)> =
             sqlx::query_as(
-                "SELECT MAX(threads.updated_at_ms), MAX(threads.recency_at_ms) FROM threads",
+                "SELECT (SELECT MAX(updated_at_ms) FROM threads), (SELECT MAX(recency_at_ms) FROM threads)",
             )
             .fetch_one(pool.as_ref())
             .await
@@ -352,28 +353,83 @@ ON CONFLICT(id) DO NOTHING
     Ok(())
 }
 
+/// Integrity-check rows, including those emitted before interruption.
+#[derive(Debug, Eq, PartialEq)]
+pub enum SqliteIntegrityCheck {
+    Complete(Vec<String>),
+    TimedOut(Vec<String>),
+}
+
 /// Run SQLite's built-in integrity check against an existing database file.
 pub async fn sqlite_integrity_check(
     sqlite: &SqliteConfig,
     path: &Path,
-) -> anyhow::Result<Vec<String>> {
-    let pool = sqlite.open_read_only_pool(path).await?;
-    let rows = sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
-        .fetch_all(&pool)
+    deadline: Option<Instant>,
+) -> anyhow::Result<SqliteIntegrityCheck> {
+    let pool = sqlite
+        .open_read_only_pool(
+            path,
+            deadline.map(|deadline| deadline.saturating_duration_since(Instant::now())),
+        )
         .await?;
+    let mut connection = pool.acquire().await?;
+    if let Some(deadline) = deadline {
+        // Lock waits do not invoke the progress handler; share the remaining budget.
+        QueryBuilder::<Sqlite>::new("PRAGMA busy_timeout = ")
+            .push(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis(),
+            )
+            .build()
+            .execute(&mut *connection)
+            .await?;
+        // Interrupt SQLite itself: dropping a timed-out future leaves its worker scanning.
+        connection
+            .lock_handle()
+            .await?
+            .set_progress_handler(/*num_ops*/ 1_000, move || Instant::now() < deadline);
+    }
+    let mut rows = Vec::<String>::new();
+    // Keep corruption rows even when a later step interrupts the scan.
+    let result = sqlx::query::<Sqlite>("PRAGMA integrity_check")
+        .try_map(|row| {
+            rows.push(row.try_get(/*index*/ 0)?);
+            Ok(())
+        })
+        .fetch_all(&mut *connection)
+        .await;
+    drop(connection);
     pool.close().await;
-    Ok(rows)
+    match result {
+        Ok(_) => Ok(SqliteIntegrityCheck::Complete(rows)),
+        Err(sqlx::Error::Database(error))
+            if deadline.is_some()
+                && error.code().is_some_and(|code| {
+                    matches!(
+                        code.parse::<i32>().ok().map(|code| code & 0xff),
+                        Some(libsqlite3_sys::SQLITE_INTERRUPT | libsqlite3_sys::SQLITE_BUSY)
+                    )
+                }) =>
+        {
+            Ok(SqliteIntegrityCheck::TimedOut(rows))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::SqliteIntegrityCheck;
     use super::StateRuntime;
     use super::runtime_state_migrator;
     use super::sqlite_integrity_check;
+    use super::test_support::test_thread_metadata;
     use super::test_support::unique_temp_dir;
     use crate::DB_INIT_METRIC;
     use crate::DbTelemetry;
     use crate::migrations::STATE_MIGRATOR;
+    use codex_protocol::ThreadId;
     use codex_utils_absolute_path::test_support::PathExt;
     use pretty_assertions::assert_eq;
     use sqlx::SqlitePool;
@@ -382,6 +438,9 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::Path;
     use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use std::time::Instant;
 
     #[derive(Default)]
     struct TestTelemetry {
@@ -426,6 +485,8 @@ mod tests {
             _tags: &[(&str, &str)],
         ) {
         }
+
+        fn histogram(&self, _name: &str, _value: i64, _tags: &[(&str, &str)]) {}
     }
 
     fn tags_to_map(tags: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -442,7 +503,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_integrity_check_reports_ok_for_valid_db() {
+    async fn sqlite_integrity_check_can_be_interrupted_and_retried() {
         let codex_home = unique_temp_dir();
         tokio::fs::create_dir_all(&codex_home)
             .await
@@ -453,17 +514,78 @@ mod tests {
             .open_read_write_pool(&path)
             .await
             .expect("open sqlite db");
-        sqlx::query("CREATE TABLE sample (id INTEGER PRIMARY KEY)")
+        sqlx::query("CREATE TABLE sample (id INTEGER PRIMARY KEY, value INTEGER, other INTEGER)")
             .execute(&pool)
             .await
             .expect("create sample table");
+        sqlx::query("CREATE UNIQUE INDEX sample_value ON sample(value)")
+            .execute(&pool)
+            .await
+            .expect("create sample index");
+        sqlx::query(
+            "WITH RECURSIVE rows(id) AS (SELECT 1 UNION ALL SELECT id + 1 FROM rows WHERE id < 2048) INSERT INTO sample SELECT id, id, CASE WHEN id = 1 THEN 0 ELSE id END FROM rows",
+        )
+        .execute(&pool)
+        .await
+        .expect("populate enough rows to invoke the progress handler");
         pool.close().await;
 
-        let result = sqlite_integrity_check(&sqlite, &path)
+        assert_eq!(
+            sqlite_integrity_check(&sqlite, &path, Some(Instant::now()))
+                .await
+                .expect("interrupt integrity check"),
+            SqliteIntegrityCheck::TimedOut(Vec::new()),
+        );
+
+        let result = sqlite_integrity_check(&sqlite, &path, /*deadline*/ None)
             .await
             .expect("integrity check should run");
 
-        assert_eq!(result, vec!["ok".to_string()]);
+        assert_eq!(
+            result,
+            SqliteIntegrityCheck::Complete(vec!["ok".to_string()])
+        );
+
+        let pool = sqlite
+            .open_read_write_pool(&path)
+            .await
+            .expect("reopen sqlite db");
+        let mut connection = pool.acquire().await.expect("acquire writer");
+        // WAL readers do not wait on this writer, so use a rollback journal.
+        sqlx::query("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE")
+            .execute(&mut *connection)
+            .await
+            .expect("hold an exclusive lock");
+        let started = Instant::now();
+        let result =
+            sqlite_integrity_check(&sqlite, &path, Some(started + Duration::from_millis(50)))
+                .await
+                .expect("interrupt lock wait");
+        let elapsed = started.elapsed();
+        sqlx::query("ROLLBACK")
+            .execute(&mut *connection)
+            .await
+            .expect("release lock");
+        assert_eq!(result, SqliteIntegrityCheck::TimedOut(Vec::new()));
+        assert!(elapsed < Duration::from_secs(1), "lock wait: {elapsed:?}");
+
+        // Misdescribe one index entry so SQLite emits an error before its first progress callback.
+        sqlx::query(
+            "PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql='CREATE UNIQUE INDEX sample_value ON sample(other)' WHERE name='sample_value'; PRAGMA writable_schema=OFF",
+        )
+        .execute(&mut *connection)
+        .await
+        .expect("introduce an index mismatch");
+        drop(connection);
+        pool.close().await;
+        assert_eq!(
+            sqlite_integrity_check(&sqlite, &path, Some(Instant::now()))
+                .await
+                .expect("retain corruption before interruption"),
+            SqliteIntegrityCheck::TimedOut(vec![
+                "row 1 missing from index sample_value".to_string()
+            ]),
+        );
         let _ = tokio::fs::remove_dir_all(codex_home).await;
     }
 
@@ -552,6 +674,54 @@ mod tests {
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
         assert_eq!(phases, expected);
+
+        runtime.close().await;
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn init_restores_independent_thread_timestamp_maxima() {
+        let codex_home = unique_temp_dir();
+        let sqlite = crate::SqliteConfig::new_for_testing(codex_home.as_path().abs());
+        let runtime = StateRuntime::init(sqlite.clone(), "test-provider".to_string())
+            .await
+            .expect("state runtime should initialize");
+
+        for (thread_id, updated_at_ms, recency_at_ms) in [
+            ("00000000-0000-0000-0000-000000000101", 3_000, 1_000),
+            ("00000000-0000-0000-0000-000000000102", 1_000, 4_000),
+        ] {
+            let thread_id = ThreadId::from_string(thread_id).expect("valid thread id");
+            runtime
+                .upsert_thread(&test_thread_metadata(
+                    &codex_home,
+                    thread_id,
+                    codex_home.clone(),
+                ))
+                .await
+                .expect("thread should be stored");
+            sqlx::query("UPDATE threads SET updated_at_ms = ?, recency_at_ms = ? WHERE id = ?")
+                .bind(updated_at_ms)
+                .bind(recency_at_ms)
+                .bind(thread_id.to_string())
+                .execute(runtime.pool.as_ref())
+                .await
+                .expect("thread timestamps should be updated");
+        }
+
+        runtime.close().await;
+        drop(runtime);
+
+        let runtime = StateRuntime::init(sqlite, "test-provider".to_string())
+            .await
+            .expect("state runtime should restore thread timestamps");
+        assert_eq!(
+            (
+                runtime.thread_updated_at_millis.load(Ordering::Relaxed),
+                runtime.thread_recency_at_millis.load(Ordering::Relaxed),
+            ),
+            (3_000, 4_000)
+        );
 
         runtime.close().await;
         let _ = tokio::fs::remove_dir_all(codex_home).await;

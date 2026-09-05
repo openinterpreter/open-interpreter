@@ -1309,6 +1309,7 @@ async fn thread_list(endpoint: &Endpoint, config_overrides: &[String], limit: u3
             source_kinds: None,
             archived: None,
             section_id: None,
+            project_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
             cwd: None,
@@ -2167,6 +2168,7 @@ impl CodexClient {
         params: CommandExecutionRequestApprovalParams,
     ) -> Result<()> {
         let CommandExecutionRequestApprovalParams {
+            kind: _,
             thread_id,
             turn_id,
             item_id,

@@ -23,11 +23,6 @@ impl StateRuntime {
             // Both `query_logs` and `/feedback` read the persisted
             // `feedback_log_body`, while `LogEntry.message` is only a write-time
             // fallback for callers that still populate the old field.
-            let estimated_bytes = feedback_log_body.map_or(0, String::len) as i64
-                + entry.level.len() as i64
-                + entry.target.len() as i64
-                + entry.module_path.as_ref().map_or(0, String::len) as i64
-                + entry.file.as_ref().map_or(0, String::len) as i64;
             row.push_bind(entry.ts)
                 .push_bind(entry.ts_nanos)
                 .push_bind(&entry.level)
@@ -38,7 +33,7 @@ impl StateRuntime {
                 .push_bind(&entry.module_path)
                 .push_bind(&entry.file)
                 .push_bind(entry.line)
-                .push_bind(estimated_bytes);
+                .push_bind(entry.estimated_bytes());
         });
         builder.build().execute(&mut *tx).await?;
         self.prune_logs_after_insert(entries, &mut tx).await?;

@@ -79,6 +79,8 @@ pub enum InstallMethod {
     Bun,
     /// A Codex binary launched through the pnpm-managed `codex.js` shim.
     Pnpm,
+    /// A Codex binary launched through the Vite+-managed `codex.js` shim.
+    VitePlus,
     /// A Codex binary that appears to come from a Homebrew install prefix.
     Brew,
     /// Any other execution environment.
@@ -135,6 +137,8 @@ impl InstallContext {
                 codex_product_info::Product::current() == codex_product_info::Product::Codex;
             let method_override = if !is_codex {
                 None
+            } else if std::env::var_os("CODEX_MANAGED_BY_VITE_PLUS").is_some() {
+                Some(InstallMethod::VitePlus)
             } else if std::env::var_os("CODEX_MANAGED_BY_PNPM").is_some() {
                 Some(InstallMethod::Pnpm)
             } else if std::env::var_os("CODEX_MANAGED_BY_NPM").is_some() {
@@ -260,6 +264,22 @@ impl CodexPackageLayout {
         let exe_dir = canonical_exe.parent()?;
         match exe_dir.file_name() {
             Some(name) if name == OsStr::new(BIN_DIRNAME) => Self::from_package_bin_dir(exe_dir),
+            Some(name) if name == OsStr::new(RESOURCES_DIRNAME) => {
+                let package_dir = exe_dir.parent()?;
+                Self::from_package_bin_dir(package_dir.join(BIN_DIRNAME))
+            }
+            Some(name) if name == OsStr::new("MacOS") => {
+                // A provisioned CLI keeps helpers and metadata in the outer
+                // package. current_exe points inside the bundle, not at bin/codex.
+                let contents = exe_dir.parent()?;
+                let bundle = contents.parent()?;
+                if contents.file_name()? != OsStr::new("Contents")
+                    || bundle.file_name()? != OsStr::new("CodexCLI.app")
+                {
+                    return None;
+                }
+                Self::from_package_bin_dir(bundle.parent()?.join(BIN_DIRNAME))
+            }
             Some(_) | None => None,
         }
     }
@@ -388,6 +408,10 @@ fn default_rg_command() -> PathBuf {
 fn zsh_resource_path() -> PathBuf {
     PathBuf::from(ZSH_DIRNAME).join(BIN_DIRNAME).join("zsh")
 }
+
+#[cfg(test)]
+#[path = "bundle_tests.rs"]
+mod bundle_tests;
 
 #[cfg(test)]
 mod tests {
@@ -904,6 +928,19 @@ mod tests {
 
     #[test]
     fn package_manager_method_overrides_take_precedence() {
+        let vite_plus_context = InstallContext::from_exe(
+            /*is_macos*/ false,
+            /*current_exe*/ Some(Path::new("/tmp/codex")),
+            /*method_override*/ Some(InstallMethod::VitePlus),
+        );
+        assert_eq!(
+            vite_plus_context,
+            InstallContext {
+                method: InstallMethod::VitePlus,
+                package_layout: None,
+            }
+        );
+
         let pnpm_context = InstallContext::from_exe(
             /*is_macos*/ false,
             /*current_exe*/ Some(Path::new("/tmp/codex")),

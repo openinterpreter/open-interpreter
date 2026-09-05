@@ -16,6 +16,17 @@ pub(crate) async fn load_config(
     config_overrides: &CliConfigOverrides,
     loader_overrides: LoaderOverrides,
 ) -> Result<Config> {
+    config_builder(config_overrides, loader_overrides)
+        .await?
+        .build()
+        .await
+        .context("failed to load configuration")
+}
+
+pub(crate) async fn config_builder(
+    config_overrides: &CliConfigOverrides,
+    loader_overrides: LoaderOverrides,
+) -> Result<ConfigBuilder> {
     let cli_overrides = config_overrides
         .parse_overrides()
         .map_err(anyhow::Error::msg)?;
@@ -41,12 +52,10 @@ pub(crate) async fn load_config(
     .await
     .context("failed to initialize cloud configuration authentication")?;
 
-    ConfigBuilder::default()
+    Ok(ConfigBuilder::default()
         .codex_home(codex_home.to_path_buf())
         .cli_overrides(cli_overrides)
         .loader_overrides(loader_overrides)
         .cloud_config_bundle(cloud_config_bundle)
-        .build()
-        .await
-        .context("failed to load configuration")
+        .fallback_cwd(Some(cwd.to_path_buf())))
 }

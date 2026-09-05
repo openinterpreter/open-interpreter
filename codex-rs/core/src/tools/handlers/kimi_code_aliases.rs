@@ -67,7 +67,10 @@ impl ToolExecutor<ToolInvocation> for KimiCodeAliasHandler {
         false
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move {
             match self {
                 Self::CreateGoal => handle_create_goal(invocation).await,

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use codex_protocol::mcp::OPENAI_ELICITATION_EXTENSION_ID;
+
 use rmcp::RoleClient;
 use rmcp::model::ClientInfo;
 use rmcp::model::ClientResult;
@@ -30,6 +32,14 @@ use crate::rmcp_client::SendElicitation;
 const MCP_PROGRESS_TOKEN_META_KEY: &str = "progressToken";
 const MCP_ELICITATION_CREATE_METHOD: &str = "elicitation/create";
 const OPENAI_FORM_METHOD: &str = "openai/form";
+const OPENAI_ELICITATION_METHOD: &str = "openai/elicitation/create";
+
+#[derive(Deserialize)]
+#[serde(tag = "mode")]
+enum OpenAiElicitationRequestParams {
+    #[serde(rename = "form")]
+    Form(OpenAiFormRequestParams),
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +54,7 @@ struct OpenAiFormRequestParams {
 pub(crate) struct ElicitationClientService {
     handler: LoggingClientHandler,
     supports_openai_form: bool,
+    supports_openai_elicitation_form: bool,
     send_elicitation: Arc<SendElicitation>,
     pause_state: ElicitationPauseState,
 }
@@ -59,6 +70,13 @@ impl ElicitationClientService {
             .extensions
             .as_ref()
             .is_some_and(|extensions| extensions.contains_key(OPENAI_FORM_METHOD));
+        let supports_openai_elicitation_form = client_info
+            .capabilities
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get(OPENAI_ELICITATION_EXTENSION_ID))
+            .and_then(|settings| settings.get("form"))
+            .is_some_and(Value::is_object);
         let send_elicitation = Arc::new(send_elicitation);
         Self {
             handler: LoggingClientHandler::new(
@@ -66,6 +84,7 @@ impl ElicitationClientService {
                 clone_send_elicitation(Arc::clone(&send_elicitation)),
             ),
             supports_openai_form,
+            supports_openai_elicitation_form,
             send_elicitation,
             pause_state,
         }
@@ -144,6 +163,33 @@ impl Service<RoleClient> for ElicitationClientService {
                     response,
                 )?))
             }
+            ServerRequest::CustomRequest(request)
+                if request.method == OPENAI_ELICITATION_METHOD
+                    && self.supports_openai_elicitation_form =>
+            {
+                let params = request
+                    .params_as::<OpenAiElicitationRequestParams>()
+                    .map_err(|err| {
+                        rmcp::ErrorData::invalid_params(err.to_string(), /*data*/ None)
+                    })?
+                    .ok_or_else(|| {
+                        rmcp::ErrorData::invalid_params("missing params", /*data*/ None)
+                    })?;
+                let OpenAiElicitationRequestParams::Form(params) = params;
+                let response = self
+                    .create_elicitation(
+                        Elicitation::OpenAiElicitationForm {
+                            meta: params.meta,
+                            message: params.message,
+                            requested_schema: params.requested_schema,
+                        },
+                        context,
+                    )
+                    .await?;
+                Ok(ClientResult::CustomResult(elicitation_response_result(
+                    response,
+                )?))
+            }
             request => {
                 <LoggingClientHandler as Service<RoleClient>>::handle_request(
                     &self.handler,
@@ -209,7 +255,7 @@ fn restore_context_meta(
             .meta_mut()
             .get_or_insert_with(RequestMetaObject::new)
             .extend(context_meta),
-        Elicitation::OpenAiForm { meta, .. } => {
+        Elicitation::OpenAiForm { meta, .. } | Elicitation::OpenAiElicitationForm { meta, .. } => {
             let meta = meta
                 .get_or_insert_with(|| Value::Object(Map::new()))
                 .as_object_mut();

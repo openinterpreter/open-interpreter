@@ -1,0 +1,8 @@
+---
+source: tui/src/app/tests/backend_banner_fallback_tests.rs
+assertion_line: 234
+expression: rendered
+---
+› Ask Codex to do anything
+
+  gpt-5.4 default · /tmp/project

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
 
-use crate::command_safety::try_parse_powershell_ast_commands;
+use crate::command_safety::try_parse_powershell_commands;
 use crate::shell_detect::ShellType;
 use crate::shell_detect::detect_shell_type;
 
@@ -72,14 +72,21 @@ pub fn extract_powershell_command(command: &[String]) -> Option<(&str, &str)> {
 
 /// Parse the script body from a top-level PowerShell wrapper into argv-like commands.
 ///
-/// This is intentionally narrower than the Windows safe-command parser: it only unwraps the
-/// `-Command`/`-c` body from a PowerShell invocation we already recognize, then delegates the
-/// script itself to the PowerShell AST parser.
+/// This only unwraps the `-Command`/`-c` body from a PowerShell invocation we
+/// already recognize, then lowers the script in-process.
 pub fn parse_powershell_command_into_plain_commands(
     command: &[String],
 ) -> Option<Vec<Vec<String>>> {
-    let (executable, script) = extract_powershell_command(command)?;
-    try_parse_powershell_ast_commands(executable, script)
+    let (_, script) = extract_powershell_command(command)?;
+    try_parse_powershell_commands(script)
+}
+
+/// Parse literal PowerShell commands without starting a PowerShell executable.
+///
+/// Unknown or dynamic syntax stays opaque so unfamiliar executables can be
+/// evaluated without running them before approval.
+pub fn parse_powershell_script_into_plain_commands(script: &str) -> Option<Vec<Vec<String>>> {
+    try_parse_powershell_commands(script)
 }
 
 /// This function attempts to find a powershell.exe executable on the system.
@@ -156,6 +163,7 @@ mod tests {
     use super::extract_powershell_command;
     #[cfg(windows)]
     use super::parse_powershell_command_into_plain_commands;
+    use super::parse_powershell_script_into_plain_commands;
     use super::prefix_powershell_script_with_utf8;
 
     #[test]
@@ -203,6 +211,17 @@ mod tests {
         ];
         let (_shell, script) = extract_powershell_command(&cmd).expect("extract");
         assert_eq!(script, "Get-ChildItem | Select-String foo");
+    }
+
+    #[test]
+    fn parses_powershell_command_chains_and_preserves_windows_paths() {
+        assert_eq!(
+            parse_powershell_script_into_plain_commands(r"echo safe && Remove-Item C:\important"),
+            Some(vec![
+                vec!["echo".to_string(), "safe".to_string()],
+                vec!["Remove-Item".to_string(), r"C:\important".to_string()],
+            ]),
+        );
     }
 
     #[test]

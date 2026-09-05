@@ -22,10 +22,11 @@ impl Default for AppToolPolicy {
     }
 }
 
-/// Connector-owned metadata used to evaluate one app tool.
+/// App and account metadata used to evaluate one tool.
 #[derive(Debug, Clone, Copy)]
 pub struct AppToolPolicyInput<'a> {
     pub connector_id: Option<&'a str>,
+    pub link_id: Option<&'a str>,
     pub tool_name: &'a str,
     pub tool_title: Option<&'a str>,
     pub destructive_hint: Option<bool>,
@@ -186,6 +187,12 @@ fn app_tool_policy_from_apps_config(
     });
     let approval = managed_approval
         .or_else(|| tool_config.and_then(|tool| tool.approval_mode))
+        .or_else(|| {
+            input
+                .link_id
+                .and_then(|link_id| app?.links.as_ref()?.links.get(link_id))
+                .and_then(|link| link.default_tools_approval_mode)
+        })
         .or_else(|| app.and_then(|app| app.default_tools_approval_mode))
         .or_else(|| {
             input

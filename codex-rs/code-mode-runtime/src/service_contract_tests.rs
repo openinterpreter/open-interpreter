@@ -201,6 +201,7 @@ async fn yields_and_resumes() {
     assert_eq!(
         cell.initial_response().await.unwrap(),
         RuntimeResponse::Yielded {
+            code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "before".to_string(),
@@ -216,6 +217,7 @@ async fn yields_and_resumes() {
             .await
             .unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Result {
+            code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "after".to_string(),
@@ -263,6 +265,7 @@ text("after");
             .unwrap(),
         WaitToPendingOutcome::LiveCell(ExecuteToPendingOutcome::Completed(
             RuntimeResponse::Result {
+                code_mode_host_duration: None,
                 cell_id: cell_id("1"),
                 content_items: vec![FunctionCallOutputContentItem::InputText {
                     text: "after".to_string(),
@@ -286,6 +289,7 @@ async fn observed_natural_completion_wins_over_termination() {
     assert_eq!(
         cell.initial_response().await.unwrap(),
         RuntimeResponse::Yielded {
+            code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
         }
@@ -320,6 +324,7 @@ async fn observed_natural_completion_wins_over_termination() {
     assert_eq!(
         service.terminate(cell_id("1")).await.unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Result {
+            code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),
@@ -347,6 +352,7 @@ async fn termination_cancels_pending_callbacks_before_responding() {
     assert_eq!(
         cell.initial_response().await.unwrap(),
         RuntimeResponse::Yielded {
+            code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
         }
@@ -354,6 +360,7 @@ async fn termination_cancels_pending_callbacks_before_responding() {
     assert_eq!(
         service.terminate(cell_id("1")).await.unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Terminated {
+            code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
         })
@@ -417,6 +424,7 @@ async fn repeated_termination_is_rejected_while_callback_cleanup_is_pending() {
     assert_eq!(
         cell.initial_response().await.unwrap(),
         RuntimeResponse::Yielded {
+            code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
         }
@@ -440,6 +448,7 @@ async fn repeated_termination_is_rejected_while_callback_cleanup_is_pending() {
     assert_eq!(
         first_termination.await.unwrap().unwrap(),
         WaitOutcome::LiveCell(RuntimeResponse::Terminated {
+            code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
         })
@@ -461,6 +470,7 @@ async fn second_observer_is_rejected_without_displacing_the_first() {
     assert_eq!(
         cell.initial_response().await.unwrap(),
         RuntimeResponse::Yielded {
+            code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
         }
@@ -484,6 +494,7 @@ async fn second_observer_is_rejected_without_displacing_the_first() {
     );
 
     let terminated = RuntimeResponse::Terminated {
+        code_mode_host_duration: None,
         cell_id: cell_id("1"),
         content_items: Vec::new(),
     };
@@ -515,6 +526,7 @@ async fn natural_completion_cleans_up_callbacks_before_responding() {
     assert_eq!(
         cell.initial_response().await.unwrap(),
         RuntimeResponse::Result {
+            code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "done".to_string(),

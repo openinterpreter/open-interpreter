@@ -1,9 +1,12 @@
 use anyhow::Context;
 use anyhow::Result;
+use codex_core::EnvironmentConfig;
+use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::RemoveOptions;
-use codex_features::Feature;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
@@ -24,6 +27,7 @@ use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_target_os;
 use serde_json::json;
+use test_case::test_case;
 use wiremock::MockServer;
 
 const PATCH_CALL_ID: &str = "workspace-root-patch";
@@ -46,11 +50,6 @@ async fn workspace_roots_test(server: &MockServer) -> Result<TestCodex> {
                 .expect("test workspace should be canonicalizable")
                 .abs();
         }
-        config.use_experimental_unified_exec_tool = true;
-        config
-            .features
-            .enable(Feature::UnifiedExec)
-            .expect("test config should allow feature update");
         config.workspace_roots = vec![config.cwd.clone()];
         config.set_windows_sandbox_enabled(/*value*/ true);
     });
@@ -125,7 +124,9 @@ async fn submit_workspace_turn(test: &TestCodex, prompt: &str) -> Result<()> {
 
 async fn read_file(test: &TestCodex, path: &PathUri) -> Result<String> {
     Ok(String::from_utf8(
-        test.fs().read_file(path, /*sandbox*/ None).await?,
+        test.fs()
+            .read_file(path, Default::default(), /*sandbox*/ None)
+            .await?,
     )?)
 }
 
@@ -137,6 +138,7 @@ async fn remove_files(test: &TestCodex, paths: &[&PathUri]) -> Result<()> {
                 RemoveOptions {
                     recursive: false,
                     force: true,
+                    follow_symlinks: true,
                 },
                 /*sandbox*/ None,
             )
@@ -197,9 +199,14 @@ async fn workspace_roots_allow_file_and_command_writes() -> Result<()> {
     remove_files(&test, &[&patch_path, &command_path]).await
 }
 
+#[test_case(false; "thread-owned secondary root")]
+#[test_case(true; "owner-resolved secondary root")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn workspace_roots_allow_apply_patch_in_secondary_root() -> Result<()> {
+async fn workspace_roots_allow_file_and_command_writes_in_secondary_root(
+    owner_resolved_roots: bool,
+) -> Result<()> {
     const SECONDARY_ROOT_NAME: &str = "secondary-workspace-root";
+    const COMMAND_CONTENTS: &str = "secondary root command";
 
     skip_if_wine_exec!(
         Ok(()),
@@ -208,7 +215,7 @@ async fn workspace_roots_allow_apply_patch_in_secondary_root() -> Result<()> {
 
     let server = start_mock_server().await;
     let mut builder = test_codex()
-        .with_config(|config| {
+        .with_config(move |config| {
             #[cfg(windows)]
             {
                 config.cwd = dunce::canonicalize(config.cwd.as_path())
@@ -223,7 +230,10 @@ async fn workspace_roots_allow_apply_patch_in_secondary_root() -> Result<()> {
                     &config.cwd,
                     SECONDARY_ROOT_NAME,
                 ));
-            config.workspace_roots = vec![config.cwd.clone(), secondary_root];
+            config.workspace_roots = vec![config.cwd.clone()];
+            if !owner_resolved_roots {
+                config.workspace_roots.push(secondary_root);
+            }
             config.set_windows_sandbox_enabled(/*value*/ true);
         })
         .with_workspace_setup(|cwd, fs| async move {
@@ -233,7 +243,10 @@ async fn workspace_roots_allow_apply_patch_in_secondary_root() -> Result<()> {
                 .join(sibling_workspace_root_name(&cwd, SECONDARY_ROOT_NAME));
             fs.create_directory(
                 &PathUri::from_abs_path(&secondary_root),
-                CreateDirectoryOptions { recursive: true },
+                CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
                 /*sandbox*/ None,
             )
             .await?;
@@ -245,31 +258,54 @@ async fn workspace_roots_allow_apply_patch_in_secondary_root() -> Result<()> {
         .parent()
         .context("workspace should have a parent")?
         .join(&secondary_root_name)?;
+    if owner_resolved_roots {
+        let selection = test
+            .codex
+            .environment_selections()
+            .await
+            .into_iter()
+            .next()
+            .context("thread should select its executor environment")?;
+        test.codex
+            .environment_ready(
+                &selection,
+                EnvironmentConfig {
+                    allow_login_shell: test.config.permissions.allow_login_shell,
+                    workspace_roots: vec![selection.cwd.clone(), secondary_root.clone()],
+                    permission_profile: PermissionProfileSnapshot::legacy(
+                        workspace_roots_profile(),
+                    ),
+                    shell_environment_policy: Default::default(),
+                    windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
+                    windows_sandbox_private_desktop: test
+                        .config
+                        .permissions
+                        .windows_sandbox_private_desktop,
+                    use_legacy_landlock: test.config.features.use_legacy_landlock(),
+                    exec_policy: None,
+                    mcp_policy: None,
+                    network_policy: None,
+                    selected_capability_roots: Vec::new(),
+                },
+            )
+            .await?;
+    }
     let patch = format!(
         "*** Begin Patch\n*** Add File: ../{secondary_root_name}/secondary-root-patch.txt\n+secondary root\n*** End Patch\n"
     );
-    let response_mock = mount_sse_sequence(
+    let response_mock = mount_patch_and_command_calls(
         &server,
-        vec![
-            sse(vec![
-                ev_response_created("resp-1"),
-                ev_apply_patch_custom_tool_call(PATCH_CALL_ID, &patch),
-                ev_completed("resp-1"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-2"),
-                ev_assistant_message("msg-1", "done"),
-                ev_completed("resp-2"),
-            ]),
-        ],
+        &patch,
+        &format!("../{secondary_root_name}/secondary-root-command.txt"),
+        COMMAND_CONTENTS,
     )
-    .await;
+    .await?;
 
     submit_workspace_turn(&test, "write in the secondary workspace root").await?;
 
     let request = response_mock
         .last_request()
-        .context("model should receive the apply_patch result")?;
+        .context("model should receive the apply_patch and command results")?;
     let (patch_output, patch_success) = request
         .custom_tool_call_output_content_and_success(PATCH_CALL_ID)
         .context("patch result should be present")?;
@@ -282,6 +318,15 @@ async fn workspace_roots_allow_apply_patch_in_secondary_root() -> Result<()> {
     );
     let patched_file = secondary_root.join("secondary-root-patch.txt")?;
     assert_eq!(read_file(&test, &patched_file).await?, "secondary root\n");
+    let (_, command_success) = request
+        .function_call_output_content_and_success(COMMAND_CALL_ID)
+        .context("command result should be present")?;
+    assert_ne!(command_success, Some(false));
+    let command_file = secondary_root.join("secondary-root-command.txt")?;
+    assert_eq!(
+        read_file(&test, &command_file).await?.trim_end(),
+        COMMAND_CONTENTS
+    );
 
     test.fs()
         .remove(
@@ -289,6 +334,7 @@ async fn workspace_roots_allow_apply_patch_in_secondary_root() -> Result<()> {
             RemoveOptions {
                 recursive: true,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -314,7 +360,10 @@ async fn workspace_roots_allow_patches_but_protect_metadata_directories() -> Res
         test.fs()
             .create_directory(
                 &cwd.join(directory)?,
-                CreateDirectoryOptions { recursive: true },
+                CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
                 /*sandbox*/ None,
             )
             .await?;
@@ -377,7 +426,7 @@ async fn workspace_roots_allow_patches_but_protect_metadata_directories() -> Res
         let protected_path = cwd.join(directory)?.join("protected.txt")?;
         let error = test
             .fs()
-            .get_metadata(&protected_path, /*sandbox*/ None)
+            .get_metadata(&protected_path, Default::default(), /*sandbox*/ None)
             .await
             .expect_err("protected metadata file should not be created");
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
@@ -441,13 +490,13 @@ async fn workspace_roots_deny_file_and_command_writes_outside_roots() -> Result<
     );
     assert!(
         test.fs()
-            .read_file(&patch_path, /*sandbox*/ None)
+            .read_file(&patch_path, Default::default(), /*sandbox*/ None)
             .await
             .is_err()
     );
     assert!(
         test.fs()
-            .read_file(&command_path, /*sandbox*/ None)
+            .read_file(&command_path, Default::default(), /*sandbox*/ None)
             .await
             .is_err()
     );

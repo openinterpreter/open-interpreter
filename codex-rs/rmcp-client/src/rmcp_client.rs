@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use codex_api::SharedAuthProvider;
@@ -57,7 +58,6 @@ use rmcp::transport::AuthorizationManager;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::auth::AuthClient;
 use rmcp::transport::auth::AuthError;
-use rmcp::transport::auth::OAuthState;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::streamable_http_client::StreamableHttpError;
 use serde::Deserialize;
@@ -81,7 +81,9 @@ use crate::oauth::OAuthPersistor;
 use crate::oauth::ResolvedOAuthCredentialStore;
 use crate::oauth::ResolvedOAuthTokens;
 use crate::oauth::StoredOAuthTokens;
+use crate::oauth::install_tokens_in_manager;
 use crate::oauth::resolve_oauth_tokens_from_store_policy;
+use crate::oauth::validate_refresh_token_issuer;
 use crate::oauth_http_client::OAuthHttpClientAdapter;
 use crate::protocol_mode::McpProtocolMode;
 use crate::stdio_server_launcher::StdioServerCommand;
@@ -112,6 +114,9 @@ enum PendingTransport {
         transport: StreamableHttpClientTransport<AuthClient<StreamableHttpClientAdapter>>,
         oauth_persistor: OAuthPersistor,
     },
+    StreamableHttpWithAccessTokenOnly {
+        transport: StreamableHttpClientTransport<AuthClient<StreamableHttpClientAdapter>>,
+    },
 }
 
 enum ClientState {
@@ -123,6 +128,15 @@ enum ClientState {
         oauth: Option<OAuthPersistor>,
     },
     Closed,
+}
+
+/// Bearer authentication applied directly or by the selected HTTP transport.
+#[derive(Clone)]
+pub enum StreamableHttpBearerToken {
+    /// A token already resolved in the current process.
+    Resolved(String),
+    /// The HTTP client attaches credentials when it sends each request.
+    ProvidedByHttpClient,
 }
 
 #[derive(Clone)]
@@ -137,7 +151,7 @@ enum TransportRecipe {
     StreamableHttp {
         server_name: String,
         url: String,
-        bearer_token: Option<String>,
+        bearer_token: Option<StreamableHttpBearerToken>,
         http_headers: Option<HashMap<String, String>>,
         env_http_headers: Option<HashMap<String, String>>,
         store_mode: OAuthCredentialsStoreMode,
@@ -288,13 +302,20 @@ pub enum Elicitation {
         message: String,
         requested_schema: serde_json::Value,
     },
+    OpenAiElicitationForm {
+        meta: Option<serde_json::Value>,
+        message: String,
+        requested_schema: serde_json::Value,
+    },
 }
 
 impl Elicitation {
     pub fn meta(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
         match self {
             Self::Mcp(request) => request.meta().map(|meta| &meta.0.0),
-            Self::OpenAiForm { meta, .. } => meta.as_ref().and_then(serde_json::Value::as_object),
+            Self::OpenAiForm { meta, .. } | Self::OpenAiElicitationForm { meta, .. } => {
+                meta.as_ref().and_then(serde_json::Value::as_object)
+            }
         }
     }
 }
@@ -448,7 +469,8 @@ impl RmcpClient {
             PendingTransport::Stdio { transport } => Some(transport.process_handle()),
             PendingTransport::InProcess { .. }
             | PendingTransport::StreamableHttp { .. }
-            | PendingTransport::StreamableHttpWithOAuth { .. } => None,
+            | PendingTransport::StreamableHttpWithOAuth { .. }
+            | PendingTransport::StreamableHttpWithAccessTokenOnly { .. } => None,
         };
 
         Ok(Self {
@@ -508,7 +530,7 @@ impl RmcpClient {
         Self::new_streamable_http_client_with_protocol_mode_and_redirect_mode(
             server_name,
             url,
-            bearer_token,
+            bearer_token.map(StreamableHttpBearerToken::Resolved),
             http_headers,
             env_http_headers,
             store_mode,
@@ -525,7 +547,7 @@ impl RmcpClient {
     pub async fn new_streamable_http_client_with_protocol_mode_and_redirect_mode(
         server_name: &str,
         url: &str,
-        bearer_token: Option<String>,
+        bearer_token: Option<StreamableHttpBearerToken>,
         http_headers: Option<HashMap<String, String>>,
         env_http_headers: Option<HashMap<String, String>>,
         store_mode: OAuthCredentialsStoreMode,
@@ -1006,7 +1028,10 @@ impl RmcpClient {
                 redirect_mode,
                 initialize_deadline,
             } => {
-                let has_configured_headers = http_headers
+                let has_configured_headers = matches!(
+                    bearer_token,
+                    Some(StreamableHttpBearerToken::ProvidedByHttpClient)
+                ) || http_headers
                     .as_ref()
                     .is_some_and(|headers| !headers.is_empty())
                     || env_http_headers
@@ -1091,12 +1116,7 @@ impl RmcpClient {
                     )
                     .await
                     {
-                        Ok((transport, oauth_persistor)) => {
-                            Ok(PendingTransport::StreamableHttpWithOAuth {
-                                transport,
-                                oauth_persistor,
-                            })
-                        }
+                        Ok(pending_transport) => Ok(pending_transport),
                         Err(err)
                             if err.downcast_ref::<AuthError>().is_some_and(|auth_err| {
                                 matches!(auth_err, AuthError::NoAuthorizationSupport)
@@ -1132,8 +1152,8 @@ impl RmcpClient {
                 } else {
                     let mut http_config =
                         StreamableHttpClientTransportConfig::with_uri(url.clone());
-                    if let Some(bearer_token) = bearer_token.clone() {
-                        http_config = http_config.auth_header(bearer_token);
+                    if let Some(StreamableHttpBearerToken::Resolved(bearer_token)) = bearer_token {
+                        http_config = http_config.auth_header(bearer_token.clone());
                     }
 
                     let transport = StreamableHttpClientTransport::with_client(
@@ -1205,6 +1225,12 @@ impl RmcpClient {
                     .serve_with_lifecycle(transport, lifecycle)
                     .boxed(),
                 Some(oauth_persistor),
+            ),
+            PendingTransport::StreamableHttpWithAccessTokenOnly { transport } => (
+                client_service
+                    .serve_with_lifecycle(transport, lifecycle)
+                    .boxed(),
+                None,
             ),
         };
 
@@ -1477,36 +1503,36 @@ async fn create_oauth_transport_and_runtime(
     has_configured_headers: bool,
     redirect_mode: StreamableHttpRedirectMode,
     initialize_deadline: Arc<StdMutex<Option<Instant>>>,
-) -> Result<(
-    StreamableHttpClientTransport<AuthClient<StreamableHttpClientAdapter>>,
-    OAuthPersistor,
-)> {
+) -> Result<PendingTransport> {
     let oauth_http_client = Arc::new(OAuthHttpClientAdapter::new_with_redirect_mode(
         http_client.clone(),
         default_headers.clone(),
+        url,
         has_configured_headers,
         redirect_mode,
-    ));
+    )?);
     let mut manager =
         AuthorizationManager::new_with_oauth_http_client(url.to_string(), oauth_http_client)
             .await?;
     manager.set_allow_missing_issuer(true);
-    let mut oauth_state = OAuthState::Unauthorized(manager);
-
-    oauth_state
-        .set_credentials(
-            &initial_tokens.client_id,
-            initial_tokens.token_response.0.clone(),
-        )
-        .await?;
-
-    let manager = match oauth_state {
-        OAuthState::Authorized(manager) => manager,
-        OAuthState::Unauthorized(manager) => manager,
-        _ => {
-            return Err(anyhow!("unexpected OAuth state during client setup"));
-        }
-    };
+    let metadata = manager
+        .resolve_metadata()
+        .await
+        .context("failed to resolve OAuth metadata before using stored credentials")?
+        .metadata;
+    let use_stored_access_token_only =
+        match validate_refresh_token_issuer(&metadata, &initial_tokens) {
+            Ok(()) => false,
+            Err(_error) if initial_tokens.access_token_is_usable_without_refresh() => true,
+            Err(error) => return Err(error),
+        };
+    manager.set_metadata(metadata);
+    let mut runtime_tokens = initial_tokens.clone();
+    if use_stored_access_token_only {
+        runtime_tokens.token_response.0.set_refresh_token(None);
+        runtime_tokens.issuer = None;
+    }
+    install_tokens_in_manager(&mut manager, &runtime_tokens).await?;
 
     let auth_client = AuthClient::new(
         StreamableHttpClientAdapter::new(
@@ -1526,6 +1552,13 @@ async fn create_oauth_transport_and_runtime(
         StreamableHttpClientTransportConfig::with_uri(url.to_string()),
     );
 
+    if use_stored_access_token_only {
+        warn!(
+            "stored OAuth refresh credentials could not be bound to their issuer for MCP server `{server_name}`; using the stored access token without refresh"
+        );
+        return Ok(PendingTransport::StreamableHttpWithAccessTokenOnly { transport });
+    }
+
     let runtime = OAuthPersistor::new(
         server_name.to_string(),
         url.to_string(),
@@ -1534,7 +1567,10 @@ async fn create_oauth_transport_and_runtime(
         Some(initial_tokens),
     );
 
-    Ok((transport, runtime))
+    Ok(PendingTransport::StreamableHttpWithOAuth {
+        transport,
+        oauth_persistor: runtime,
+    })
 }
 
 #[cfg(test)]

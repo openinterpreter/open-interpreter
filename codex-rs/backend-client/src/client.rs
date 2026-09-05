@@ -34,9 +34,13 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt;
 
+mod chatgpt_turn_cost;
 mod rate_limit_resets;
 mod thread_usage;
+pub(crate) mod turn_usage;
 
+pub use chatgpt_turn_cost::ChatgptThreadTurnCosts;
+pub use chatgpt_turn_cost::ChatgptTurnCost;
 pub use thread_usage::ThreadUsage;
 pub use thread_usage::ThreadUsageBreakdownGroup;
 
@@ -157,7 +161,27 @@ impl fmt::Debug for Client {
 
 impl Client {
     pub fn new(base_url: impl Into<String>, http_client_factory: HttpClientFactory) -> Self {
-        let mut base_url = base_url.into();
+        let http = RouteAwareClientPool::with_chatgpt_cloudflare_cookies_without_request_logging(
+            http_client_factory,
+            ClientRouteClass::Api,
+        );
+        Self::with_http(base_url.into(), http)
+    }
+
+    /// Creates a client that never forwards its credentials to a redirect destination.
+    pub fn new_without_redirects(
+        base_url: impl Into<String>,
+        http_client_factory: HttpClientFactory,
+    ) -> Self {
+        let http =
+            RouteAwareClientPool::with_chatgpt_cloudflare_cookies_without_redirects_or_request_logging(
+                http_client_factory,
+                ClientRouteClass::Api,
+            );
+        Self::with_http(base_url.into(), http)
+    }
+
+    fn with_http(mut base_url: String, http: RouteAwareClientPool) -> Self {
         // Normalize common ChatGPT hostnames to include /backend-api so we hit the WHAM paths.
         // Also trim trailing slashes for consistent URL building.
         while base_url.ends_with('/') {
@@ -169,10 +193,6 @@ impl Client {
         {
             base_url = format!("{base_url}/backend-api");
         }
-        let http = RouteAwareClientPool::with_chatgpt_cloudflare_cookies_without_request_logging(
-            http_client_factory,
-            ClientRouteClass::Api,
-        );
         let path_style = PathStyle::from_base_url(&base_url);
         Self {
             base_url,
@@ -705,6 +725,8 @@ impl Client {
             }
             crate::types::PlanType::Enterprise => AccountPlanType::Enterprise,
             crate::types::PlanType::Edu | crate::types::PlanType::Education => AccountPlanType::Edu,
+            crate::types::PlanType::EduPlus => AccountPlanType::EduPlus,
+            crate::types::PlanType::EduPro => AccountPlanType::EduPro,
             crate::types::PlanType::Guest
             | crate::types::PlanType::FreeWorkspace
             | crate::types::PlanType::Quorum

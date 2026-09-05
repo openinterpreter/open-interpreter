@@ -3,6 +3,7 @@ use super::windows_common::make_runner_resizer;
 use super::windows_common::start_runner_pipe_writer;
 use super::windows_common::start_runner_stdin_writer;
 use super::windows_common::start_runner_stdout_reader;
+use crate::desktop::DesktopPolicy;
 use crate::identity::SandboxCreds;
 use crate::identity::refresh_logon_sandbox_creds;
 use crate::ipc_framed::EmptyPayload;
@@ -96,10 +97,47 @@ async fn spawn_runner_transport_task(
     request: RunnerTransportRequest,
 ) -> Result<RunnerTransport> {
     tokio::task::spawn_blocking(move || -> Result<_> {
+        let desktop_policy = request
+            .spawn_request
+            .use_private_desktop
+            .then(|| {
+                DesktopPolicy::elevated(
+                    crate::setup::SandboxSetupRequest {
+                        permissions: &request.permissions,
+                        command_cwd: &request.cwd,
+                        env_map: &request.env_map,
+                        codex_home: &request.codex_home,
+                        proxy_enforced: request.proxy_enforced,
+                    },
+                    crate::setup::SetupRootOverrides {
+                        read_roots: request.read_roots_override.clone(),
+                        read_roots_include_platform_defaults: request
+                            .read_roots_include_platform_defaults,
+                        write_roots: request.write_roots_override.clone(),
+                        deny_read_paths: Some(request.deny_read_paths_override.clone()),
+                        deny_write_paths: Some(request.deny_write_paths_override.clone()),
+                    },
+                    &request.spawn_request.cap_sids,
+                    request
+                        .spawn_request
+                        .network_proxy_restricting_sid
+                        .as_deref(),
+                )
+            })
+            .transpose()?;
         spawn_runner_transport_with_retry(
             sandbox_creds,
             &request,
-            spawn_runner_transport,
+            |codex_home, cwd, sandbox_creds, log_dir, spawn_request| {
+                spawn_runner_transport(
+                    codex_home,
+                    cwd,
+                    sandbox_creds,
+                    log_dir,
+                    spawn_request,
+                    desktop_policy.as_ref(),
+                )
+            },
             refresh_logon_sandbox_creds,
         )
     })
@@ -177,6 +215,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
             tty,
             stdin_open,
             use_private_desktop,
+            private_desktop_name: None,
         },
         read_roots_override: read_roots_override.map(<[PathBuf]>::to_vec),
         read_roots_include_platform_defaults,

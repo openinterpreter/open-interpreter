@@ -26,7 +26,6 @@ use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::PatchApplyStatus;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_shell_command::parse_command::parse_command;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use codex_utils_string::truncate_middle_with_token_budget;
 use std::collections::HashMap;
@@ -133,7 +132,7 @@ async fn emit_exec_command_begin(ctx: ToolEventCtx<'_>, exec_input: &ExecCommand
             .analytics_events_client
             .track_artifact_operation(
                 build_track_events_context(
-                    ctx.turn.model_info.slug.clone(),
+                    ctx.turn.model_info().slug.clone(),
                     ctx.session.thread_id.to_string(),
                     ctx.turn.sub_id.clone(),
                     ctx.turn.originator.clone(),
@@ -180,13 +179,6 @@ async fn emit_exec_command_begin(ctx: ToolEventCtx<'_>, exec_input: &ExecCommand
 }
 // Concrete, allocation-free emitter: avoid trait objects and boxed futures.
 pub(crate) enum ToolEmitter {
-    Shell {
-        command: Vec<String>,
-        cwd: PathUri,
-        source: ExecCommandSource,
-        parsed_cmd: Vec<ParsedCommand>,
-        plugin_attribution: Option<PluginCommandAttribution>,
-    },
     ApplyPatch {
         changes: HashMap<PathBuf, FileChange>,
         auto_approved: bool,
@@ -203,22 +195,6 @@ pub(crate) enum ToolEmitter {
 }
 
 impl ToolEmitter {
-    pub fn shell(
-        command: Vec<String>,
-        cwd: AbsolutePathBuf,
-        source: ExecCommandSource,
-        plugin_attribution: Option<PluginCommandAttribution>,
-    ) -> Self {
-        let parsed_cmd = parse_command(&command);
-        Self::Shell {
-            command,
-            cwd: PathUri::from_abs_path(&cwd),
-            source,
-            parsed_cmd,
-            plugin_attribution,
-        }
-    }
-
     pub fn apply_patch_for_environment(
         changes: HashMap<PathBuf, FileChange>,
         auto_approved: bool,
@@ -251,33 +227,6 @@ impl ToolEmitter {
 
     pub async fn emit(&self, ctx: ToolEventCtx<'_>, stage: ToolEventStage<'_>) {
         match (self, stage) {
-            (
-                Self::Shell {
-                    command,
-                    cwd,
-                    source,
-                    parsed_cmd,
-                    plugin_attribution,
-                    ..
-                },
-                stage,
-            ) => {
-                emit_exec_stage(
-                    ctx,
-                    ExecCommandInput::new(
-                        command,
-                        cwd,
-                        parsed_cmd,
-                        *source,
-                        /*interaction_input*/ None,
-                        /*process_id*/ None,
-                        plugin_attribution.as_ref(),
-                    ),
-                    stage,
-                )
-                .await;
-            }
-
             (
                 Self::ApplyPatch {
                     changes,
@@ -424,7 +373,7 @@ impl ToolEmitter {
         output: &ExecToolCallOutput,
         ctx: ToolEventCtx<'_>,
     ) -> String {
-        super::format_exec_output_for_model(output, ctx.turn.model_info.truncation_policy.into())
+        super::format_exec_output_for_model(output, ctx.turn.model_info().truncation_policy.into())
     }
 
     pub async fn finish(
@@ -491,9 +440,7 @@ impl ToolEmitter {
                 // TODO: We should add a new ToolError variant for user-declined approvals.
                 let normalized = if msg == "rejected by user" {
                     match self {
-                        Self::Shell { .. } | Self::UnifiedExec { .. } => {
-                            "exec command rejected by user".to_string()
-                        }
+                        Self::UnifiedExec { .. } => "exec command rejected by user".to_string(),
                         Self::ApplyPatch { .. } => "patch rejected by user".to_string(),
                     }
                 } else {
@@ -574,7 +521,7 @@ async fn emit_exec_stage(
                 duration: output.duration,
                 formatted_output: format_exec_output_str(
                     &output,
-                    ctx.turn.model_info.truncation_policy.into(),
+                    ctx.turn.model_info().truncation_policy.into(),
                 ),
                 status: if output.exit_code == 0 {
                     ExecCommandStatus::Completed

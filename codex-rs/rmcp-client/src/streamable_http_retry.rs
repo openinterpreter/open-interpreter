@@ -35,7 +35,8 @@ impl RmcpClient {
         let should_retry = match &initial_transport {
             PendingTransport::InProcess { .. } | PendingTransport::Stdio { .. } => false,
             PendingTransport::StreamableHttp { .. }
-            | PendingTransport::StreamableHttpWithOAuth { .. } => true,
+            | PendingTransport::StreamableHttpWithOAuth { .. }
+            | PendingTransport::StreamableHttpWithAccessTokenOnly { .. } => true,
         };
         let mut retry_deadline = timeout.map(|duration| Instant::now() + duration);
         let mut pending_transport = Some(initial_transport);
@@ -120,6 +121,9 @@ impl RmcpClient {
 
     fn is_retryable_client_initialize_error(error: &rmcp::service::ClientInitializeError) -> bool {
         match error {
+            rmcp::service::ClientInitializeError::LegacyFallbackFailed { fallback, .. } => {
+                Self::is_retryable_client_initialize_error(fallback)
+            }
             rmcp::service::ClientInitializeError::TransportError { error, context }
                 if matches!(
                     context.as_ref(),

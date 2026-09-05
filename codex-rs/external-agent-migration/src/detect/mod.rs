@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::io;
+use std::sync::Arc;
 use toml::Value as TomlValue;
 
 const EXTERNAL_AGENT_CONFIG_DETECT_METRIC: &str = "codex.external_agent_config.detect";
@@ -326,7 +327,9 @@ impl ExternalAgentConfigService {
             );
         }
 
-        if self.source.supports_plugin_migration(settings.as_ref()) {
+        // Plugin import persists user-global enabled state, so repository-controlled
+        // settings must never be treated as plugin installation authority.
+        if scope.is_home() && self.source.supports_plugin_migration(settings.as_ref()) {
             match ConfigBuilder::default()
                 .codex_home(self.codex_home.clone())
                 .fallback_cwd(Some(self.codex_home.clone()))
@@ -351,7 +354,7 @@ impl ExternalAgentConfigService {
                         .unwrap_or_default();
                     let configured_marketplace_plugins = configured_marketplace_plugins(
                         &config,
-                        &plugins_manager_for_config(&config, self.auth_mode),
+                        &plugins_manager_for_config(&config, Arc::clone(&self.auth_manager)),
                     )?;
                     let source_root = repo_root.unwrap_or(self.external_agent_home.as_path());
                     if let Some(detected) =

@@ -275,6 +275,10 @@ impl GoalService {
                 .map(|goal| (goal, Some(previous_goal)))?
         };
 
+        if let Some(runtime) = runtime.as_ref() {
+            runtime.clear_pending_turn_start_options().await;
+        }
+
         if objective.is_some() {
             fill_empty_thread_preview_if_possible(state_db, thread_id, &goal).await;
         }
@@ -316,6 +320,9 @@ impl GoalService {
                 GoalServiceError::Internal(format!("failed to clear thread goal: {err}"))
             })?;
         let cleared = cleared_goal.is_some();
+        if cleared && let Some(runtime) = runtime.as_ref() {
+            runtime.clear_pending_turn_start_options().await;
+        }
         drop(goal_state_permit);
         drop(runtime);
 
@@ -345,7 +352,7 @@ impl GoalService {
         }
     }
 
-    fn runtime_for_thread(&self, thread_id: ThreadId) -> Option<Arc<GoalRuntimeHandle>> {
+    pub(crate) fn runtime_for_thread(&self, thread_id: ThreadId) -> Option<Arc<GoalRuntimeHandle>> {
         let key = thread_id.to_string();
         let mut runtimes = self.runtimes();
         let runtime = runtimes.get(&key).and_then(Weak::upgrade);

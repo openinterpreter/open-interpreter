@@ -91,11 +91,16 @@ async fn execute_stream_starts_immediately_and_wait_preserves_missing_cells() {
     request.yield_time_ms = Some(60_000);
     let (cell_id, mut execution) = execute_events(&host, request).await;
 
+    let yielded = execution.next().await.unwrap().unwrap();
+    let Some(proto::execute_event::Event::Outcome(yielded_outcome)) = &yielded.event else {
+        panic!("expected execution outcome");
+    };
     assert_eq!(
-        execution.next().await.unwrap().unwrap(),
+        yielded,
         proto::ExecuteEvent {
             event: Some(proto::execute_event::Event::Outcome(
                 proto::ExecutionOutcome {
+                    code_mode_host_duration_ns: yielded_outcome.code_mode_host_duration_ns,
                     cell_id: cell_id.clone(),
                     content_items: vec![proto::ContentItem {
                         item: Some(proto::content_item::Item::Text(proto::TextContent {
@@ -119,11 +124,15 @@ async fn execute_stream_starts_immediately_and_wait_preserves_missing_cells() {
         .await
         .expect("wait for completion")
         .into_inner();
+    let Some(proto::wait_response::State::LiveCell(completed_outcome)) = &completed.state else {
+        panic!("expected live-cell wait outcome");
+    };
     assert_eq!(
         completed,
         proto::WaitResponse {
             state: Some(proto::wait_response::State::LiveCell(
                 proto::ExecutionOutcome {
+                    code_mode_host_duration_ns: completed_outcome.code_mode_host_duration_ns,
                     cell_id: cell_id.clone(),
                     content_items: vec![proto::ContentItem {
                         item: Some(proto::content_item::Item::Text(proto::TextContent {

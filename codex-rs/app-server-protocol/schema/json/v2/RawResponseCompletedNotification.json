@@ -1,6 +1,19 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "ResponseUsageMetadata": {
+      "description": "Usage metadata reported for one upstream response.",
+      "properties": {
+        "amount": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": true
+      },
+      "type": "object"
+    },
     "TokenUsageBreakdown": {
       "properties": {
         "cacheWriteInputTokens": {
@@ -54,6 +67,16 @@
       "anyOf": [
         {
           "$ref": "#/definitions/TokenUsageBreakdown"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "usageMetadata": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ResponseUsageMetadata"
         },
         {
           "type": "null"

@@ -123,7 +123,9 @@ def parse_resources(raw_resources):
     return deduped
 
 
-def create_resource_dirs(skill_dir, skill_name, skill_title, resources, include_examples):
+def create_resource_dirs(
+    skill_dir, skill_name, skill_title, resources, include_examples
+):
     for resource in resources:
         resource_dir = skill_dir / resource
         resource_dir.mkdir(exist_ok=True)
@@ -138,7 +140,9 @@ def create_resource_dirs(skill_dir, skill_name, skill_title, resources, include_
         elif resource == "references":
             if include_examples:
                 example_reference = resource_dir / "api_reference.md"
-                example_reference.write_text(EXAMPLE_REFERENCE.format(skill_title=skill_title))
+                example_reference.write_text(
+                    EXAMPLE_REFERENCE.format(skill_title=skill_title)
+                )
                 print("[OK] Created references/api_reference.md")
             else:
                 print("[OK] Created references/")
@@ -182,7 +186,9 @@ def init_skill(skill_name, path, resources, include_examples, interface_override
 
     # Create SKILL.md from template
     skill_title = title_case_skill_name(skill_name)
-    skill_content = SKILL_TEMPLATE.format(skill_name=skill_name, skill_title=skill_title)
+    skill_content = SKILL_TEMPLATE.format(
+        skill_name=skill_name, skill_title=skill_title
+    )
 
     skill_md_path = skill_dir / "SKILL.md"
     try:
@@ -204,7 +210,9 @@ def init_skill(skill_name, path, resources, include_examples, interface_override
     # Create resource directories if requested
     if resources:
         try:
-            create_resource_dirs(skill_dir, skill_name, skill_title, resources, include_examples)
+            create_resource_dirs(
+                skill_dir, skill_name, skill_title, resources, include_examples
+            )
         except Exception as e:
             print(f"[ERROR] Error creating resource directories: {e}")
             return None
@@ -215,14 +223,20 @@ def init_skill(skill_name, path, resources, include_examples, interface_override
     print("1. Edit SKILL.md to complete the TODO items and update the description")
     if resources:
         if include_examples:
-            print("2. Customize or delete the example files in scripts/, references/, and assets/")
+            print(
+                "2. Customize or delete the example files in scripts/, references/, and assets/"
+            )
         else:
             print("2. Add resources to scripts/, references/, and assets/ as needed")
     else:
-        print("2. Create resource directories only if needed (scripts/, references/, assets/)")
+        print(
+            "2. Create resource directories only if needed (scripts/, references/, assets/)"
+        )
     print("3. Update agents/openai.yaml if the UI metadata should differ")
     print("4. Run the validator when ready to check the skill structure")
-    print("5. Consider independent forward-testing only when complexity or risk warrants it")
+    print(
+        "5. Consider independent forward-testing only when complexity or risk warrants it"
+    )
 
     return skill_dir
 

@@ -593,7 +593,9 @@ mod tests {
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "call-date".to_string(),
+                    call_id: Some("call-date".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text("Tue Apr 29".to_string()),
 
                     internal_chat_message_metadata_passthrough: None,

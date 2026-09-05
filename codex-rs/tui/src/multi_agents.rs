@@ -1,8 +1,8 @@
 //! Helpers for rendering and navigating multi-agent state in the TUI.
 //!
-//! This module owns the shared presentation contracts for multi-agent history rows, `/agent` picker
-//! entries, and the fast-switch keyboard shortcuts. Higher-level coordination, such as deciding
-//! which thread becomes active or when a thread closes, stays in [`crate::app::App`].
+//! This module owns the shared presentation contracts for multi-agent history rows, `/subagents`
+//! picker entries, and the fast-switch keyboard shortcuts. Higher-level coordination, such as
+//! deciding which thread becomes active or when a thread closes, stays in [`crate::app::App`].
 
 use crate::history_cell::PlainHistoryCell;
 use crate::render::line_utils::prefix_lines;
@@ -223,6 +223,11 @@ pub(crate) fn tool_call_history_cell(
     let prompt = prompt.as_deref().unwrap_or_default();
 
     match tool {
+        // V2 uses SubAgentActivity for display; these variants are analytics-only.
+        CollabAgentTool::SendMessage
+        | CollabAgentTool::FollowupTask
+        | CollabAgentTool::InterruptAgent
+        | CollabAgentTool::ListAgents => None,
         CollabAgentTool::SpawnAgent => {
             if matches!(status, CollabAgentToolCallStatus::InProgress) {
                 return None;
@@ -291,7 +296,7 @@ pub(crate) fn sub_agent_activity_display(item: &ThreadItem) -> Option<SubAgentAc
     let is_running_hint = match kind {
         SubAgentActivityKind::Started => true,
         SubAgentActivityKind::Interacted => return None,
-        SubAgentActivityKind::Interrupted => false,
+        SubAgentActivityKind::Interrupted | SubAgentActivityKind::Completed => false,
     };
     Some(SubAgentActivityDisplay {
         thread_id: parse_thread_id(agent_thread_id)?,
@@ -318,6 +323,7 @@ pub(crate) fn sub_agent_activity_summary(kind: SubAgentActivityKind, agent_path:
         SubAgentActivityKind::Started => format!("Started `{agent_path}`"),
         SubAgentActivityKind::Interacted => format!("Interacted with `{agent_path}`"),
         SubAgentActivityKind::Interrupted => format!("Interrupted `{agent_path}`"),
+        SubAgentActivityKind::Completed => format!("Completed `{agent_path}`"),
     }
 }
 
@@ -326,6 +332,7 @@ fn sub_agent_activity_title(kind: SubAgentActivityKind, agent_path: &str) -> Lin
         SubAgentActivityKind::Started => ("Started ", agent_path),
         SubAgentActivityKind::Interacted => ("Interacted with ", agent_path),
         SubAgentActivityKind::Interrupted => ("Interrupted ", agent_path),
+        SubAgentActivityKind::Completed => ("Completed ", agent_path),
     };
     title_spans_line(vec![
         Span::from(prefix).bold(),
@@ -689,6 +696,26 @@ mod tests {
         };
 
         assert_eq!(sub_agent_activity_display(&item), None);
+    }
+
+    #[test]
+    fn completed_sub_agent_activity_stops_running_liveness() {
+        let thread_id = ThreadId::new();
+        let item = ThreadItem::SubAgentActivity {
+            id: "activity-1".to_string(),
+            kind: SubAgentActivityKind::Completed,
+            agent_thread_id: thread_id.to_string(),
+            agent_path: "/root/child".to_string(),
+        };
+
+        assert_eq!(
+            sub_agent_activity_display(&item),
+            Some(SubAgentActivityDisplay {
+                thread_id,
+                agent_path: "/root/child".to_string(),
+                is_running_hint: false,
+            })
+        );
     }
 
     #[test]

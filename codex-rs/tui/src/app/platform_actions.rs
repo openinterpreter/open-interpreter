@@ -10,17 +10,22 @@ pub(super) struct WindowsSandboxState {
     pub(super) setup_started_at: Option<Instant>,
     // One-shot suppression of the next world-writable scan after user confirmation.
     pub(super) skip_world_writable_scan_once: bool,
+    /// A startup filesystem scan can still enqueue a protected warning after the app queue drains.
+    pub(super) startup_world_writable_scan_pending: bool,
 }
 
 impl App {
     #[cfg(target_os = "windows")]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_world_writable_scan(
         cwd: AbsolutePathBuf,
         workspace_roots: Vec<AbsolutePathBuf>,
         env_map: std::collections::HashMap<String, String>,
         logs_base_dir: AbsolutePathBuf,
         permission_profile: PermissionProfile,
+        session_telemetry: SessionTelemetry,
         tx: AppEventSender,
+        startup_scan: bool,
     ) {
         let Ok(permissions) =
             codex_windows_sandbox::ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_workspace_roots(
@@ -28,6 +33,9 @@ impl App {
                 workspace_roots.as_slice(),
             )
         else {
+            if startup_scan {
+                tx.send(AppEvent::StartupWorldWritableScanCompleted);
+            }
             return;
         };
 
@@ -41,9 +49,13 @@ impl App {
                     &permissions,
                     Some(logs_base_dir_path),
                 );
+            crate::windows_sandbox::record_world_writable_scan_result(&session_telemetry, &result);
             if result.is_err() {
                 // Scan failed: warn without examples.
                 send_world_writable_scan_failed(&tx);
+            }
+            if startup_scan {
+                tx.send(AppEvent::StartupWorldWritableScanCompleted);
             }
         });
     }

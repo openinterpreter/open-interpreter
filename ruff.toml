@@ -1,0 +1,1 @@
+extend-exclude = ["sdk/python", "codex-rs/vendor"]

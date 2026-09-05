@@ -162,7 +162,7 @@ async fn windows_restricted_token_rejects_exact_and_glob_deny_read_policy() -> a
         },
         FileSystemSandboxEntry {
             path: FileSystemPath::Path {
-                path: future_secret,
+                path: future_secret.into(),
             },
             access: FileSystemAccessMode::Deny,
             missing_path_behavior: None,
@@ -273,12 +273,18 @@ async fn windows_elevated_enforces_deny_read_and_protects_setup_marker() -> anyh
     let workspace = TempDir::new()?;
     let cwd = dunce::canonicalize(workspace.path())?.abs();
     let glob_secret = cwd.join("secret.env");
-    let exact_secret = cwd.join("exact-secret.txt");
     let public = cwd.join("public.txt");
+    let user_profile = TempDir::new_in(dirs::home_dir().context("resolve user profile")?)?;
+    let _user_profile_guard = EnvVarGuard::set("USERPROFILE", user_profile.path().as_os_str());
+    let exact_secret = user_profile.path().join("exact-secret.txt");
+    std::fs::write(&exact_secret, "exact secret\n")?;
+    let bundled_skill_dir = user_profile.path().join(".codex/plugins/cache");
+    std::fs::create_dir_all(&bundled_skill_dir)?;
+    let bundled_skill = bundled_skill_dir.join("SKILL.md");
     let setup_marker = codex_home.path().join(".sandbox").join("setup_marker.json");
     std::fs::write(&glob_secret, "glob secret\n")?;
-    std::fs::write(&exact_secret, "exact secret\n")?;
     std::fs::write(&public, "public ok\n")?;
+    std::fs::write(&bundled_skill, "bundled skill ok\n")?;
 
     let file_system_sandbox_policy = FileSystemSandboxPolicy::restricted(vec![
         FileSystemSandboxEntry {
@@ -303,7 +309,7 @@ async fn windows_elevated_enforces_deny_read_and_protects_setup_marker() -> anyh
             missing_path_behavior: None,
         },
         FileSystemSandboxEntry {
-            path: FileSystemPath::Path { path: exact_secret },
+            path: exact_secret.clone().abs().into(),
             access: FileSystemAccessMode::Deny,
             missing_path_behavior: None,
         },
@@ -323,16 +329,19 @@ async fn windows_elevated_enforces_deny_read_and_protects_setup_marker() -> anyh
                 "cmd.exe".to_string(),
                 "/D".to_string(),
                 "/C".to_string(),
-                format!(
-                    "(type secret.env 1>NUL 2>NUL && echo GLOB-READ || echo GLOB-DENIED) & (type exact-secret.txt 1>NUL 2>NUL && echo EXACT-READ || echo EXACT-DENIED) & (type \"{}\" 1>NUL 2>NUL && echo MARKER-READ-ALLOWED || echo MARKER-READ-DENIED) & (echo tampered > \"{}\" 2>NUL && echo MARKER-WRITE-ALLOWED || echo MARKER-WRITE-DENIED) & type public.txt",
-                    setup_marker.display(),
-                    setup_marker.display()
-                ),
+                "(type secret.env 1>NUL 2>NUL && echo GLOB-READ || echo GLOB-DENIED) & (type %SETUP_MARKER% 1>NUL 2>NUL && echo MARKER-READ-ALLOWED || echo MARKER-READ-DENIED) & (echo tampered > %SETUP_MARKER% 2>NUL && echo MARKER-WRITE-ALLOWED || echo MARKER-WRITE-DENIED) & type public.txt & type %BUNDLED_SKILL% & (type %EXACT_SECRET% 1>NUL 2>NUL && echo EXACT-READ || echo EXACT-DENIED)".to_string(),
             ],
             cwd: cwd.clone(),
             expiration: 10_000.into(),
             capture_policy: ExecCapturePolicy::ShellTool,
-            env: HashMap::new(),
+            env: [
+                ("BUNDLED_SKILL", &bundled_skill),
+                ("EXACT_SECRET", &exact_secret),
+                ("SETUP_MARKER", &setup_marker),
+            ]
+            .into_iter()
+            .map(|(name, path)| (name.to_string(), format!("\"{}\"", path.display())))
+            .collect(),
             network: None,
             network_environment_id: None,
             sandbox_permissions: SandboxPermissions::UseDefault,
@@ -371,6 +380,7 @@ async fn windows_elevated_enforces_deny_read_and_protects_setup_marker() -> anyh
         stdout.text.contains("public ok"),
         "allowed reads should still work: {stdout:?}"
     );
+    assert!(stdout.text.contains("bundled skill ok"));
     assert!(
         stdout.text.contains("MARKER-READ-DENIED"),
         "sandboxed command should not read setup readiness: {stdout:?}"
@@ -396,8 +406,7 @@ async fn windows_elevated_enforces_deny_read_and_protects_setup_marker() -> anyh
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial(codex_home)]
-async fn windows_elevated_shell_and_unified_exec_enforce_managed_deny_reads() -> anyhow::Result<()>
-{
+async fn windows_elevated_unified_exec_enforces_managed_deny_reads() -> anyhow::Result<()> {
     let codex_home =
         codex_home_for_windows_sandbox_test("windows-elevated-tool-runtime-deny-read-codex-home")?;
     let _codex_home_guard = EnvVarGuard::set("CODEX_HOME", codex_home.path().as_os_str());
@@ -438,7 +447,7 @@ async fn windows_elevated_shell_and_unified_exec_enforce_managed_deny_reads() ->
                 },
                 FileSystemSandboxEntry {
                     path: FileSystemPath::Path {
-                        path: config.cwd.join("exact-secret.txt"),
+                        path: config.cwd.join("exact-secret.txt").into(),
                     },
                     access: FileSystemAccessMode::Deny,
                     missing_path_behavior: None,
@@ -451,28 +460,27 @@ async fn windows_elevated_shell_and_unified_exec_enforce_managed_deny_reads() ->
                     NetworkSandboxPolicy::Restricted,
                 ))
                 .expect("set managed deny-read permission profile");
+        })
+        .with_workspace_setup(|cwd, _fs| async move {
+            std::fs::write(
+                cwd.join("secret.env"),
+                "glob secret should remain private\n",
+            )?;
+            std::fs::write(
+                cwd.join("exact-secret.txt"),
+                "exact secret should remain private\n",
+            )?;
+            std::fs::write(cwd.join("public.txt"), "public ok\n")?;
+            Ok(())
         });
     let harness = TestCodexHarness::with_builder(builder).await?;
-    harness
-        .write_file("secret.env", "glob secret should remain private\n")
-        .await?;
-    harness
-        .write_file("exact-secret.txt", "exact secret should remain private\n")
-        .await?;
-    harness.write_file("public.txt", "public ok\n").await?;
 
     let command = concat!(
         "(type secret.env 1>NUL 2>NUL && echo GLOB-READ || echo GLOB-DENIED) & ",
         "(type exact-secret.txt 1>NUL 2>NUL && echo EXACT-READ || echo EXACT-DENIED) & ",
         "type public.txt"
     );
-    let shell_call_id = "windows-managed-deny-read-shell-command";
-    let unified_call_id = "windows-managed-deny-read-exec-command";
-    let shell_args = json!({
-        "command": command,
-        "timeout_ms": 30_000,
-        "login": false,
-    });
+    let call_id = "windows-managed-deny-read-exec-command";
     let unified_args = json!({
         "cmd": command,
         "yield_time_ms": 30_000,
@@ -483,18 +491,9 @@ async fn windows_elevated_shell_and_unified_exec_enforce_managed_deny_reads() ->
         harness.server(),
         vec![
             sse(vec![
-                ev_response_created("resp-windows-shell-deny-read"),
-                ev_function_call(
-                    shell_call_id,
-                    "shell_command",
-                    &serde_json::to_string(&shell_args)?,
-                ),
-                ev_completed("resp-windows-shell-deny-read"),
-            ]),
-            sse(vec![
                 ev_response_created("resp-windows-unified-deny-read"),
                 ev_function_call(
-                    unified_call_id,
+                    call_id,
                     "exec_command",
                     &serde_json::to_string(&unified_args)?,
                 ),
@@ -517,32 +516,27 @@ async fn windows_elevated_shell_and_unified_exec_enforce_managed_deny_reads() ->
         .submit_with_permission_profile("read the sandbox fixtures", permission_profile)
         .await?;
 
-    for (tool_name, call_id) in [
-        ("shell_command", shell_call_id),
-        ("exec_command", unified_call_id),
-    ] {
-        let output = harness.function_call_stdout(call_id).await;
-        assert!(
-            output.contains("GLOB-DENIED"),
-            "{tool_name} should reject glob-denied reads: {output:?}"
-        );
-        assert!(
-            output.contains("EXACT-DENIED"),
-            "{tool_name} should reject exact-path-denied reads: {output:?}"
-        );
-        assert!(
-            output.contains("public ok"),
-            "{tool_name} should preserve allowed reads: {output:?}"
-        );
-        assert!(
-            !output.contains("GLOB-READ") && !output.contains("glob secret"),
-            "{tool_name} leaked glob-denied file contents: {output:?}"
-        );
-        assert!(
-            !output.contains("EXACT-READ") && !output.contains("exact secret"),
-            "{tool_name} leaked exact-path-denied file contents: {output:?}"
-        );
-    }
+    let output = harness.function_call_stdout(call_id).await;
+    assert!(
+        output.contains("GLOB-DENIED"),
+        "exec_command should reject glob-denied reads: {output:?}"
+    );
+    assert!(
+        output.contains("EXACT-DENIED"),
+        "exec_command should reject exact-path-denied reads: {output:?}"
+    );
+    assert!(
+        output.contains("public ok"),
+        "exec_command should preserve allowed reads: {output:?}"
+    );
+    assert!(
+        !output.contains("GLOB-READ") && !output.contains("glob secret"),
+        "exec_command leaked glob-denied file contents: {output:?}"
+    );
+    assert!(
+        !output.contains("EXACT-READ") && !output.contains("exact secret"),
+        "exec_command leaked exact-path-denied file contents: {output:?}"
+    );
 
     Ok(())
 }

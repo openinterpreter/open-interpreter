@@ -290,7 +290,7 @@ where
     emit_tool_call_begin(session, turn, call_id, invocation.clone()).await;
     let start = Instant::now();
     let result = operation.await.and_then(|payload| {
-        serialize_function_output(payload, turn.model_info.truncation_policy.into())
+        serialize_function_output(payload, turn.model_info().truncation_policy.into())
     });
 
     match result {

@@ -10,12 +10,14 @@ use codex_config::types::OAuthCredentialsStoreMode;
 use codex_exec_server::HttpClient;
 use codex_login::CodexAuth;
 use codex_rmcp_client::McpAuthState;
+use codex_rmcp_client::McpOAuthCallbackMode;
 use codex_rmcp_client::OAuthDiscoveryTimeout;
 use codex_rmcp_client::OAuthProviderError;
 use codex_rmcp_client::StreamableHttpRedirectMode;
 use codex_rmcp_client::determine_streamable_http_auth_status;
 use codex_rmcp_client::determine_streamable_http_auth_status_from_credentials;
 use codex_rmcp_client::discover_streamable_http_oauth;
+use codex_rmcp_client::resolve_mcp_oauth_callback_url;
 use futures::FutureExt;
 use futures::future::join_all;
 use tracing::warn;
@@ -30,6 +32,7 @@ pub struct McpOAuthLoginConfig {
     pub http_headers: Option<HashMap<String, String>>,
     pub env_http_headers: Option<HashMap<String, String>>,
     pub discovered_scopes: Option<Vec<String>>,
+    pub callback_mode: McpOAuthCallbackMode,
 }
 
 #[derive(Debug)]
@@ -51,6 +54,35 @@ pub enum McpOAuthScopesSource {
 pub struct ResolvedMcpOAuthScopes {
     pub scopes: Vec<String>,
     pub source: McpOAuthScopesSource,
+}
+
+/// Keeps registered callbacks tied to their client while preserving legacy redirects.
+pub fn resolve_oauth_callback(
+    server: &McpServerConfig,
+    server_url: &str,
+    global_callback_url: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(callback_url) = server
+        .oauth
+        .as_ref()
+        .and_then(|oauth| oauth.callback_url.as_deref())
+    {
+        return Ok(Some(callback_url.to_string()));
+    }
+
+    if server
+        .oauth_client_id()
+        .is_none_or(|client_id| client_id.trim().is_empty())
+    {
+        return Ok(global_callback_url.map(ToOwned::to_owned));
+    }
+
+    resolve_mcp_oauth_callback_url(
+        server_url,
+        global_callback_url,
+        McpOAuthCallbackMode::CallbackSpecific,
+    )
+    .map(Some)
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +112,7 @@ pub async fn oauth_login_support(
     {
         Ok(Some(discovery)) => {
             config.discovered_scopes = discovery.scopes_supported;
+            config.callback_mode = discovery.callback_mode;
             McpOAuthLoginSupport::Supported(config)
         }
         Ok(None) => McpOAuthLoginSupport::Unsupported,
@@ -106,6 +139,7 @@ fn oauth_login_candidate(transport: &McpServerTransportConfig) -> Option<McpOAut
         http_headers: http_headers.clone(),
         env_http_headers: env_http_headers.clone(),
         discovered_scopes: None,
+        callback_mode: McpOAuthCallbackMode::CallbackSpecific,
     })
 }
 
@@ -300,8 +334,54 @@ mod tests {
     use super::McpOAuthScopesSource;
     use super::OAuthProviderError;
     use super::ResolvedMcpOAuthScopes;
+    use super::resolve_oauth_callback;
     use super::resolve_oauth_scopes;
     use super::should_retry_without_scopes;
+
+    #[test]
+    fn callback_resolution_preserves_registered_and_legacy_clients() -> anyhow::Result<()> {
+        for (client_id, saved_callback, global_callback, expected_callback) in [
+            (
+                Some("registered-client"),
+                Some("http://127.0.0.1/callback"),
+                Some("https://override.example/callback"),
+                Some("http://127.0.0.1/callback"),
+            ),
+            (
+                Some("legacy-client"),
+                None,
+                None,
+                Some("http://127.0.0.1/callback/epMNJ6P1xGQ9"),
+            ),
+            (
+                None,
+                Some("https://plugin.example/callback"),
+                Some("https://override.example/callback"),
+                Some("https://plugin.example/callback"),
+            ),
+            (
+                None,
+                None,
+                Some("https://override.example/callback"),
+                Some("https://override.example/callback"),
+            ),
+        ] {
+            let server = serde_json::from_value(serde_json::json!({
+                "url": "https://mcp.example.com/mcp",
+                "oauth": {
+                    "client_id": client_id,
+                    "callback_url": saved_callback,
+                },
+            }))?;
+            assert_eq!(
+                resolve_oauth_callback(&server, "https://mcp.example.com/mcp", global_callback)?
+                    .as_deref(),
+                expected_callback
+            );
+        }
+
+        Ok(())
+    }
 
     #[test]
     fn resolve_oauth_scopes_prefers_explicit() {

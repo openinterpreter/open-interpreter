@@ -114,7 +114,8 @@ fn apply_reasoning_effort(request: &mut Value, reasoning_effort: Option<Reasonin
         ReasoningEffort::High
         | ReasoningEffort::XHigh
         | ReasoningEffort::Max
-        | ReasoningEffort::Ultra => {
+        | ReasoningEffort::Ultra
+        | ReasoningEffort::Persistent => {
             request_object.insert("reasoning_effort".to_string(), json!("high"));
             request_object.insert("thinking".to_string(), json!({ "type": "enabled" }));
         }
@@ -449,6 +450,9 @@ pub(super) fn build_messages_with_options(
             ResponseItem::FunctionCallOutput {
                 call_id, output, ..
             } => {
+                let Some(call_id) = call_id.as_deref() else {
+                    continue;
+                };
                 push_tool_output_if_expected(
                     &mut messages,
                     &mut pending_tool_calls,
@@ -1512,7 +1516,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "GetGoal:0".to_string(),
+                call_id: Some("GetGoal:0".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("{}".to_string()),
 
                 internal_chat_message_metadata_passthrough: None,
@@ -2203,7 +2209,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "Shell:0".to_string(),
+                call_id: Some("Shell:0".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(
                     "<system>Command executed successfully.</system>".to_string(),
                 ),
@@ -2271,7 +2279,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "Shell:0".to_string(),
+                call_id: Some("Shell:0".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("ok".to_string()),
 
                 internal_chat_message_metadata_passthrough: None,
@@ -2350,7 +2360,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "Shell:1".to_string(),
+                call_id: Some("Shell:1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(
                     "<system>ERROR: Command failed with exit code: 1.</system>".to_string(),
                 ),
@@ -2408,7 +2420,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "Shell:0".to_string(),
+                call_id: Some("Shell:0".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_content_items(vec![
                     FunctionCallOutputContentItem::InputText {
                         text: "<system>Command executed successfully.</system>".to_string(),
@@ -2478,7 +2492,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "Shell:0".to_string(),
+                call_id: Some("Shell:0".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("a\u{c}b\nc".to_string()),
 
                 internal_chat_message_metadata_passthrough: None,
@@ -2517,7 +2533,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "WriteFile:6".to_string(),
+                call_id: Some("WriteFile:6".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("written".to_string()),
 
                 internal_chat_message_metadata_passthrough: None,
@@ -2571,7 +2589,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "Shell:7".to_string(),
+                call_id: Some("Shell:7".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload {
                     body: codex_protocol::models::FunctionCallOutputBody::ContentItems(vec![
                         FunctionCallOutputContentItem::InputText {
@@ -2645,7 +2665,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "Shell:7".to_string(),
+                call_id: Some("Shell:7".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload {
                     body: codex_protocol::models::FunctionCallOutputBody::Text(
                         "<system>ERROR: Command failed with exit code: 1.</system>".to_string(),
@@ -2704,7 +2726,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "ReadMediaFile:1".to_string(),
+                call_id: Some("ReadMediaFile:1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload {
                     body: codex_protocol::models::FunctionCallOutputBody::ContentItems(vec![
                         FunctionCallOutputContentItem::InputText {
@@ -2768,7 +2792,9 @@ mod tests {
         let items = vec![
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "WriteFile:6".to_string(),
+                call_id: Some("WriteFile:6".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("written".to_string()),
 
                 internal_chat_message_metadata_passthrough: None,

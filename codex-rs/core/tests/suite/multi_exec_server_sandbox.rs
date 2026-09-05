@@ -5,7 +5,6 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-use codex_features::Feature;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
@@ -44,15 +43,15 @@ const SECOND_CALL_ID: &str = "write-from-second";
 const EXEC_SERVER_START_TIMEOUT: Duration = Duration::from_secs(30);
 const TURN_COMPLETE_TIMEOUT: Duration = Duration::from_secs(30);
 
-struct ExecServerProcess {
+pub(super) struct ExecServerProcess {
     _codex_home: TempDir,
     child: Child,
     _stdout: BufReader<ChildStdout>,
-    websocket_url: String,
+    pub(super) websocket_url: String,
 }
 
 impl ExecServerProcess {
-    async fn start() -> Result<Self> {
+    pub(super) async fn start() -> Result<Self> {
         let codex_home = TempDir::new()?;
         let mut child = Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
             .args(["exec-server", "--listen", "ws://127.0.0.1:0"])
@@ -108,13 +107,7 @@ async fn two_exec_servers_isolate_workspace_write_roots() -> Result<()> {
     let second_workspace = TempDir::new()?;
 
     let server = start_mock_server().await;
-    let mut builder = test_codex().with_config(|config| {
-        config.use_experimental_unified_exec_tool = true;
-        config
-            .features
-            .enable(Feature::UnifiedExec)
-            .expect("test config should allow unified exec");
-    });
+    let mut builder = test_codex();
     let test = builder.build(&server).await?;
     let environment_manager = test.thread_manager.environment_manager();
     environment_manager.upsert_environment(

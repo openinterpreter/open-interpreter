@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 
+use codex_extension_api::Instructions;
 use codex_extension_api::LoadedUserInstructions;
-use codex_extension_api::UserInstructions;
 use codex_extension_api::UserInstructionsProvider;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
@@ -25,7 +25,7 @@ fn expected(
     warnings: Vec<String>,
 ) -> LoadedUserInstructions {
     LoadedUserInstructions {
-        instructions: Some(UserInstructions {
+        instructions: Some(Instructions {
             text: text.to_string(),
             source: AbsolutePathBuf::try_from(home.path().join(filename))
                 .expect("absolute source path"),

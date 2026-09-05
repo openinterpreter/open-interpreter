@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -27,6 +28,9 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::time::timeout;
+
+use super::analytics::mount_analytics_capture;
+use super::analytics::wait_for_matching_analytics_event;
 
 #[cfg(target_os = "macos")]
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
@@ -109,11 +113,17 @@ async fn exercise_executor_skill(scenario: ExecutorSkillScenario) -> Result<()> 
         } else {
             ("never", "")
         };
+    let analytics_config = if scenario == ExecutorSkillScenario::ExplicitOnly {
+        format!("chatgpt_base_url = \"{}\"", server.uri())
+    } else {
+        String::new()
+    };
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
             r#"
 model = "mock-model"
+{analytics_config}
 approval_policy = "{approval_policy}"
 {sandbox_config}
 model_provider = "mock_provider"
@@ -133,6 +143,9 @@ stream_max_retries = 0
             server.uri()
         ),
     )?;
+    if scenario == ExecutorSkillScenario::ExplicitOnly {
+        mount_analytics_capture(&server, codex_home.path()).await?;
+    }
     let local_skill_dir = codex_home.path().join("skills/local-deploy");
     std::fs::create_dir_all(&local_skill_dir)?;
     std::fs::write(
@@ -157,7 +170,10 @@ stream_max_retries = 0
         file_system
             .create_directory(
                 directory,
-                CreateDirectoryOptions { recursive: true },
+                CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
                 /*sandbox*/ None,
             )
             .await?;
@@ -168,10 +184,9 @@ stream_max_retries = 0
     let reference_path = reference_dir.join("details.md")?;
     let reference_size = match scenario {
         ExecutorSkillScenario::VisibleWithBudgetWarning => 600 * 1024,
-        ExecutorSkillScenario::ExplicitOnly
-        | ExecutorSkillScenario::RestrictedPermittedReference
-        | ExecutorSkillScenario::RestrictedDeniedReference
-        | ExecutorSkillScenario::RestrictedVisible => 40 * 1024,
+        ExecutorSkillScenario::RestrictedPermittedReference
+        | ExecutorSkillScenario::RestrictedDeniedReference => 1024,
+        ExecutorSkillScenario::ExplicitOnly | ExecutorSkillScenario::RestrictedVisible => 40 * 1024,
     };
     let allow_implicit_invocation = matches!(
         scenario,
@@ -182,7 +197,7 @@ stream_max_retries = 0
         file_system.write_file(
             &manifest_path,
             br#"{"name":"demo-plugin"}"#.to_vec(),
-            /*sandbox*/ None,
+            Default::default(), /*sandbox*/ None,
         ),
         file_system.write_file(
             &skill_path,
@@ -190,7 +205,7 @@ stream_max_retries = 0
                 "---\nname: deploy\ndescription: Deploy through the executor.\n---\n\n# Deploy\n\n{SKILL_MARKER}\n\nRead references/details.md.\n"
             )
             .into_bytes(),
-            /*sandbox*/ None,
+            Default::default(), /*sandbox*/ None,
         ),
         file_system.write_file(
             &openai_yaml_path,
@@ -198,12 +213,12 @@ stream_max_retries = 0
                 "policy:\n  allow_implicit_invocation: {allow_implicit_invocation}\n"
             )
             .into_bytes(),
-            /*sandbox*/ None,
+            Default::default(), /*sandbox*/ None,
         ),
         file_system.write_file(
             &reference_path,
             reference_contents.into_bytes(),
-            /*sandbox*/ None,
+            Default::default(), /*sandbox*/ None,
         ),
     )?;
     #[cfg(unix)]
@@ -213,7 +228,10 @@ stream_max_retries = 0
         let external_reference = external_reference_dir.join("details.md");
         std::fs::write(
             &external_reference,
-            format!("DENIED_REFERENCE_MARKER\n{REFERENCE_MARKER}"),
+            format!(
+                "DENIED_REFERENCE_MARKER\n{REFERENCE_MARKER}\n{}",
+                "x".repeat(reference_size)
+            ),
         )?;
         let reference_native_path = reference_path.to_abs_path()?;
         std::fs::remove_file(reference_native_path.as_path())?;
@@ -243,7 +261,10 @@ stream_max_retries = 0
                     file_system
                         .create_directory(
                             &skill_dir,
-                            CreateDirectoryOptions { recursive: true },
+                            CreateDirectoryOptions {
+                                recursive: true,
+                                follow_symlinks: true,
+                            },
                             /*sandbox*/ None,
                         )
                         .await?;
@@ -255,6 +276,7 @@ stream_max_retries = 0
                                 "x".repeat(1_025)
                             )
                             .into_bytes(),
+                            Default::default(),
                             /*sandbox*/ None,
                         )
                         .await?;
@@ -362,6 +384,12 @@ stream_max_retries = 0
     let request_id = app_server
         .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("mock-model".to_string()),
+            config: matches!(
+                scenario,
+                ExecutorSkillScenario::RestrictedPermittedReference
+                    | ExecutorSkillScenario::RestrictedDeniedReference
+            )
+            .then(|| HashMap::from([("tool_output_token_limit".to_string(), json!(250))])),
             selected_capability_roots: Some(vec![SelectedCapabilityRoot {
                 id: "demo-plugin@1".to_string(),
                 location: CapabilityRootLocation::Environment {
@@ -431,7 +459,7 @@ stream_max_retries = 0
             }
         })
         .await??;
-        assert_eq!(warning.thread_id, Some(thread_id));
+        assert_eq!(warning.thread_id, Some(thread_id.clone()));
         assert!(is_skills_budget_warning(&warning.message));
     }
     timeout(
@@ -439,6 +467,17 @@ stream_max_retries = 0
         app_server.read_stream_until_notification_message("turn/completed"),
     )
     .await??;
+    if scenario == ExecutorSkillScenario::ExplicitOnly {
+        for invocation_type in ["explicit", "implicit"] {
+            let event = wait_for_matching_analytics_event(&server, READ_TIMEOUT, |event| {
+                event["event_type"] == "skill_invocation"
+                    && event["event_params"]["invoke_type"] == invocation_type
+            })
+            .await?;
+            assert_eq!(event["event_params"]["plugin_id"], authority_id);
+            assert_eq!(event["event_params"]["skill_scope"], "user");
+        }
+    }
 
     let requests = response_mock.requests();
     let request = &requests[0];
@@ -555,9 +594,46 @@ stream_max_retries = 0
             .function_call_output_text("approved-reference")
             .expect("approved skill reference output");
         assert!(approved_reference_output.contains(REFERENCE_MARKER));
+        let approved_reference: serde_json::Value =
+            serde_json::from_str(&approved_reference_output)?;
+        let cursor = approved_reference["next_cursor"]
+            .as_str()
+            .expect("approved reference should paginate");
+        let expired = responses::mount_sse_sequence(
+            &server,
+            vec![
+                tool_response(
+                    "expired-reference",
+                    "read",
+                    json!({
+                        "package": package,
+                        "resource": reference_resource,
+                        "cursor": cursor,
+                    }),
+                ),
+                responses::sse(vec![responses::ev_completed("resp-expired-done")]),
+            ],
+        )
+        .await;
+        timeout(
+            READ_TIMEOUT,
+            app_server.start_turn_and_wait_for_completion(TurnStartParams {
+                thread_id,
+                input: vec![UserInput::Text {
+                    text: "Continue after the turn-scoped permission expired.".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            }),
+        )
+        .await??;
+        assert_eq!(
+            expired.function_call_output_text("expired-reference"),
+            Some("failed to read skill resource".to_string())
+        );
         return Ok(());
     }
-    let reference_output = serde_json::from_str::<serde_json::Value>(&reference_output_text)?;
+    let mut reference_output = serde_json::from_str::<serde_json::Value>(&reference_output_text)?;
     assert!(
         reference_output["contents"]
             .as_str()
@@ -567,16 +643,130 @@ stream_max_retries = 0
         reference_output["skill_root"],
         json!(skill_dir.inferred_native_path_string())
     );
-    match scenario {
-        ExecutorSkillScenario::VisibleWithBudgetWarning => {
-            assert!(reference_output["next_cursor"].is_string());
+    assert!(reference_output["next_cursor"].is_string());
+
+    if scenario == ExecutorSkillScenario::RestrictedPermittedReference {
+        // 250 tokens gives both byte- and token-based policies a 1200-byte response budget.
+        assert!(reference_output_text.len() <= 1200);
+        let expected_contents = format!("{REFERENCE_MARKER}\n{}", "x".repeat(reference_size));
+        let original_cursor = reference_output["next_cursor"]
+            .as_str()
+            .expect("reference cursor")
+            .to_string();
+        let changed_contents = format!("CHANGED_REFERENCE\n{}", "y".repeat(reference_size));
+        file_system
+            .write_file(
+                &reference_path,
+                changed_contents.clone().into_bytes(),
+                Default::default(),
+                /*sandbox*/ None,
+            )
+            .await?;
+        let mut contents = reference_output["contents"]
+            .as_str()
+            .expect("reference contents")
+            .to_string();
+        while let Some(cursor) = reference_output["next_cursor"].as_str() {
+            let call_id = format!("reference-{}", contents.len());
+            let continuation = responses::mount_sse_sequence(
+                &server,
+                vec![
+                    tool_response(
+                        &call_id,
+                        "read",
+                        json!({
+                            "package": package,
+                            "resource": reference_resource,
+                            "cursor": cursor,
+                        }),
+                    ),
+                    responses::sse(vec![responses::ev_completed(&format!(
+                        "resp-{call_id}-done"
+                    ))]),
+                ],
+            )
+            .await;
+            timeout(
+                READ_TIMEOUT,
+                app_server.start_turn_and_wait_for_completion(TurnStartParams {
+                    thread_id: thread_id.clone(),
+                    input: vec![UserInput::Text {
+                        text: "Continue reading the reference.".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                    ..Default::default()
+                }),
+            )
+            .await??;
+            let output = continuation
+                .function_call_output_text(&call_id)
+                .expect("continued reference output");
+            assert!(output.len() <= 1200);
+            reference_output = serde_json::from_str(&output)?;
+            let page_contents = reference_output["contents"]
+                .as_str()
+                .expect("continued reference contents");
+            assert!(!page_contents.is_empty());
+            assert_eq!(
+                reference_output,
+                json!({
+                    "resource": reference_resource,
+                    "contents": page_contents,
+                    "skill_root": skill_dir.inferred_native_path_string(),
+                    "next_cursor": reference_output["next_cursor"].as_str(),
+                })
+            );
+            contents.push_str(page_contents);
+            assert!(expected_contents.starts_with(&contents));
         }
-        ExecutorSkillScenario::ExplicitOnly
-        | ExecutorSkillScenario::RestrictedPermittedReference
-        | ExecutorSkillScenario::RestrictedDeniedReference
-        | ExecutorSkillScenario::RestrictedVisible => {
-            assert!(reference_output["next_cursor"].is_null());
-        }
+        assert_eq!(contents, expected_contents);
+
+        let restarted = responses::mount_sse_sequence(
+            &server,
+            vec![
+                tool_response(
+                    "fresh-reference",
+                    "read",
+                    json!({"package": package, "resource": reference_resource}),
+                ),
+                tool_response(
+                    "evicted-reference",
+                    "read",
+                    json!({
+                        "package": package,
+                        "resource": reference_resource,
+                        "cursor": original_cursor,
+                    }),
+                ),
+                responses::sse(vec![responses::ev_completed("resp-restarted-done")]),
+            ],
+        )
+        .await;
+        timeout(
+            READ_TIMEOUT,
+            app_server.start_turn_and_wait_for_completion(TurnStartParams {
+                thread_id,
+                input: vec![UserInput::Text {
+                    text: "Read the changed reference, then try its old cursor.".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            }),
+        )
+        .await??;
+        let fresh_output = restarted
+            .function_call_output_text("fresh-reference")
+            .expect("fresh reference output");
+        assert!(fresh_output.len() <= 1200);
+        let fresh: serde_json::Value = serde_json::from_str(&fresh_output)?;
+        assert!(fresh["contents"].as_str().is_some_and(|page| {
+            page.starts_with("CHANGED_REFERENCE") && changed_contents.starts_with(page)
+        }));
+        assert!(fresh["next_cursor"].is_string());
+        assert_eq!(
+            restarted.function_call_output_text("evicted-reference"),
+            Some("skills.read cursor is stale; restart from the first page".to_string())
+        );
     }
 
     Ok(())

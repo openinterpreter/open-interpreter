@@ -36,6 +36,7 @@ use codex_tools::ToolName;
 use codex_tools::ToolOutput;
 use codex_tools::ToolPayload;
 use codex_tools::ToolSpec;
+use codex_utils_path_uri::LegacyAppPathString;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::apps_test_server::AppsTestToolLoading;
 use core_test_support::apps_test_server::CALENDAR_CREATE_EVENT_MCP_APP_RESOURCE_URI;
@@ -941,12 +942,12 @@ impl ToolContributor for DeferredCustomTool {
         &self,
         _session_store: &ExtensionData,
         _thread_store: &ExtensionData,
-    ) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
+    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
         vec![Arc::new(Self)]
     }
 }
 
-impl ToolExecutor<ToolCall> for DeferredCustomTool {
+impl<'call> ToolExecutor<ToolCall<'call>> for DeferredCustomTool {
     fn tool_name(&self) -> ToolName {
         ToolName::plain("custom_echo")
     }
@@ -968,7 +969,10 @@ impl ToolExecutor<ToolCall> for DeferredCustomTool {
         ToolExposure::Deferred
     }
 
-    fn handle(&self, call: ToolCall) -> ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, call: ToolCall<'call>) -> ToolExecutorFuture<'a>
+    where
+        'call: 'a,
+    {
         Box::pin(async move {
             let ToolPayload::Custom { input } = call.payload else {
                 return Err(FunctionCallError::Fatal(
@@ -1317,7 +1321,7 @@ async fn tool_search_indexes_only_enabled_non_app_mcp_tools() -> Result<()> {
                         args: Vec::new(),
                         env: None,
                         env_vars: Vec::new(),
-                        cwd: None,
+                        cwd: Some(LegacyAppPathString::from_path(config.cwd.as_path())),
                     },
                     environment_id,
                     enabled: true,
@@ -1450,7 +1454,7 @@ async fn tool_search_surfaced_mcp_tool_errors_are_returned_to_model() -> Result<
                         args: Vec::new(),
                         env: None,
                         env_vars: Vec::new(),
-                        cwd: None,
+                        cwd: Some(LegacyAppPathString::from_path(config.cwd.as_path())),
                     },
                     environment_id,
                     enabled: true,
@@ -1599,7 +1603,7 @@ async fn tool_search_uses_non_app_mcp_server_instructions_as_namespace_descripti
                         args: Vec::new(),
                         env: None,
                         env_vars: Vec::new(),
-                        cwd: None,
+                        cwd: Some(LegacyAppPathString::from_path(config.cwd.as_path())),
                     },
                     environment_id,
                     enabled: true,

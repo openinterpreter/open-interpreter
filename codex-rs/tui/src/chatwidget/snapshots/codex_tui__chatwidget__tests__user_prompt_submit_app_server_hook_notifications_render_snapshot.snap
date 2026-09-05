@@ -2,5 +2,6 @@
 source: tui/src/chatwidget/tests/status_and_layout.rs
 expression: combined
 ---
-• UserPromptSubmit (stopped) says: go-workflow must start from PlanMode
-  stop: prompt blocked
+• Hook stopped
+  └ go-workflow must start from PlanMode
+  └ prompt blocked

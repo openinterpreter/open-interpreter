@@ -164,6 +164,45 @@ fn truncates_across_multiple_under_limit_texts_and_reports_omitted() {
 }
 
 #[test]
+fn truncate_function_output_items_with_policy_discards_empty_text() {
+    let mut items = vec![
+        FunctionCallOutputContentItem::InputText {
+            text: String::new(),
+        };
+        16_384
+    ];
+    for policy in [TruncationPolicy::Bytes(0), TruncationPolicy::Tokens(1)] {
+        assert_eq!(
+            truncate_function_output_items_with_policy(&items, policy, |_| 0),
+            Vec::new()
+        );
+    }
+
+    let content = vec![
+        FunctionCallOutputContentItem::InputText {
+            text: "caption".to_string(),
+        },
+        FunctionCallOutputContentItem::InputImage {
+            image_url: "img:one".to_string(),
+            detail: Some(DEFAULT_IMAGE_DETAIL),
+        },
+        FunctionCallOutputContentItem::InputAudio {
+            audio_url: "audio:one".to_string(),
+        },
+        FunctionCallOutputContentItem::EncryptedContent {
+            encrypted_content: "enc_opaque".to_string(),
+        },
+    ];
+    items.extend(content.clone());
+    for policy in [TruncationPolicy::Bytes(16), TruncationPolicy::Tokens(4)] {
+        assert_eq!(
+            truncate_function_output_items_with_policy(&items, policy, |_| 1),
+            content
+        );
+    }
+}
+
+#[test]
 fn formatted_truncate_text_content_items_with_policy_returns_original_under_limit() {
     let items = vec![
         FunctionCallOutputContentItem::InputText {

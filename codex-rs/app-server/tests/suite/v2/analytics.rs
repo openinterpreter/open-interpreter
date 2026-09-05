@@ -1,19 +1,26 @@
 use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
 use app_test_support::DEFAULT_CLIENT_NAME;
+use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence;
-use app_test_support::create_shell_command_sse_response;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
 use app_test_support::write_mock_responses_config_toml_with_chatgpt_base_url;
+use codex_app_server_protocol::ApprovalsReviewer;
+use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxPolicy;
+use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadReadParams;
+use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
+use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_config::types::OtelExporterKind;
@@ -21,6 +28,7 @@ use codex_config::types::OtelHttpProtocol;
 use codex_core::config::ConfigBuilder;
 use codex_core_plugins::loader::curated_plugin_cache_version;
 use codex_core_plugins::store::PluginStore;
+use codex_features::Feature;
 use codex_plugin::PluginId;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
@@ -40,8 +48,389 @@ use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+use wiremock::matchers::path_regex;
 
 const SERVICE_VERSION: &str = "0.0.0-test";
+
+#[tokio::test]
+async fn guardian_review_turns_and_tools_reach_analytics() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    const PRIVATE: &str = "guardian-private-content";
+    const READ_TIMEOUT: Duration = Duration::from_secs(60);
+    let server = responses::start_mock_server().await;
+    let codex_home = TempDir::new()?;
+    mount_analytics_capture(&server, codex_home.path()).await?;
+    MockResponsesConfig::new(&server.uri())
+        .with_root_config(&format!("chatgpt_base_url = \"{}\"", server.uri()))
+        .with_provider_config("supports_websockets = false")
+        .enable_feature(Feature::GuardianApproval)
+        .disable_feature(Feature::Apps)
+        .write(codex_home.path())?;
+    let parent_tool = |id: &str| {
+        responses::sse_response(responses::sse(vec![
+            responses::ev_response_created(id),
+            responses::ev_function_call(
+                id,
+                "exec_command",
+                &json!({
+                    "cmd": format!("echo {id} > {id}.txt"),
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "Exercise Guardian analytics",
+                })
+                .to_string(),
+            ),
+            responses::ev_completed(id),
+        ]))
+    };
+    let requests = responses::mount_response_sequence(
+        &server,
+        vec![
+            parent_tool("parent-first"),
+            responses::sse_response(responses::sse(vec![
+                responses::ev_response_created("guardian-first"),
+                responses::ev_web_search_call_added_partial("guardian-search", "in_progress"),
+                responses::ev_web_search_call_done("guardian-search", "completed", PRIVATE),
+                responses::ev_reasoning_item("guardian-reasoning", &[PRIVATE], &[PRIVATE]),
+                responses::ev_assistant_message(
+                    "guardian-answer",
+                    &json!({"outcome": "deny", "rationale": PRIVATE}).to_string(),
+                ),
+                responses::ev_completed("guardian-first"),
+            ])),
+            parent_tool("parent-second"),
+            responses::sse_response(responses::sse_failed(
+                "guardian-failed",
+                "invalid_prompt",
+                PRIVATE,
+            )),
+            parent_tool("parent-third"),
+            responses::sse_response(responses::sse(vec![responses::ev_response_created(
+                "guardian-pending",
+            )]))
+            .set_delay(READ_TIMEOUT),
+        ],
+    )
+    .await;
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_managed_config()
+        // Basic Guardian command approvals require host-native paths.
+        .without_auto_env()
+        .build_initialized_with_timeout(READ_TIMEOUT)
+        .await?;
+    let ThreadStartResponse { thread, .. } = app_server
+        .request(|request_id| ClientRequest::ThreadStart {
+            request_id,
+            params: ThreadStartParams {
+                approval_policy: Some(AskForApproval::OnRequest),
+                approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                ..Default::default()
+            },
+        })
+        .await?;
+    let request_id = app_server
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "Review three commands".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let TurnStartResponse { turn } =
+        timeout(READ_TIMEOUT, app_server.read_response(request_id)).await??;
+    let reviews = timeout(READ_TIMEOUT, async {
+        loop {
+            let reviews = requests
+                .requests()
+                .into_iter()
+                .map(|request| request.body_json()["client_metadata"].clone())
+                .filter(|metadata| metadata["x-openai-subagent"] == "guardian")
+                .collect::<Vec<_>>();
+            if reviews.len() == 3 {
+                break reviews;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await?;
+    app_server
+        .interrupt_turn_and_wait_for_aborted(thread.id.clone(), turn.id, READ_TIMEOUT)
+        .await?;
+    wait_for_matching_analytics_event(&server, READ_TIMEOUT, |event| {
+        event["event_type"] == "codex_turn_event"
+            && event["event_params"]["turn_id"] == reviews[2]["turn_id"]
+    })
+    .await?;
+    timeout(READ_TIMEOUT, app_server.shutdown_gracefully()).await??;
+    let events = captured_analytics_events(&server).await;
+    assert!(!serde_json::to_string(&events)?.contains(PRIVATE));
+    let children = events
+        .iter()
+        .filter(|event| event["event_params"]["subagent_source"] == "guardian")
+        .collect::<Vec<_>>();
+    for event in &children {
+        let params = &event["event_params"];
+        assert_eq!(
+            json!([
+                params["thread_id"],
+                params["session_id"],
+                params["parent_thread_id"],
+                params["thread_source"]
+            ]),
+            json!([
+                reviews[0]["thread_id"],
+                thread.session_id,
+                thread.id,
+                "guardian_review"
+            ])
+        );
+    }
+    let turns = children
+        .iter()
+        .filter(|event| event["event_type"] == "codex_turn_event")
+        .map(|event| {
+            let params = &event["event_params"];
+            let started_at = params["started_at"].as_u64().expect("turn start time");
+            let completed_at = params["completed_at"]
+                .as_u64()
+                .expect("turn completion time");
+            assert!(started_at > 0 && completed_at >= started_at);
+            assert!(params["duration_ms"].is_u64());
+            assert_eq!(params["guardian_v2_enabled"], false);
+            json!([
+                params["turn_id"],
+                params["status"],
+                params["turn_error"],
+                params["total_tool_call_count"],
+                params["web_search_count"]
+            ])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        turns,
+        vec![
+            json!([reviews[0]["turn_id"], "completed", null, 1, 1]),
+            json!([reviews[1]["turn_id"], "failed", "other", 0, 0]),
+            json!([reviews[2]["turn_id"], "interrupted", null, 0, 0]),
+        ]
+    );
+    let tools = children
+        .iter()
+        .filter(|event| event["event_type"] == "codex_web_search_event")
+        .collect::<Vec<_>>();
+    let [tool] = tools.as_slice() else {
+        anyhow::bail!(
+            "expected one Guardian web search event, got {}",
+            tools.len()
+        );
+    };
+    let params = &tool["event_params"];
+    let started_at = params["started_at_ms"].as_u64().expect("tool start time");
+    let completed_at = params["completed_at_ms"]
+        .as_u64()
+        .expect("tool completion time");
+    assert!(started_at > 0 && completed_at >= started_at);
+    assert_eq!(params["duration_ms"], completed_at - started_at);
+    assert_eq!(
+        json!([
+            params["turn_id"],
+            params["item_id"],
+            params["terminal_status"]
+        ]),
+        json!([reviews[0]["turn_id"], "guardian-search", "completed"])
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_agent_v2_tools_emit_collaborator_analytics() -> Result<()> {
+    const PARENT_PROMPT: &str = "exercise collaborator analytics";
+    const READ_TIMEOUT: Duration = Duration::from_secs(30);
+    let calls = [
+        (
+            "spawn_agent",
+            json!({"task_name": "worker", "message": "PRIVATE_CHILD", "fork_turns": "none"}),
+        ),
+        (
+            "send_message",
+            json!({"target": "worker", "message": "PRIVATE_MESSAGE"}),
+        ),
+        (
+            "followup_task",
+            json!({"target": "worker", "message": "PRIVATE_FOLLOWUP"}),
+        ),
+        ("interrupt_agent", json!({"target": "worker"})),
+        ("list_agents", json!({})),
+        (
+            "send_message",
+            json!({"target": "missing", "message": "PRIVATE_MESSAGE"}),
+        ),
+        (
+            "followup_task",
+            json!({"target": "/root", "message": "PRIVATE_FOLLOWUP"}),
+        ),
+        ("interrupt_agent", json!({"target": "/root"})),
+        ("list_agents", json!({"unexpected": true})),
+        ("send_message", json!({})),
+    ];
+    let server = responses::start_mock_server().await;
+    for (index, (tool, args)) in calls.iter().enumerate() {
+        let response_id = format!("parent-response-{index}");
+        responses::mount_sse_once_match(
+            &server,
+            |request: &wiremock::Request| {
+                String::from_utf8_lossy(&request.body).contains(PARENT_PROMPT)
+            },
+            responses::sse(vec![
+                responses::ev_response_created(&response_id),
+                responses::ev_function_call_with_namespace(
+                    &format!("call-{index}"),
+                    "collaboration",
+                    tool,
+                    &args.to_string(),
+                ),
+                responses::ev_completed(&response_id),
+            ]),
+        )
+        .await;
+    }
+    // Child turns and the final parent request only need an ordinary completion.
+    Mock::given(method("POST"))
+        .and(path_regex(".*/responses$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(responses::sse(vec![responses::ev_completed(
+                    "response-done",
+                )])),
+        )
+        .with_priority(10)
+        .mount(&server)
+        .await;
+
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .enable_feature(Feature::MultiAgentV2)
+        .with_root_config(&format!("chatgpt_base_url = \"{}\"", server.uri()))
+        .write(codex_home.path())?;
+    mount_analytics_capture(&server, codex_home.path()).await?;
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_managed_config()
+        .build_initialized()
+        .await?;
+    let thread = app_server
+        .start_thread(ThreadStartParams::default())
+        .await?
+        .thread;
+    let completed = app_server
+        .start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: PARENT_PROMPT.to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let read: ThreadReadResponse = app_server
+        .request(|request_id| ClientRequest::ThreadRead {
+            request_id,
+            params: ThreadReadParams {
+                thread_id: thread.id.clone(),
+                include_turns: true,
+            },
+        })
+        .await?;
+    let items = &read
+        .thread
+        .turns
+        .iter()
+        .find(|turn| turn.id == completed.turn.id)
+        .expect("completed parent turn should be readable")
+        .items;
+    let child_thread_id = items
+        .iter()
+        .find_map(|item| match item {
+            ThreadItem::SubAgentActivity {
+                id,
+                agent_thread_id,
+                ..
+            } if id == "call-0" => Some(agent_thread_id.clone()),
+            _ => None,
+        })
+        .expect("spawn should retain its public activity item");
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, ThreadItem::CollabAgentToolCall { .. }))
+    );
+    let activity_ids = items
+        .iter()
+        .filter_map(|item| match item {
+            ThreadItem::SubAgentActivity { id, .. } if id.starts_with("call-") => Some(id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(activity_ids, vec!["call-0", "call-1", "call-2", "call-3"]);
+
+    for (index, (tool, _)) in calls.iter().enumerate() {
+        let event = wait_for_matching_analytics_event(&server, READ_TIMEOUT, |event| {
+            event["event_type"] == "codex_collab_agent_tool_call_event"
+                && event["event_params"]["item_id"] == format!("call-{index}")
+        })
+        .await?;
+        let params = &event["event_params"];
+        let receivers = match index {
+            0..=3 => vec![child_thread_id.clone()],
+            6 | 7 => vec![thread.id.clone()],
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            json!({
+                "tool": params["tool_name"],
+                "sender": params["sender_thread_id"],
+                "receivers": params["receiver_thread_ids"],
+                "receiverCount": params["receiver_thread_count"],
+                "turn": params["turn_id"],
+                "status": params["terminal_status"],
+                "origin": params["originating_response_id"],
+                "failure": params["failure_kind"],
+                "hasDuration": params["execution_duration_ms"].is_u64(),
+            }),
+            json!({
+                "tool": tool,
+                "sender": thread.id,
+                "receivers": receivers,
+                "receiverCount": receivers.len(),
+                "turn": completed.turn.id,
+                "status": if index < 5 { "completed" } else { "failed" },
+                "origin": format!("parent-response-{index}"),
+                "failure": if index < 5 { None } else { Some("tool_error") },
+                "hasDuration": true,
+            })
+        );
+        assert_eq!(params["duration_ms"], params["execution_duration_ms"]);
+        assert!(!event.to_string().contains("PRIVATE_"));
+    }
+    let turn_event = wait_for_matching_analytics_event(&server, READ_TIMEOUT, |event| {
+        event["event_type"] == "codex_turn_event"
+            && event["event_params"]["turn_id"] == completed.turn.id
+    })
+    .await?;
+    assert_eq!(
+        json!({
+            "total": turn_event["event_params"]["total_tool_call_count"],
+            "subagent": turn_event["event_params"]["subagent_tool_call_count"],
+            "dynamic": turn_event["event_params"]["dynamic_tool_call_count"],
+        }),
+        json!({"total": calls.len(), "subagent": calls.len(), "dynamic": 0})
+    );
+
+    Ok(())
+}
 
 fn set_metrics_exporter(config: &mut codex_core::config::Config) {
     config.otel.metrics_exporter = OtelExporterKind::OtlpHttp {
@@ -118,6 +507,23 @@ pub(crate) async fn mount_analytics_capture(server: &MockServer, codex_home: &Pa
     )?;
 
     Ok(())
+}
+
+pub(crate) async fn captured_analytics_events(server: &MockServer) -> Vec<Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|request| request.url.path() == "/codex/analytics-events/events")
+        .flat_map(|request| {
+            let payload: Value = serde_json::from_slice(&request.body).expect("analytics payload");
+            payload["events"]
+                .as_array()
+                .expect("analytics events")
+                .clone()
+        })
+        .collect()
 }
 
 pub(crate) async fn wait_for_analytics_payload(
@@ -256,12 +662,6 @@ pub(crate) fn assert_basic_thread_initialized_event(
 const METRICS_PLUGIN_ID: &str = "sample@openai-curated";
 const TEST_CURATED_PLUGIN_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
-#[derive(Clone, Copy)]
-enum PluginMetricsRuntime {
-    Classic,
-    Unified { remote: bool, background: bool },
-}
-
 fn write_curated_metrics_plugin(codex_home: &Path) -> Result<PathBuf> {
     let plugin_id = PluginId::parse(METRICS_PLUGIN_ID)?;
     let plugin_root = PluginStore::new(codex_home.to_path_buf()).plugin_root(
@@ -314,7 +714,7 @@ printf '%s' '{"version":1,"measurements":[{"name":"findings","value":3,"dimensio
     Ok(script_path.into_path_buf())
 }
 
-async fn assert_plugin_measurement_analytics(runtime: PluginMetricsRuntime) -> Result<()> {
+async fn assert_plugin_measurement_analytics(remote: bool, background: bool) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_remote!(
         Ok(()),
@@ -324,11 +724,6 @@ async fn assert_plugin_measurement_analytics(runtime: PluginMetricsRuntime) -> R
 
     let codex_home = TempDir::new()?;
     let script_path = write_curated_metrics_plugin(codex_home.path())?.canonicalize()?;
-    let (remote, background) = match runtime {
-        PluginMetricsRuntime::Classic => (false, false),
-        PluginMetricsRuntime::Unified { remote, background } => (remote, background),
-    };
-    let unified_exec = matches!(runtime, PluginMetricsRuntime::Unified { .. });
     let mut command = vec![
         "/bin/sh".to_string(),
         script_path.to_string_lossy().into_owned(),
@@ -337,22 +732,15 @@ async fn assert_plugin_measurement_analytics(runtime: PluginMetricsRuntime) -> R
         command.push("1.0".to_string());
     }
     let call_id = "curated-plugin-metrics";
-    let command_response = match runtime {
-        PluginMetricsRuntime::Classic => {
-            create_shell_command_sse_response(command, /*workdir*/ None, Some(5_000), call_id)?
-        }
-        PluginMetricsRuntime::Unified { .. } => {
-            let arguments = serde_json::to_string(&json!({
-                "cmd": shlex::try_join(command.iter().map(String::as_str))?,
-                "yield_time_ms": if background { 10 } else { 1_000 },
-            }))?;
-            responses::sse(vec![
-                responses::ev_response_created("resp-1"),
-                responses::ev_function_call(call_id, "exec_command", &arguments),
-                responses::ev_completed("resp-1"),
-            ])
-        }
-    };
+    let arguments = serde_json::to_string(&json!({
+        "cmd": shlex::try_join(command.iter().map(String::as_str))?,
+        "yield_time_ms": if background { 10 } else { 1_000 },
+    }))?;
+    let command_response = responses::sse(vec![
+        responses::ev_response_created("resp-1"),
+        responses::ev_function_call(call_id, "exec_command", &arguments),
+        responses::ev_completed("resp-1"),
+    ]);
     let final_response = create_final_assistant_message_sse_response("done")?;
     let server =
         create_mock_responses_server_sequence(vec![command_response, final_response]).await;
@@ -372,7 +760,7 @@ async fn assert_plugin_measurement_analytics(runtime: PluginMetricsRuntime) -> R
 [features]
 plugins = true
 remote_plugin = false
-unified_exec = {unified_exec}
+unified_exec = true
 shell_zsh_fork = false
 unified_exec_zsh_fork = false
 
@@ -578,48 +966,26 @@ enabled = true
 }
 
 #[cfg_attr(windows, ignore = "plugin metrics fixture is Unix-only")]
-#[tokio::test]
-async fn classic_plugin_script_emits_measurement_analytics() -> Result<()> {
-    assert_plugin_measurement_analytics(PluginMetricsRuntime::Classic).await
-}
-
-#[cfg_attr(windows, ignore = "plugin metrics fixture is Unix-only")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_plugin_script_emits_measurement_analytics() -> Result<()> {
-    assert_plugin_measurement_analytics(PluginMetricsRuntime::Unified {
-        remote: false,
-        background: false,
-    })
-    .await
+    assert_plugin_measurement_analytics(/*remote*/ false, /*background*/ false).await
 }
 
 #[cfg_attr(windows, ignore = "plugin metrics fixture is Unix-only")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_unified_plugin_script_emits_measurement_analytics() -> Result<()> {
-    assert_plugin_measurement_analytics(PluginMetricsRuntime::Unified {
-        remote: true,
-        background: false,
-    })
-    .await
+    assert_plugin_measurement_analytics(/*remote*/ true, /*background*/ false).await
 }
 
 #[cfg_attr(windows, ignore = "plugin metrics fixture is Unix-only")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_background_plugin_script_emits_measurements_after_turn_completion() -> Result<()> {
-    assert_plugin_measurement_analytics(PluginMetricsRuntime::Unified {
-        remote: false,
-        background: true,
-    })
-    .await
+    assert_plugin_measurement_analytics(/*remote*/ false, /*background*/ true).await
 }
 
 #[cfg_attr(windows, ignore = "plugin metrics fixture is Unix-only")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_unified_background_plugin_script_emits_measurements_after_turn_completion()
 -> Result<()> {
-    assert_plugin_measurement_analytics(PluginMetricsRuntime::Unified {
-        remote: true,
-        background: true,
-    })
-    .await
+    assert_plugin_measurement_analytics(/*remote*/ true, /*background*/ true).await
 }

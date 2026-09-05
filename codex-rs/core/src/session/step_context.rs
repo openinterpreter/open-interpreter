@@ -1,36 +1,23 @@
 use std::sync::Arc;
 
 use crate::agents_md::LoadedAgentsMd;
+use crate::config::TokenBudgetConfig;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::session::step_settings::ResolvedStepSettings;
 use crate::session::turn_context::TurnContext;
 use crate::tools::router::ToolRouter;
 use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
 use codex_exec_server::ResolvedSelectedCapabilityRoot;
 use codex_mcp::McpBinding;
 use codex_otel::SessionTelemetry;
-use codex_protocol::config_types::ApprovalsReviewer;
-use codex_protocol::config_types::ReasoningSummary;
-use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::openai_models::ReasoningEffort;
-use codex_protocol::protocol::AskForApproval;
 
 /// Request-scoped state that may change between model sampling requests.
 pub(crate) struct StepContext {
     pub(crate) turn: Arc<TurnContext>,
-    /// Concrete model and capabilities used by this sampling request.
-    pub(crate) model_info: Arc<ModelInfo>,
-    /// Reasoning effort selected for this sampling request.
-    pub(crate) reasoning_effort: Option<ReasoningEffort>,
-    /// Reasoning summary resolved for this sampling request.
-    pub(crate) reasoning_summary: ReasoningSummary,
-    /// Effective service tier supported by this sampling request's model.
-    pub(crate) service_tier: Option<String>,
-    /// Effective approval policy used by this sampling request's tool actions.
-    /// Model-specific Guardian requirements can change this during a model switch.
-    pub(crate) approval_policy: AskForApproval,
-    /// Effective reviewer selected for this sampling request's approvals.
-    /// Model-specific Guardian requirements can change this during a model switch.
-    pub(crate) approvals_reviewer: ApprovalsReviewer,
+    /// One immutable settings version captured before request preparation.
+    pub(crate) settings: Arc<ResolvedStepSettings>,
+    /// Frozen turn preferences resolved against this step's captured model.
+    pub(crate) token_budget: Option<TokenBudgetConfig>,
     /// Telemetry context tagged with this sampling request's model.
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) environments: TurnEnvironmentSnapshot,

@@ -3,7 +3,6 @@
 use anyhow::Context;
 use anyhow::Result;
 use codex_exec_server::REMOTE_ENVIRONMENT_ID;
-use codex_features::Feature;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
@@ -12,10 +11,11 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandStatus;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnEnvironmentSelections;
-use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
+use codex_utils_path_uri::PathUri;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
@@ -23,11 +23,10 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
+use core_test_support::test_codex::TurnInputRequest;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
-use core_test_support::test_codex::TurnInputRequest;
 use core_test_support::wait_for_event;
-use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use wine_exec_server_test_support::WineExecServer;
@@ -39,7 +38,7 @@ async fn windows_exec_server_runs_with_native_shell_and_cwd() -> Result<()> {
     const VERIFY_CALL_ID: &str = "wine-verify-patch";
     const PATCH_FILE: &str = "codex-apply-patch-smoke.txt";
     const COMMAND: &str = r#"if ((Get-Location).Path -ne 'C:\windows') { exit 1 }"#;
-    const VERIFY_COMMAND: &str = r#"$path = Join-Path (Get-Location) 'codex-apply-patch-smoke.txt'; if (-not (Test-Path $path)) { exit 1 }; if ([IO.File]::ReadAllText($path) -ne "patched through unified exec`n") { exit 2 }; Remove-Item $path; Write-Output 'PATCH_VERIFIED'"#;
+    const VERIFY_COMMAND: &str = r#"$path = Join-Path (Get-Location) 'codex-apply-patch-smoke.txt'; if (-not (Test-Path $path)) { exit 1 }; if ([IO.File]::ReadAllText($path) -ne "patched through unified exec`n") { exit 2 }; Remove-Item $path"#;
 
     WineExecServer
         .scope(|exec_server_url, _wine_prefix| async move {
@@ -97,14 +96,7 @@ async fn windows_exec_server_runs_with_native_shell_and_cwd() -> Result<()> {
 
             let mut builder = test_codex()
                 .with_model("gpt-5.2")
-                .with_exec_server_url(exec_server_url)
-                .with_config(|config| {
-                    config.use_experimental_unified_exec_tool = true;
-                    config
-                        .features
-                        .enable(Feature::UnifiedExec)
-                        .expect("test config should allow feature update");
-                });
+                .with_exec_server_url(exec_server_url);
             let test = builder.build(&server).await?;
             let (sandbox_policy, permission_profile) =
                 turn_permission_fields(PermissionProfile::Disabled, test.config.cwd.as_path());
@@ -205,13 +197,6 @@ async fn windows_exec_server_runs_with_native_shell_and_cwd() -> Result<()> {
                 verify_success != Some(false),
                 "verification command failed: {verify_output:?}"
             );
-            anyhow::ensure!(
-                verify_output
-                    .as_deref()
-                    .is_some_and(|output| output.contains("PATCH_VERIFIED")),
-                "verification command did not confirm the patched file: {verify_output:?}"
-            );
-
             let (_output, success) = request
                 .function_call_output_content_and_success(CALL_ID)
                 .context("command output should be present")?;

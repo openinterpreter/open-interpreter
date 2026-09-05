@@ -5,10 +5,16 @@ use codex_analytics::GuardianReviewFailureReason;
 use codex_analytics::GuardianReviewTerminalStatus;
 use codex_analytics::GuardianReviewTrackContext;
 use codex_analytics::GuardianReviewedAction;
+use codex_analytics::GuardianV2Event;
+use codex_analytics::GuardianV2EventKind;
+use codex_async_utils::THREAD_STACK_SIZE_BYTES;
 use codex_core_plugins::PluginCommandAttribution;
+use codex_extension_api::GuardianV2Enabled;
 use codex_extension_api::ThreadIdleCause;
+use codex_features::Feature;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
+use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
@@ -17,16 +23,21 @@ use codex_protocol::protocol::GuardianAssessmentEvent;
 use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::GuardianRiskLevel;
 use codex_protocol::protocol::GuardianUserAuthorization;
+use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::ReviewDecision;
+use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::WarningEvent;
+use futures::future::BoxFuture;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio::time::sleep_until;
 use tokio_util::sync::CancellationToken;
 
+use crate::context::GuardianNodeReplPolicy;
+use crate::context::GuardianReviewEvidence;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::turn_timing::now_unix_timestamp_ms;
@@ -42,6 +53,7 @@ use super::GuardianAssessmentOutcome;
 use super::GuardianRejectionCircuitBreakerAction;
 use super::GuardianRejectionCircuitBreakerPolicy;
 use super::GuardianReviewContext;
+use super::approval_request::format_guardian_action_pretty;
 use super::approval_request::guardian_approval_request_to_json;
 use super::approval_request::guardian_assessment_action;
 use super::approval_request::guardian_request_target_item_id;
@@ -75,8 +87,7 @@ fn plugin_attribution_for_guardian_request(
     request: &GuardianApprovalRequest,
 ) -> Option<PluginCommandAttribution> {
     match request {
-        GuardianApprovalRequest::Shell { command, cwd, .. }
-        | GuardianApprovalRequest::ExecCommand { command, cwd, .. } => {
+        GuardianApprovalRequest::ExecCommand { command, cwd, .. } => {
             turn.plugin_attribution_for_command(command, cwd)
         }
         #[cfg(unix)]
@@ -100,8 +111,14 @@ pub(crate) fn new_guardian_review_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-pub(crate) fn guardian_timeout_message() -> String {
-    GUARDIAN_TIMEOUT_INSTRUCTIONS.to_string()
+pub(crate) fn guardian_timeout_message(model_info: &ModelInfo) -> String {
+    model_info
+        .model_messages
+        .as_ref()
+        .and_then(|messages| messages.auto_review.as_ref())
+        .and_then(|messages| messages.timeout_instructions.as_deref())
+        .unwrap_or(GUARDIAN_TIMEOUT_INSTRUCTIONS)
+        .to_string()
 }
 
 #[derive(Debug)]
@@ -199,14 +216,12 @@ pub(crate) fn routes_approval_policy_to_guardian(
     ) && approvals_reviewer == ApprovalsReviewer::AutoReview
 }
 
-pub(crate) fn is_guardian_reviewer_source(
-    session_source: &codex_protocol::protocol::SessionSource,
-) -> bool {
-    matches!(
-        session_source,
-        codex_protocol::protocol::SessionSource::SubAgent(SubAgentSource::Other(label))
-            if label == GUARDIAN_REVIEWER_NAME
-    )
+pub(crate) fn is_basic_session_source(session_source: &SessionSource) -> bool {
+    match session_source {
+        SessionSource::SubAgent(SubAgentSource::Other(label)) => label == GUARDIAN_REVIEWER_NAME,
+        SessionSource::Internal(InternalSessionSource::Guardian) => true,
+        _ => false,
+    }
 }
 
 fn track_guardian_review(
@@ -240,7 +255,7 @@ async fn record_guardian_non_denial(session: &Arc<Session>, turn_id: &str) {
 }
 
 async fn record_guardian_denial(session: &Arc<Session>, turn: &Arc<TurnContext>, turn_id: &str) {
-    let policy = if turn.model_info.model_specialty.as_deref() == Some(MODEL_SPECIALTY_CYBER) {
+    let policy = if turn.model_info().model_specialty.as_deref() == Some(MODEL_SPECIALTY_CYBER) {
         GuardianRejectionCircuitBreakerPolicy::CyberModel
     } else {
         GuardianRejectionCircuitBreakerPolicy::Standard
@@ -300,7 +315,7 @@ pub(crate) async fn record_guardian_denial_for_test(
     record_guardian_denial(session, turn, turn_id).await;
 }
 
-/// Runs Guardian unless an installed extension explicitly claims the review.
+/// Runs Guardian unless Full Access or an installed extension resolves the review.
 /// Guardian timeouts, review-session failures, and parse failures all block
 /// execution, with timeouts surfaced separately from explicit denials.
 async fn run_guardian_review(
@@ -312,12 +327,39 @@ async fn run_guardian_review(
     options: GuardianReviewOptions,
 ) -> ReviewDecision {
     let turn = Arc::clone(context.turn());
-    if !turn
+    if context.environments().has_full_access(
+        context.approval_policy,
+        &turn.config.permissions.effective_permission_profile(),
+    ) {
+        return if options
+            .external_cancel
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            ReviewDecision::Abort
+        } else {
+            ReviewDecision::Approved
+        };
+    }
+    let requires_synchronous_review = options.require_synchronous_review
+        || reasons.retry.is_some()
+        || matches!(
+            &request,
+            GuardianApprovalRequest::ExecCommand {
+                sandbox_permissions,
+                ..
+            } if sandbox_permissions.requires_escalated_permissions()
+        );
+    // Guardian V2 may satisfy ordinary reviews, including required-model reviews, but broader
+    // permission requests, retries, and elicitations requiring synchronous review must not use
+    // extension fast approval.
+    if (!turn
         .config
         .config_layer_stack
         .requirements()
-        .auto_review_required_for_model(&turn.model_info.slug)
-        && reasons.retry.is_none()
+        .auto_review_required_for_model(&turn.model_info().slug)
+        || turn.config.features.enabled(Feature::GuardianV2))
+        && !requires_synchronous_review
         && options
             .external_cancel
             .as_ref()
@@ -326,14 +368,37 @@ async fn run_guardian_review(
         && let Some(decision) = session
             .services
             .extensions
-            .approval_review(
+            .fast_approval_decision(
                 &session.services.session_extension_data,
                 &session.services.thread_extension_data,
                 &action.to_string(),
+                Some(crate::session::extension_metrics::from_session_telemetry(
+                    turn.session_telemetry.clone(),
+                )),
             )
             .await
     {
         if decision == ReviewDecision::Approved {
+            if session
+                .services
+                .thread_extension_data
+                .get::<GuardianV2Enabled>()
+                .is_some()
+            {
+                session
+                    .services
+                    .analytics_events_client
+                    .track_guardian_v2_event(GuardianV2Event {
+                        thread_id: session.thread_id.to_string(),
+                        turn_id: guardian_request_turn_id(&request, &turn.sub_id).to_owned(),
+                        item_id: guardian_request_target_item_id(&request).map(str::to_owned),
+                        model: Some(turn.model_info().slug.clone()),
+                        occurred_at_ms: codex_analytics::now_unix_millis(),
+                        kind: GuardianV2EventKind::FastDecision {
+                            decision: "approved",
+                        },
+                    });
+            }
             record_guardian_non_denial(&session, guardian_request_turn_id(&request, &turn.sub_id))
                 .await;
         }
@@ -344,6 +409,7 @@ async fn run_guardian_review(
         plugin_attribution_override,
         approval_request_source,
         external_cancel,
+        require_synchronous_review: _,
     } = options;
     let target_item_id = guardian_request_target_item_id(&request).map(str::to_string);
     let assessment_turn_id = guardian_request_turn_id(&request, &turn.sub_id).to_string();
@@ -430,6 +496,32 @@ async fn run_guardian_review(
 
     let schema = guardian_output_schema();
     let terminal_action = action_summary.clone();
+    let review_evidence = if let Some(evidence) = session
+        .services
+        .thread_extension_data
+        .get::<GuardianReviewEvidence>()
+    {
+        // Root rewrites and new user messages during this review make its evidence
+        // stale even if it later completes against a newer prompt snapshot.
+        let history = session.conversation_history_snapshot().await;
+        let authorization_version = evidence.authorization_version(history.as_ref());
+        let root_authorization_version = session
+            .services
+            .agent_control
+            .root_user_authorization(session.thread_id)
+            .await
+            .map(|snapshot| snapshot.authorization_version);
+        format_guardian_action_pretty(&request).ok().map(|action| {
+            (
+                evidence,
+                action.text,
+                authorization_version,
+                root_authorization_version,
+            )
+        })
+    } else {
+        None
+    };
     let (outcome, analytics_result) = Box::pin(run_guardian_review_session_with_retry(
         session.clone(),
         context,
@@ -442,6 +534,7 @@ async fn run_guardian_review(
     .await;
 
     let completed_at_ms = now_unix_timestamp_ms();
+    let completed_review = matches!(&outcome, GuardianReviewOutcome::Completed(_));
     let (assessment, count_denial_for_circuit_breaker) = match outcome {
         GuardianReviewOutcome::Completed(assessment) => {
             let approved = matches!(assessment.outcome, GuardianAssessmentOutcome::Allow);
@@ -624,24 +717,36 @@ async fn run_guardian_review(
     } else {
         GuardianAssessmentStatus::Denied
     };
+    let assessment_event = GuardianAssessmentEvent {
+        id: review_id,
+        target_item_id,
+        plugin_id: plugin_id.clone(),
+        script_path: script_path.clone(),
+        turn_id: assessment_turn_id.clone(),
+        started_at_ms,
+        completed_at_ms: Some(completed_at_ms),
+        status,
+        risk_level: Some(assessment.risk_level),
+        user_authorization: Some(assessment.user_authorization),
+        rationale: Some(assessment.rationale.clone()),
+        decision_source: Some(GuardianAssessmentDecisionSource::Agent),
+        action: terminal_action,
+    };
+    if completed_review
+        && let Some((evidence, action, authorization_version, root_authorization_version)) =
+            review_evidence
+    {
+        evidence.record(
+            &assessment_event,
+            &action,
+            authorization_version,
+            root_authorization_version,
+        );
+    }
     session
         .send_event(
             turn.as_ref(),
-            EventMsg::GuardianAssessment(GuardianAssessmentEvent {
-                id: review_id,
-                target_item_id,
-                plugin_id: plugin_id.clone(),
-                script_path: script_path.clone(),
-                turn_id: assessment_turn_id.clone(),
-                started_at_ms,
-                completed_at_ms: Some(completed_at_ms),
-                status,
-                risk_level: Some(assessment.risk_level),
-                user_authorization: Some(assessment.user_authorization),
-                rationale: Some(assessment.rationale.clone()),
-                decision_source: Some(GuardianAssessmentDecisionSource::Agent),
-                action: terminal_action,
-            }),
+            EventMsg::GuardianAssessment(assessment_event),
         )
         .await;
 
@@ -659,8 +764,15 @@ async fn run_guardian_review(
         } else {
             assessment.rationale.trim()
         };
+        let rejection_instructions = turn
+            .model_info()
+            .model_messages
+            .as_ref()
+            .and_then(|messages| messages.auto_review.as_ref())
+            .and_then(|messages| messages.rejection_instructions.as_deref())
+            .unwrap_or(GUARDIAN_REJECTION_INSTRUCTIONS);
         ReviewDecision::denied(format!(
-            "This action was rejected due to unacceptable risk.\nReason: {rationale}\n{GUARDIAN_REJECTION_INSTRUCTIONS}"
+            "This action was rejected due to unacceptable risk.\nReason: {rationale}\n{rejection_instructions}"
         ))
     }
 }
@@ -669,6 +781,8 @@ pub(crate) struct GuardianReviewOptions {
     pub(crate) plugin_attribution_override: Option<PluginCommandAttribution>,
     pub(crate) approval_request_source: GuardianApprovalRequestSource,
     pub(crate) external_cancel: Option<CancellationToken>,
+    /// Escalate from extension fast approval to the synchronous Guardian reviewer.
+    pub(crate) require_synchronous_review: bool,
 }
 
 /// Public entrypoint for approval requests that should be reviewed by guardian.
@@ -679,9 +793,8 @@ pub(crate) async fn review_approval_request(
     request: GuardianApprovalRequest,
     reasons: ApprovalRequestReasons,
 ) -> ReviewDecision {
-    // Box the delegated review future so callers do not inline the entire
-    // guardian session state machine into their own async stack.
-    Box::pin(run_guardian_review(
+    // Erase the delegated future to bound its async state and the tool handlers' Send checks.
+    let review: BoxFuture<'_, ReviewDecision> = Box::pin(run_guardian_review(
         Arc::clone(session),
         context.into(),
         review_id,
@@ -691,9 +804,10 @@ pub(crate) async fn review_approval_request(
             plugin_attribution_override: None,
             approval_request_source: GuardianApprovalRequestSource::MainTurn,
             external_cancel: None,
+            require_synchronous_review: false,
         },
-    ))
-    .await
+    ));
+    review.await
 }
 
 pub(crate) async fn review_approval_request_with_cancel(
@@ -723,7 +837,7 @@ pub(crate) fn spawn_approval_request_review(
     context: impl Into<GuardianReviewContext>,
     review_id: String,
     request: GuardianApprovalRequest,
-    retry_reason: Option<String>,
+    reasons: ApprovalRequestReasons,
     options: GuardianReviewOptions,
 ) -> oneshot::Receiver<ReviewDecision> {
     let context = context.into();
@@ -731,14 +845,10 @@ pub(crate) fn spawn_approval_request_review(
     let runtime = session.services.runtime_handle.clone();
     let spawn_result = std::thread::Builder::new()
         .name("codex-approval-review".to_string())
+        .stack_size(THREAD_STACK_SIZE_BYTES)
         .spawn(move || {
-            let decision = runtime.block_on(review_approval_request_with_cancel(
-                &session,
-                context,
-                review_id,
-                request,
-                retry_reason,
-                options,
+            let decision = runtime.block_on(run_guardian_review(
+                session, context, review_id, request, reasons, options,
             ));
             let _ = tx.send(decision);
         });
@@ -750,6 +860,7 @@ pub(crate) fn spawn_approval_request_review(
 
 pub(super) struct GuardianReviewSessionConfig {
     pub(super) spawn_config: crate::config::Config,
+    pub(super) node_repl_policy: GuardianNodeReplPolicy,
     model: String,
     reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
     default_review_model_id: String,
@@ -783,7 +894,7 @@ pub(super) async fn guardian_review_session_config(
             fallback
         }
     };
-    let model_override = turn.model_info.auto_review_model_override.as_deref();
+    let model_override = turn.model_info().auto_review_model_override.as_deref();
     let review_model_id = model_override.unwrap_or(default_review_model_id);
     let review_model = available_models
         .iter()
@@ -804,17 +915,17 @@ pub(super) async fn guardian_review_session_config(
         (review_model_id.to_string(), reasoning_effort)
     } else {
         let reasoning_effort = preferred_reasoning_effort(
-            turn.model_info
+            turn.model_info()
                 .supported_reasoning_levels
                 .iter()
                 .any(|preset| preset.effort == codex_protocol::openai_models::ReasoningEffort::Low),
-            turn.reasoning_effort
-                .clone()
-                .or_else(|| turn.model_info.default_reasoning_level.clone()),
+            turn.reasoning_effort()
+                .or(turn.model_info().default_reasoning_level.as_ref())
+                .cloned(),
         );
         (
             model_override
-                .unwrap_or(turn.model_info.slug.as_str())
+                .unwrap_or(turn.model_info().slug.as_str())
                 .to_string(),
             reasoning_effort,
         )
@@ -835,12 +946,25 @@ pub(super) async fn guardian_review_session_config(
         guardian_reasoning_effort.clone(),
         guardian_model_info.model_messages.as_ref(),
     )?;
-    if guardian_model != turn.model_info.slug {
+    if turn.model_info().node_repl_auto_review_required {
+        spawn_config
+            .features
+            .enable(Feature::RetainClientDeveloperMessages)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "guardian review session could not preserve REPL developer policy: {error}"
+                )
+            })?;
+    }
+    if guardian_model != turn.model_info().slug {
         spawn_config.model_context_window = None;
         spawn_config.model_auto_compact_token_limit = None;
     }
     Ok(GuardianReviewSessionConfig {
         spawn_config,
+        node_repl_policy: GuardianNodeReplPolicy::from_model_messages(
+            guardian_model_info.model_messages.as_ref(),
+        ),
         model: guardian_model,
         reasoning_effort: guardian_reasoning_effort,
         default_review_model_id: default_review_model_id.to_string(),
@@ -891,6 +1015,7 @@ async fn run_guardian_review_session_before_deadline(
                 parent_session: Arc::clone(&session),
                 parent_context: context.clone(),
                 spawn_config: session_config.spawn_config,
+                node_repl_policy: session_config.node_repl_policy,
                 request,
                 reasons,
                 schema,
@@ -900,8 +1025,8 @@ async fn run_guardian_review_session_before_deadline(
                 guardian_catalog_contains_auto_review: session_config.catalog_contains_auto_review,
                 guardian_review_model_overridden: session_config.model_overridden,
                 guardian_review_model_override: session_config.model_override,
-                reasoning_summary: turn.reasoning_summary,
-                personality: turn.personality,
+                reasoning_summary: turn.reasoning_summary(),
+                personality: turn.personality(),
                 external_cancel,
                 deadline,
             }),

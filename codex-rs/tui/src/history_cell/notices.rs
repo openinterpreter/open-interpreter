@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[cfg_attr(not(test), allow(dead_code))]
+const RECAP_HEADING: &str = "Conversation recap";
+
 #[cfg_attr(debug_assertions, allow(dead_code))]
 #[derive(Debug)]
 pub(crate) struct UpdateAvailableHistoryCell {
@@ -96,18 +99,27 @@ pub(crate) struct SafetyAccessBlockCell {
 
 const SAFETY_ACCESS_BLOCK_TITLE: &str = "This content can't be shown";
 const SAFETY_ACCESS_BLOCK_LEARN_MORE_URL: &str = "https://help.openai.com/en/articles/20001326";
+const CYBER_INDIVIDUAL_TRUSTED_ACCESS_URL: &str = "https://chatgpt.com/cyber/";
+const CYBER_ENTERPRISE_TRUSTED_ACCESS_URL: &str =
+    "https://openai.com/form/enterprise-trusted-access-for-cyber/";
 
 pub(crate) fn new_safety_access_block_event() -> SafetyAccessBlockCell {
     SafetyAccessBlockCell {
         body: "We take extra caution with requests involving biological research and applications that could pose safety risks. Eligible researchers can apply for Trusted Access.",
-        trusted_access_url: "https://www.openai.com/form/trusted-access-for-biology-research/",
+        trusted_access_url: "https://chatgpt.com/r/b749fb02595e04c3007a54375f3f4374",
     }
 }
 
-pub(crate) fn new_cyber_policy_error_event() -> SafetyAccessBlockCell {
+pub(crate) fn new_cyber_policy_error_event(plan_type: Option<PlanType>) -> SafetyAccessBlockCell {
+    let trusted_access_url = match plan_type {
+        Some(
+            PlanType::Free | PlanType::Go | PlanType::Plus | PlanType::Pro | PlanType::ProLite,
+        ) => CYBER_INDIVIDUAL_TRUSTED_ACCESS_URL,
+        _ => CYBER_ENTERPRISE_TRUSTED_ACCESS_URL,
+    };
     SafetyAccessBlockCell {
         body: "We take extra caution with cybersecurity requests. If you’re a security professional, you may be able to apply for Trusted Access.",
-        trusted_access_url: "https://openai.com/form/enterprise-trusted-access-for-cyber/",
+        trusted_access_url,
     }
 }
 
@@ -219,4 +231,108 @@ pub(crate) fn new_error_event(message: String) -> PlainHistoryCell {
     // in terminals like Ghostty.
     let lines: Vec<Line<'static>> = vec![vec![format!("■ {message}").red()].into()];
     PlainHistoryCell { lines }
+}
+
+#[derive(Debug)]
+pub(crate) struct ThreadRecapLoadingCell {
+    start_time: Instant,
+    animations_enabled: bool,
+}
+
+impl ThreadRecapLoadingCell {
+    pub(crate) fn new(animations_enabled: bool) -> Self {
+        Self {
+            start_time: Instant::now(),
+            animations_enabled,
+        }
+    }
+}
+
+impl HistoryCell for ThreadRecapLoadingCell {
+    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+        vec![
+            vec![
+                activity_indicator(
+                    Some(self.start_time),
+                    MotionMode::from_animations_enabled(self.animations_enabled),
+                    ReducedMotionIndicator::StaticBullet,
+                )
+                .unwrap_or_else(|| "•".dim()),
+                " ".into(),
+                "Generating conversation recap".bold(),
+                "…".dim(),
+            ]
+            .into(),
+        ]
+    }
+
+    fn raw_lines(&self) -> Vec<Line<'static>> {
+        vec![Line::from("Generating conversation recap...")]
+    }
+
+    fn transcript_animation_tick(&self) -> Option<u64> {
+        if !self.animations_enabled {
+            return None;
+        }
+
+        Some((self.start_time.elapsed().as_millis() / 50) as u64)
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug)]
+pub(crate) struct ThreadRecapHistoryCell {
+    recap: String,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl ThreadRecapHistoryCell {
+    pub(crate) fn new(recap: String) -> Self {
+        Self { recap }
+    }
+}
+
+impl HistoryCell for ThreadRecapHistoryCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let width = usize::from(width);
+        let mut remaining_width = width;
+        let mut heading = Vec::new();
+
+        if remaining_width > 0 {
+            heading.push("─".dim());
+            remaining_width -= 1;
+        }
+        if remaining_width > 0 {
+            heading.push(" ".dim());
+            remaining_width -= 1;
+        }
+
+        let (visible_heading, _suffix, heading_width) =
+            take_prefix_by_width(RECAP_HEADING, remaining_width);
+        if !visible_heading.is_empty() {
+            heading.push(visible_heading.bold());
+            remaining_width -= heading_width;
+        }
+        if remaining_width > 0 {
+            heading.push(" ".dim());
+            remaining_width -= 1;
+        }
+        if remaining_width > 0 {
+            heading.push("─".repeat(remaining_width).dim());
+        }
+
+        let wrap_width = width.saturating_sub(2).max(1);
+        let body = raw_lines_from_source(&self.recap);
+        let wrapped = adaptive_wrap_lines(body, RtOptions::new(wrap_width));
+        let mut lines = vec![heading.into(), Line::default()];
+        lines.extend(prefix_lines(wrapped, "  ".into(), "  ".into()));
+
+        lines
+    }
+
+    fn raw_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from(RECAP_HEADING)];
+        lines.extend(raw_lines_from_source(&self.recap));
+        lines
+    }
 }
