@@ -4,7 +4,6 @@ name: Bazel
 # https://github.com/cerisier/toolchains_llvm_bootstrapped/blob/main/.github/workflows/ci.yaml
 
 on:
-  workflow_call:
   workflow_dispatch:
 concurrency:
   # Cancel previous actions from the same PR or branch except 'main' branch.
