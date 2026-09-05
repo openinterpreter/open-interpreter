@@ -869,8 +869,9 @@ fn resolve_windows_update_command_from_path(
     let path_env =
         std::env::join_paths(std::env::split_paths(path_env).filter(|path| path.is_absolute()))?;
     if path_env.is_empty() {
+        let installer_url = codex_product_info::Product::current().installer_url();
         anyhow::bail!(
-            "Could not find an absolute update command `{command}` on PATH. Please update manually: https://developers.openai.com/codex/cli/"
+            "Could not find an absolute update command `{command}` on PATH. Please update manually: {installer_url}"
         );
     }
     which::which_in_global(command, Some(&path_env))?
