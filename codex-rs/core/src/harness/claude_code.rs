@@ -2616,7 +2616,9 @@ mod tests {
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "toolu_1".to_string(),
+                    call_id: Some("toolu_1".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text(
                         "(Bash completed with no output)".to_string(),
                     ),
@@ -2636,7 +2638,9 @@ mod tests {
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "toolu_2".to_string(),
+                    call_id: Some("toolu_2".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text("1\tREAD_OK".to_string()),
 
                     internal_chat_message_metadata_passthrough: None,
@@ -2651,6 +2655,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -2802,14 +2807,18 @@ mod tests {
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "toolu_python".to_string(),
+                    call_id: Some("toolu_python".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text("Python 3.13.7\n".to_string()),
 
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "toolu_clone".to_string(),
+                    call_id: Some("toolu_clone".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text(
                         "Cloning into '/app/pyknotid'...\n\n".to_string(),
                     ),
@@ -2826,6 +2835,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -2896,6 +2906,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -2955,6 +2966,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+        cyber_access_program: None,
         };
 
         let request = build_request(
@@ -3022,6 +3034,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         }
     }
 
@@ -3100,6 +3113,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -3146,6 +3160,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -3187,6 +3202,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -3257,7 +3273,9 @@ mod tests {
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "toolu_bash".to_string(),
+                    call_id: Some("toolu_bash".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text(
                         "\nTodoWrite done\n\n   ".to_string(),
                     ),
@@ -3274,6 +3292,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -3340,6 +3359,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -3403,7 +3423,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "todo_1".to_string(),
+                call_id: Some("todo_1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(
                     CLAUDE_TODO_WRITE_SUCCESS_MESSAGE.to_string(),
                 ),
@@ -3430,7 +3452,9 @@ mod tests {
             });
             input.push(ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: format!("read_{index}"),
+                call_id: Some(format!("read_{index}")),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(format!(
                     "{index}\tCHECKPOINT_{index:02}"
                 )),
@@ -3449,6 +3473,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -3503,7 +3528,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "todo_1".to_string(),
+                call_id: Some("todo_1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(
                     CLAUDE_TODO_WRITE_SUCCESS_MESSAGE.to_string(),
                 ),
@@ -3528,7 +3555,9 @@ mod tests {
             });
             input.push(ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: format!("read_{index}"),
+                call_id: Some(format!("read_{index}")),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(format!(
                     "{index}\tCHECKPOINT_{index:02}"
                 )),
@@ -3547,6 +3576,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -3606,7 +3636,9 @@ mod tests {
             });
             input.push(ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: format!("grep_{index}"),
+                call_id: Some(format!("grep_{index}")),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(format!("MATCH_{index}")),
 
                 internal_chat_message_metadata_passthrough: None,
@@ -3623,6 +3655,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -3697,7 +3730,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "todo_1".to_string(),
+                call_id: Some("todo_1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(
                     CLAUDE_TODO_WRITE_SUCCESS_MESSAGE.to_string(),
                 ),
@@ -3734,7 +3769,9 @@ mod tests {
             });
             input.push(ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: format!("read_{index}"),
+                call_id: Some(format!("read_{index}")),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(format!(
                     "{index}\tCHECKPOINT_{index:02}"
                 )),
@@ -3753,6 +3790,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -3803,7 +3841,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "todo_1".to_string(),
+                call_id: Some("todo_1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(
                     CLAUDE_TODO_WRITE_SUCCESS_MESSAGE.to_string(),
                 ),
@@ -3828,7 +3868,9 @@ mod tests {
             });
             input.push(ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: format!("read_{index}"),
+                call_id: Some(format!("read_{index}")),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(format!(
                     "{index}\tCHECKPOINT_{index:02}"
                 )),
@@ -3847,6 +3889,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -3912,6 +3955,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -4187,7 +4231,9 @@ mod tests {
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "toolu_1".to_string(),
+                    call_id: Some("toolu_1".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text(
                         "(Bash completed with no output)".to_string(),
                     ),
@@ -4224,6 +4270,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -4286,6 +4333,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_title_request(
@@ -4366,6 +4414,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_title_request(
@@ -4457,6 +4506,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -4501,6 +4551,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -4545,6 +4596,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -4589,6 +4641,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -4633,6 +4686,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_request(
@@ -4700,6 +4754,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_claude_code_responses_shaped_request(
@@ -4756,6 +4811,7 @@ mod tests {
             },
             output_schema: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         };
 
         let request = build_claude_code_responses_shaped_request(

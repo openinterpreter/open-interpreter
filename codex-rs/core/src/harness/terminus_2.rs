@@ -1873,7 +1873,9 @@ mod tests {
                     internal_chat_message_metadata_passthrough: None,},
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "terminus-2-shell-0".to_string(),
+                    call_id: Some("terminus-2-shell-0".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text(
                         "root@host:/app# pwd\n/app\nroot@host:/app#\n".to_string(),
                     ),

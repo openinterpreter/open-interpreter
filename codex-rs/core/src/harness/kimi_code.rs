@@ -479,7 +479,9 @@ mod tests {
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "Glob:0".to_string(),
+                    call_id: Some("Glob:0".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text("module.py".to_string()),
 
                     internal_chat_message_metadata_passthrough: None,
@@ -585,7 +587,9 @@ mod tests {
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "ReadMediaFile:1".to_string(),
+                    call_id: Some("ReadMediaFile:1".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_content_items(vec![
                         FunctionCallOutputContentItem::InputText {
                             text: "<video path=\"/workspace/probe.mp4\">".to_string(),

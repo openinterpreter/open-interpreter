@@ -744,7 +744,9 @@ mod tests {
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "bash:0".to_string(),
+                    call_id: Some("bash:0".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text(
                         "{\n  \"returncode\": 0,\n  \"output\": \"/workspace\\n\"\n}".to_string(),
                     ),

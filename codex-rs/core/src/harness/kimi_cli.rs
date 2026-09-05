@@ -1516,7 +1516,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "GetGoal:0".to_string(),
+                call_id: Some("GetGoal:0".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("{}".to_string()),
 
                 internal_chat_message_metadata_passthrough: None,
@@ -2207,7 +2209,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "Shell:0".to_string(),
+                call_id: Some("Shell:0".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(
                     "<system>Command executed successfully.</system>".to_string(),
                 ),
@@ -2275,7 +2279,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "Shell:0".to_string(),
+                call_id: Some("Shell:0".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("ok".to_string()),
 
                 internal_chat_message_metadata_passthrough: None,
@@ -2354,7 +2360,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "Shell:1".to_string(),
+                call_id: Some("Shell:1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text(
                     "<system>ERROR: Command failed with exit code: 1.</system>".to_string(),
                 ),
@@ -2412,7 +2420,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "Shell:0".to_string(),
+                call_id: Some("Shell:0".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_content_items(vec![
                     FunctionCallOutputContentItem::InputText {
                         text: "<system>Command executed successfully.</system>".to_string(),
@@ -2482,7 +2492,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "Shell:0".to_string(),
+                call_id: Some("Shell:0".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("a\u{c}b\nc".to_string()),
 
                 internal_chat_message_metadata_passthrough: None,
@@ -2521,7 +2533,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "WriteFile:6".to_string(),
+                call_id: Some("WriteFile:6".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("written".to_string()),
 
                 internal_chat_message_metadata_passthrough: None,
@@ -2575,7 +2589,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "Shell:7".to_string(),
+                call_id: Some("Shell:7".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload {
                     body: codex_protocol::models::FunctionCallOutputBody::ContentItems(vec![
                         FunctionCallOutputContentItem::InputText {
@@ -2649,7 +2665,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "Shell:7".to_string(),
+                call_id: Some("Shell:7".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload {
                     body: codex_protocol::models::FunctionCallOutputBody::Text(
                         "<system>ERROR: Command failed with exit code: 1.</system>".to_string(),
@@ -2708,7 +2726,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "ReadMediaFile:1".to_string(),
+                call_id: Some("ReadMediaFile:1".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload {
                     body: codex_protocol::models::FunctionCallOutputBody::ContentItems(vec![
                         FunctionCallOutputContentItem::InputText {
@@ -2772,7 +2792,9 @@ mod tests {
         let items = vec![
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "WriteFile:6".to_string(),
+                call_id: Some("WriteFile:6".to_string()),
+                name: None,
+                namespace: None,
                 output: FunctionCallOutputPayload::from_text("written".to_string()),
 
                 internal_chat_message_metadata_passthrough: None,
