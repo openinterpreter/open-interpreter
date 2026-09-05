@@ -4188,7 +4188,7 @@ mod tests {
         let file_system_sandbox_policy =
             FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
                 FileSystemPath::Path {
-                    path: workspace_root,
+                    path: workspace_root.into(),
                 },
                 FileSystemAccessMode::Write,
             )]);
@@ -4238,7 +4238,7 @@ mod tests {
     ) -> Result<String, FunctionCallError> {
         let invocation = invocation(workspace, tool_name, args).await;
         let output = handler.handle(invocation).await?;
-        Ok(output.log_preview())
+        Ok(output.log_output())
     }
 
     async fn handle_response_item(
@@ -4678,12 +4678,12 @@ mod tests {
             .handle(first_invocation)
             .await
             .expect("first read succeeds")
-            .log_preview();
+            .log_output();
         let second = HarnessAliasHandler::Read
             .handle(second_invocation)
             .await
             .expect("second read succeeds")
-            .log_preview();
+            .log_output();
 
         assert_eq!(
             first,
@@ -4719,7 +4719,7 @@ mod tests {
             .handle(read_invocation)
             .await
             .expect("read succeeds")
-            .log_preview();
+            .log_output();
 
         assert_eq!(
             output,
@@ -4758,7 +4758,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "call-write".to_string(),
+                call_id: Some("call-write".to_string()),
+                name: None,
+                namespace: None,
                 output: codex_protocol::models::FunctionCallOutputPayload::from_text(
                     "File written successfully. The file state is current in your context."
                         .to_string(),
@@ -4920,7 +4922,7 @@ mod tests {
             .handle(invocation)
             .await
             .expect("read output")
-            .log_preview();
+            .log_output();
 
         assert_eq!(
             output,
@@ -5231,7 +5233,9 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: "call-write".to_string(),
+                call_id: Some("call-write".to_string()),
+                name: None,
+                namespace: None,
                 output: codex_protocol::models::FunctionCallOutputPayload {
                     body: codex_protocol::models::FunctionCallOutputBody::Text(
                         "File written successfully.".to_string(),
