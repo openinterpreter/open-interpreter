@@ -819,6 +819,7 @@ mod tests {
             .send(Ok(ResponseEvent::Completed {
                 response_id: "response".to_string(),
                 token_usage: None,
+                usage_metadata: None,
                 end_turn: None,
             }))
             .await
@@ -897,6 +898,7 @@ mod tests {
             .send(Ok(ResponseEvent::Completed {
                 response_id: "response".to_string(),
                 token_usage: None,
+                usage_metadata: None,
                 end_turn: None,
             }))
             .await
