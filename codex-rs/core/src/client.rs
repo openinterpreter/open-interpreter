@@ -32,6 +32,7 @@ use std::sync::atomic::Ordering;
 
 use async_channel::Sender;
 use codex_api::AgentIdentityTelemetry;
+use codex_api::AnthropicMessagesClient as ApiAnthropicMessagesClient;
 use codex_api::ApiError;
 use codex_api::AuthProvider;
 use codex_api::CompactClient as ApiCompactClient;
@@ -127,13 +128,25 @@ use crate::context::BaseInstructionsFragment;
 use crate::context::ContextualUserFragment;
 use crate::cyber_access_program;
 use crate::feedback_tags;
+use crate::harness::claude_code::CLAUDE_CODE_APP_HEADER;
+use crate::harness::claude_code::CLAUDE_CODE_BARE_BETA_HEADER;
+use crate::harness::claude_code::CLAUDE_CODE_BETA_HEADER;
+use crate::harness::claude_code::CLAUDE_CODE_USER_AGENT;
+use crate::harness::claude_code::ClaudeCodeProfile;
+use crate::harness::claude_code::build_request_for_profile as build_claude_code_request;
 use crate::harness::request::ChatHarnessRequest;
 use crate::harness::request::ChatHarnessTurn;
 use crate::harness::request::apply_chat_harness_postprocess;
 use crate::harness::request::build_chat_harness_request;
 use crate::harness::routing::ChatHarnessRoute;
+use crate::harness::routing::MessagesHarnessRoute;
 use crate::harness::routing::StreamTransportRoute;
 use crate::harness::routing::resolve_stream_transport_route;
+use crate::harness::zcode::ZCODE_REFERER;
+use crate::harness::zcode::ZCODE_TITLE;
+use crate::harness::zcode::ZCODE_USER_AGENT;
+use crate::harness::zcode::ZCODE_VERSION;
+use crate::harness::zcode::build_request as build_zcode_request;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
 use crate::util::emit_feedback_auth_recovery_tags;
@@ -179,6 +192,8 @@ const X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER: &str =
 const REALTIME_CALLS_ENDPOINT: &str = "/realtime/calls";
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
 const CHAT_COMPLETIONS_ENDPOINT: &str = "/chat/completions";
+const ANTHROPIC_MESSAGES_ENDPOINT: &str = "/v1/messages";
+const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 // `/responses/compact` is unary, so the timeout covers the full response rather than one idle
 // period between stream events.
 const COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER: u32 = 4;
@@ -2109,8 +2124,18 @@ impl ModelClientSession {
                 ))
                 .await
             }
-            StreamTransportRoute::MessagesHarness(_)
-            | StreamTransportRoute::ClaudeCodeResponses(_)
+            StreamTransportRoute::MessagesHarness(route) => {
+                Box::pin(self.stream_messages_harness_api(
+                    route,
+                    prompt,
+                    model_info,
+                    session_telemetry,
+                    effort,
+                    responses_metadata,
+                ))
+                .await
+            }
+            StreamTransportRoute::ClaudeCodeResponses(_)
             | StreamTransportRoute::ClaudeCodeChat(_) => Err(CodexErr::UnsupportedOperation(
                 "non-Responses wire APIs require the compatibility transport".to_string(),
             )),
@@ -2368,6 +2393,101 @@ impl ModelClientSession {
         }
     }
 
+    async fn stream_messages_harness_api(
+        &self,
+        route: MessagesHarnessRoute,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        responses_metadata: &CodexResponsesMetadata,
+    ) -> Result<ResponseStream> {
+        let auth_manager = self.client.state.provider.auth_manager();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(AuthManager::unauthorized_recovery);
+        let mut provider_auth_recovery_attempted = false;
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            let transport = self
+                .client
+                .build_api_transport(&client_setup.api_provider, ANTHROPIC_MESSAGES_ENDPOINT)?;
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                client_setup.agent_identity_telemetry.clone(),
+                pending_retry,
+            );
+            let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
+                session_telemetry,
+                request_auth_context,
+                RequestRouteTelemetry::for_endpoint(ANTHROPIC_MESSAGES_ENDPOINT),
+                self.client.state.auth_env_telemetry.clone(),
+            );
+            let thread_id = self.client.state.thread_id.to_string();
+            let request = match route {
+                MessagesHarnessRoute::ClaudeCode => build_claude_code_request(
+                    prompt,
+                    model_info,
+                    effort.clone(),
+                    &thread_id,
+                    Some(&self.client.state.session_source),
+                    if self.client.harness.is_claude_code_bare() {
+                        ClaudeCodeProfile::Bare
+                    } else {
+                        ClaudeCodeProfile::Full
+                    },
+                )
+                .map_err(|err| {
+                    CodexErr::InvalidRequest(format!("invalid claude-code request: {err}"))
+                })?,
+                MessagesHarnessRoute::ZCode => {
+                    build_zcode_request(prompt, model_info, Some(&self.client.state.session_source))
+                        .map_err(|err| {
+                            CodexErr::InvalidRequest(format!("invalid zcode request: {err}"))
+                        })?
+                }
+            };
+            let client = ApiAnthropicMessagesClient::new(
+                transport,
+                client_setup.api_provider,
+                client_setup.api_auth,
+            )
+            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            let headers =
+                messages_harness_headers(route, self.client.harness.is_claude_code_bare());
+            match client.stream_request(request, headers).await {
+                Ok(stream) => {
+                    let (stream, _) = map_response_stream(
+                        stream,
+                        session_telemetry.clone(),
+                        InferenceTraceAttempt::disabled(),
+                        Arc::clone(&self.client.state.provider),
+                    );
+                    return Ok(stream);
+                }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            &mut provider_auth_recovery_attempted,
+                            session_telemetry,
+                            &self.client.state.provider,
+                            self.client.event_sender.as_ref(),
+                            responses_metadata.turn_id.as_deref(),
+                        )
+                        .await?,
+                    );
+                }
+                Err(err) => return Err(self.client.state.provider.map_api_error(err)),
+            }
+        }
+    }
+
     fn chat_harness_options(&self) -> ApiResponsesOptions {
         let thread_id = self.client.state.thread_id.to_string();
         ApiResponsesOptions {
@@ -2451,6 +2571,43 @@ fn add_responses_lite_header(headers: &mut ApiHeaderMap, use_responses_lite: boo
 
 const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 1600;
 const STREAM_DROPPED_REASON: &str = "response stream dropped before provider terminal event";
+
+fn messages_harness_headers(route: MessagesHarnessRoute, claude_code_bare: bool) -> ApiHeaderMap {
+    let mut headers = ApiHeaderMap::new();
+    headers.insert(
+        "anthropic-version",
+        HeaderValue::from_static(ANTHROPIC_API_VERSION),
+    );
+    match route {
+        MessagesHarnessRoute::ClaudeCode => {
+            headers.insert(
+                "anthropic-beta",
+                HeaderValue::from_static(if claude_code_bare {
+                    CLAUDE_CODE_BARE_BETA_HEADER
+                } else {
+                    CLAUDE_CODE_BETA_HEADER
+                }),
+            );
+            headers.insert("x-app", HeaderValue::from_static(CLAUDE_CODE_APP_HEADER));
+            headers.insert(
+                "user-agent",
+                HeaderValue::from_static(CLAUDE_CODE_USER_AGENT),
+            );
+        }
+        MessagesHarnessRoute::ZCode => {
+            headers.insert("user-agent", HeaderValue::from_static(ZCODE_USER_AGENT));
+            headers.insert("x-zcode-agent", HeaderValue::from_static("glm"));
+            headers.insert(
+                "x-zcode-app-version",
+                HeaderValue::from_static(ZCODE_VERSION),
+            );
+            headers.insert("x-title", HeaderValue::from_static(ZCODE_TITLE));
+            headers.insert("accept-language", HeaderValue::from_static("*"));
+            headers.insert("http-referer", HeaderValue::from_static(ZCODE_REFERER));
+        }
+    }
+    headers
+}
 
 fn map_response_stream(
     api_stream: codex_api::ResponseStream,

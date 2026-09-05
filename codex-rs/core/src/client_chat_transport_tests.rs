@@ -183,6 +183,32 @@ fn chat_model_client(base_url: &str, harness: Harness) -> ModelClient {
     .with_harness(harness, /*harness_guidance*/ true)
 }
 
+fn messages_model_client(base_url: &str, harness: Harness) -> ModelClient {
+    let provider = create_oss_provider_with_base_url(base_url, WireApi::Messages);
+    ModelClient::new(
+        /*auth_manager*/ None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*concurrent_reasoning_summaries_enabled*/ false,
+        /*attestation_provider*/ None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    )
+    .with_harness(harness, /*harness_guidance*/ true)
+}
+
+fn anthropic_text_sse(model: &str, text: &str) -> String {
+    format!(
+        "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg_test\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"{model}\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{{\"input_tokens\":1,\"output_tokens\":0}}}}}}\n\nevent: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\nevent: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{text}\"}}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\nevent: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\",\"stop_sequence\":null}},\"usage\":{{\"output_tokens\":1}}}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+    )
+}
+
 fn responses_metadata_for(client: &ModelClient) -> CodexResponsesMetadata {
     let thread_id = client.state.thread_id.to_string();
     test_responses_metadata(
@@ -232,6 +258,54 @@ async fn chat_bodies(server: &MockServer, path: &str) -> Vec<Value> {
         .filter(|request| request.url.path() == path)
         .map(|request| serde_json::from_slice(&request.body).expect("chat request json"))
         .collect()
+}
+
+#[tokio::test]
+async fn zcode_messages_turn_reaches_anthropic_transport() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(anthropic_text_sse("glm-5.3", "hello")),
+        )
+        .expect(/*requests*/ 1)
+        .mount(&server)
+        .await;
+
+    collect_stream_events(
+        messages_model_client(&server.uri(), Harness::ZCode),
+        "glm-5.3",
+        user_prompt("hello"),
+    )
+    .await
+    .expect("ZCode Messages turn should reach the Anthropic transport");
+    Ok(())
+}
+
+#[tokio::test]
+async fn claude_code_messages_turn_reaches_anthropic_transport() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(anthropic_text_sse("claude-sonnet-4-6", "hello")),
+        )
+        .expect(/*requests*/ 1)
+        .mount(&server)
+        .await;
+
+    collect_stream_events(
+        messages_model_client(&server.uri(), Harness::ClaudeCodeBare),
+        "claude-sonnet-4-6",
+        user_prompt("hello"),
+    )
+    .await
+    .expect("Claude Code Messages turn should reach the Anthropic transport");
+    Ok(())
 }
 
 #[tokio::test]
