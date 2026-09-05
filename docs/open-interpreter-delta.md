@@ -1,3 +1,8 @@
+---
+title: Open Interpreter maintained Codex delta
+description: The explicit product and compatibility differences preserved while tracking upstream Codex.
+---
+
 # Open Interpreter's maintained Codex delta
 
 Open Interpreter tracks stable releases of the upstream Codex CLI. We keep a
