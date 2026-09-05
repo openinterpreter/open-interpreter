@@ -38,6 +38,8 @@ jobs:
           grep -q 'openinterpreter/openinterpreter' scripts/install/install.ps1
 
       - name: Test packaging and installer scripts
+        env:
+          CODEX_REPO_ROOT: ${{ github.workspace }}
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts/codex_package -p 'test_*.py'
