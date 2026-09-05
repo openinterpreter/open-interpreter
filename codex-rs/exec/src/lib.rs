@@ -326,7 +326,8 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     let codex_home = match find_codex_home() {
         Ok(codex_home) => codex_home,
         Err(err) => {
-            eprintln!("Error finding codex home: {err}");
+            let product = codex_product_info::Product::current().short_display_name();
+            eprintln!("Error finding {product} home: {err}");
             std::process::exit(1);
         }
     };

@@ -21,7 +21,7 @@ pub(crate) struct SandboxSetupCommand {
     #[arg(long = "elevated", action = ArgAction::SetTrue)]
     elevated_sandbox_level: bool,
 
-    /// Windows user that will run Codex after managed deployment.
+    /// Windows user that will run the agent after managed deployment.
     #[arg(
         long = "user",
         value_name = "USER",
@@ -30,7 +30,7 @@ pub(crate) struct SandboxSetupCommand {
     )]
     user: Option<String>,
 
-    /// Use the current Windows user as the Codex user.
+    /// Use the current Windows user as the agent user.
     #[arg(
         long = "current-user",
         default_value_t = false,
@@ -38,7 +38,7 @@ pub(crate) struct SandboxSetupCommand {
     )]
     current_user: bool,
 
-    /// CODEX_HOME for the Codex user. Required with --user.
+    /// Compatibility CODEX_HOME for the agent user. Required with --user.
     #[arg(long = "codex-home", value_name = "DIR")]
     codex_home: Option<PathBuf>,
 }
@@ -53,7 +53,8 @@ impl SandboxSetupCommand {
         if self.elevated_sandbox_level {
             Ok(SandboxSetupLevel::Elevated)
         } else {
-            anyhow::bail!("`codex sandbox setup` currently requires --elevated");
+            let command_name = codex_product_info::Product::current().command_name();
+            anyhow::bail!("`{command_name} sandbox setup` currently requires --elevated");
         }
     }
 }
