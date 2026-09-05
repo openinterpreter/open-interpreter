@@ -174,7 +174,10 @@ impl SkillProvider for OrchestratorSkillProvider {
         })
     }
 
-    fn read(&self, request: SkillReadRequest) -> SkillProviderFuture<'_, SkillReadResult> {
+    fn read<'a>(
+        &'a self,
+        request: SkillReadRequest<'a>,
+    ) -> SkillProviderFuture<'a, SkillReadResult> {
         Box::pin(async move {
             if request.authority
                 != SkillAuthority::new(SkillSourceKind::Orchestrator, CODEX_APPS_MCP_SERVER_NAME)
@@ -276,6 +279,10 @@ fn catalog_entry_from_resource(resource: &Resource) -> Option<SkillCatalogEntry>
     )
     .with_display_path(uri)
     .with_alias_root(format!("skill://{namespace}"));
+    entry.plugin_id = meta
+        .get("plugin_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     entry.canonical_skill_id = meta
         .get("skill_id")
         .and_then(serde_json::Value::as_str)

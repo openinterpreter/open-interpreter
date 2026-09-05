@@ -3,18 +3,17 @@ use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
-use codex_utils_string::take_bytes_at_char_boundary;
 use serde_json::Value as JsonValue;
 
 use crate::ToolPayload;
 
-const TELEMETRY_PREVIEW_MAX_BYTES: usize = 2 * 1024;
-const TELEMETRY_PREVIEW_MAX_LINES: usize = 64;
-const TELEMETRY_PREVIEW_TRUNCATION_NOTICE: &str = "[... telemetry preview truncated ...]";
-
 /// Model-facing output contract returned by executable tool runtimes.
 pub trait ToolOutput: Send {
-    fn log_preview(&self) -> String;
+    /// Returns a deliberately lossy diagnostic representation, before telemetry size limits.
+    /// Implementations may summarize results or omit media and encrypted content. This is not
+    /// the authoritative tool result; an untruncated log does not imply a complete result.
+    /// The logger owns the additional configurable byte limit.
+    fn log_output(&self) -> String;
 
     fn success_for_logging(&self) -> bool;
 
@@ -22,6 +21,12 @@ pub trait ToolOutput: Send {
     /// `memories.disable_on_external_context` is enabled.
     fn contains_external_context(&self) -> bool {
         false
+    }
+
+    /// Overrides history's fallback token limit after tool-specific truncation.
+    /// Include any serialization allowance; history uses this limit unchanged.
+    fn fallback_token_limit_override(&self) -> Option<usize> {
+        None
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem;
@@ -50,14 +55,19 @@ pub trait ToolOutput: Send {
     fn code_mode_result(&self, payload: &ToolPayload) -> JsonValue {
         response_input_to_code_mode_result(self.to_response_item("", payload))
     }
+
+    /// Reports configured source capture only after acceptance; `None` means no capture attempt.
+    fn tool_result_sources(&self) -> Option<codex_protocol::models::ToolResultSources> {
+        None
+    }
 }
 
 impl<T> ToolOutput for Box<T>
 where
     T: ToolOutput + ?Sized,
 {
-    fn log_preview(&self) -> String {
-        (**self).log_preview()
+    fn log_output(&self) -> String {
+        (**self).log_output()
     }
 
     fn success_for_logging(&self) -> bool {
@@ -66,6 +76,10 @@ where
 
     fn contains_external_context(&self) -> bool {
         (**self).contains_external_context()
+    }
+
+    fn fallback_token_limit_override(&self) -> Option<usize> {
+        (**self).fallback_token_limit_override()
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
@@ -86,6 +100,10 @@ where
 
     fn code_mode_result(&self, payload: &ToolPayload) -> JsonValue {
         (**self).code_mode_result(payload)
+    }
+
+    fn tool_result_sources(&self) -> Option<codex_protocol::models::ToolResultSources> {
+        (**self).tool_result_sources()
     }
 }
 
@@ -120,8 +138,8 @@ impl JsonToolOutput {
 }
 
 impl ToolOutput for JsonToolOutput {
-    fn log_preview(&self) -> String {
-        telemetry_preview(&self.value.to_string())
+    fn log_output(&self) -> String {
+        self.value.to_string()
     }
 
     fn success_for_logging(&self) -> bool {
@@ -162,10 +180,10 @@ impl ToolOutput for JsonToolOutput {
 }
 
 impl ToolOutput for codex_protocol::mcp::CallToolResult {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         let output = self.as_function_call_output_payload();
-        let preview = output.body.to_text().unwrap_or_else(|| output.to_string());
-        telemetry_preview(&preview)
+        // Do not fall back to serializing media or encrypted content into logs.
+        output.body.to_text().unwrap_or_default()
     }
 
     fn success_for_logging(&self) -> bool {
@@ -260,44 +278,4 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
             .collect::<Vec<_>>()
             .join("\n"),
     )
-}
-
-fn telemetry_preview(content: &str) -> String {
-    let truncated_slice = take_bytes_at_char_boundary(content, TELEMETRY_PREVIEW_MAX_BYTES);
-    let truncated_by_bytes = truncated_slice.len() < content.len();
-
-    let mut preview = String::new();
-    let mut lines_iter = truncated_slice.lines();
-    for idx in 0..TELEMETRY_PREVIEW_MAX_LINES {
-        match lines_iter.next() {
-            Some(line) => {
-                if idx > 0 {
-                    preview.push('\n');
-                }
-                preview.push_str(line);
-            }
-            None => break,
-        }
-    }
-    let truncated_by_lines = lines_iter.next().is_some();
-
-    if !truncated_by_bytes && !truncated_by_lines {
-        return content.to_string();
-    }
-
-    if preview.len() < truncated_slice.len()
-        && truncated_slice
-            .as_bytes()
-            .get(preview.len())
-            .is_some_and(|byte| *byte == b'\n')
-    {
-        preview.push('\n');
-    }
-
-    if !preview.is_empty() && !preview.ends_with('\n') {
-        preview.push('\n');
-    }
-    preview.push_str(TELEMETRY_PREVIEW_TRUNCATION_NOTICE);
-
-    preview
 }

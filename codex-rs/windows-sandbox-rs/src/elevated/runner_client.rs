@@ -1,3 +1,5 @@
+use crate::desktop::DesktopPolicy;
+use crate::desktop::shared_private_desktop_for_user;
 use crate::identity::SandboxCreds;
 use crate::ipc_framed::ErrorPayload;
 use crate::ipc_framed::ErrorStage;
@@ -312,8 +314,12 @@ pub(crate) fn spawn_runner_transport(
     cwd: &Path,
     sandbox_creds: &SandboxCreds,
     log_dir: Option<&Path>,
-    spawn_request: SpawnRequest,
+    mut spawn_request: SpawnRequest,
+    desktop_policy: Option<&DesktopPolicy>,
 ) -> Result<RunnerTransport> {
+    spawn_request.private_desktop_name = desktop_policy
+        .map(|policy| shared_private_desktop_for_user(&sandbox_creds.username, policy, log_dir))
+        .transpose()?;
     let (pipe_in_name, pipe_out_name) = pipe_pair();
     let h_pipe_in =
         create_named_pipe(&pipe_in_name, PIPE_ACCESS_OUTBOUND, &sandbox_creds.username)?;

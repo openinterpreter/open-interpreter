@@ -13,6 +13,8 @@ use serde::Serialize;
 use serde_json::to_value;
 use std::sync::Arc;
 
+const X_CODEX_IMAGEGEN_REQUEST_ID_HEADER: &str = "x-codex-imagegen-request-id";
+
 pub struct ImagesClient<T: HttpTransport> {
     session: EndpointSession<T>,
 }
@@ -34,7 +36,7 @@ impl<T: HttpTransport> ImagesClient<T> {
         &self,
         request: &ImageGenerationRequest,
         extra_headers: HeaderMap,
-    ) -> Result<ImageResponse, ApiError> {
+    ) -> Result<(ImageResponse, Option<String>), ApiError> {
         self.post_image_request(
             "images/generations",
             request,
@@ -48,7 +50,7 @@ impl<T: HttpTransport> ImagesClient<T> {
         &self,
         request: &ImageEditRequest,
         extra_headers: HeaderMap,
-    ) -> Result<ImageResponse, ApiError> {
+    ) -> Result<(ImageResponse, Option<String>), ApiError> {
         self.post_image_request("images/edits", request, extra_headers, "image edit")
             .await
     }
@@ -59,15 +61,22 @@ impl<T: HttpTransport> ImagesClient<T> {
         request: &R,
         extra_headers: HeaderMap,
         operation: &str,
-    ) -> Result<ImageResponse, ApiError> {
+    ) -> Result<(ImageResponse, Option<String>), ApiError> {
         let body = to_value(request)
             .map_err(|e| ApiError::Stream(format!("failed to encode {operation} request: {e}")))?;
         let resp = self
             .session
             .execute(Method::POST, path, extra_headers, Some(body))
             .await?;
-        serde_json::from_slice(&resp.body)
-            .map_err(|e| ApiError::Stream(format!("failed to decode {operation} response: {e}")))
+        let imagegen_request_id = resp
+            .headers
+            .get(X_CODEX_IMAGEGEN_REQUEST_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .filter(|request_id| !request_id.is_empty())
+            .map(str::to_string);
+        let response = serde_json::from_slice(&resp.body)
+            .map_err(|e| ApiError::Stream(format!("failed to decode {operation} response: {e}")))?;
+        Ok((response, imagegen_request_id))
     }
 }
 
@@ -102,13 +111,19 @@ mod tests {
     struct CapturingTransport {
         last_request: Arc<Mutex<Option<Request>>>,
         response_body: Arc<Vec<u8>>,
+        response_headers: HeaderMap,
     }
 
     impl CapturingTransport {
         fn new(response_body: Vec<u8>) -> Self {
+            Self::with_response_headers(response_body, HeaderMap::new())
+        }
+
+        fn with_response_headers(response_body: Vec<u8>, response_headers: HeaderMap) -> Self {
             Self {
                 last_request: Arc::new(Mutex::new(None)),
                 response_body: Arc::new(response_body),
+                response_headers,
             }
         }
     }
@@ -118,7 +133,7 @@ mod tests {
             *self.last_request.lock().expect("lock request store") = Some(req);
             Ok(Response {
                 status: StatusCode::OK,
-                headers: HeaderMap::new(),
+                headers: self.response_headers.clone(),
                 body: self.response_body.as_ref().clone().into(),
             })
         }
@@ -193,10 +208,20 @@ mod tests {
 
     #[tokio::test]
     async fn generate_posts_typed_request_and_parses_image_response() {
-        let transport = CapturingTransport::new(response_body());
+        let mut response_headers = HeaderMap::new();
+        response_headers.insert(
+            X_CODEX_IMAGEGEN_REQUEST_ID_HEADER,
+            http::HeaderValue::from_static("req-imagegen-123"),
+        );
+        response_headers.insert(
+            "x-request-id",
+            http::HeaderValue::from_static("req-outer-456"),
+        );
+        let transport =
+            CapturingTransport::with_response_headers(response_body(), response_headers);
         let client = ImagesClient::new(transport.clone(), provider(), Arc::new(DummyAuth));
 
-        let response = client
+        let (response, imagegen_request_id) = client
             .generate(
                 &ImageGenerationRequest {
                     prompt: "a red fox in a field".to_string(),
@@ -212,6 +237,7 @@ mod tests {
             .expect("image generation request should succeed");
 
         assert_eq!(response, expected_response());
+        assert_eq!(imagegen_request_id.as_deref(), Some("req-imagegen-123"));
 
         let request = captured_request(&transport);
         assert_eq!(
@@ -235,7 +261,7 @@ mod tests {
         let transport = CapturingTransport::new(response_body());
         let client = ImagesClient::new(transport.clone(), provider(), Arc::new(DummyAuth));
 
-        let response = client
+        let (response, imagegen_request_id) = client
             .edit(
                 &ImageEditRequest {
                     images: vec![ImageUrl {
@@ -254,6 +280,7 @@ mod tests {
             .expect("image edit request should succeed");
 
         assert_eq!(response, expected_response());
+        assert_eq!(imagegen_request_id, None);
 
         let request = captured_request(&transport);
         assert_eq!(request.url, "https://example.com/api/codex/images/edits");

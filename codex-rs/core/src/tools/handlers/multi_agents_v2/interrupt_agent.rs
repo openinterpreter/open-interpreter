@@ -1,3 +1,4 @@
+use super::analytics::ToolCallAnalytics;
 use super::*;
 use crate::tools::handlers::multi_agents_spec::create_interrupt_agent_tool_v2;
 use codex_protocol::error::CodexErrorDetails;
@@ -14,17 +15,23 @@ impl ToolExecutor<ToolInvocation> for Handler {
         create_interrupt_agent_tool_v2()
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move {
-            handle_interrupt_agent(invocation)
-                .await
-                .map(boxed_tool_output)
+            let mut analytics =
+                ToolCallAnalytics::new(&invocation, CollabAgentTool::InterruptAgent);
+            let result = handle_interrupt_agent(invocation, &mut analytics).await;
+            analytics.finish(&result);
+            result.map(boxed_tool_output)
         })
     }
 }
 
 async fn handle_interrupt_agent(
     invocation: ToolInvocation,
+    analytics: &mut ToolCallAnalytics,
 ) -> Result<InterruptAgentResult, FunctionCallError> {
     let ToolInvocation {
         session,
@@ -36,6 +43,7 @@ async fn handle_interrupt_agent(
     let arguments = function_arguments(payload)?;
     let args: InterruptAgentArgs = parse_arguments(&arguments)?;
     let agent_id = resolve_agent_target(&session, &turn, &args.target).await?;
+    analytics.set_receiver(agent_id);
     let receiver_agent = session
         .services
         .agent_control
@@ -113,7 +121,7 @@ pub(crate) struct InterruptAgentResult {
 }
 
 impl ToolOutput for InterruptAgentResult {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         tool_output_json_text(self, "interrupt_agent")
     }
 

@@ -202,6 +202,7 @@ describe("Codex", () => {
     try {
       const thread = client.startThread({
         model: "gpt-test-1",
+        threadSource: "automated_review",
         sandboxMode: "workspace-write",
       });
       await thread.run("apply options");
@@ -216,6 +217,11 @@ describe("Codex", () => {
 
       expectPair(commandArgs, ["--sandbox", "workspace-write"]);
       expectPair(commandArgs, ["--model", "gpt-test-1"]);
+      expectPair(commandArgs, ["--thread-source", "automated_review"]);
+      const metadata = JSON.parse(payload!.headers["x-codex-turn-metadata"] as string) as {
+        thread_source?: string;
+      };
+      expect(metadata.thread_source).toBe("automated_review");
     } finally {
       cleanup();
       restore();
@@ -223,36 +229,39 @@ describe("Codex", () => {
     }
   });
 
-  it("passes modelReasoningEffort to exec", async () => {
-    const { url, close } = await startResponsesTestProxy({
-      statusCode: 200,
-      responseBodies: [
-        sse(
-          responseStarted("response_1"),
-          assistantMessage("Reasoning effort applied", "item_1"),
-          responseCompleted("response_1"),
-        ),
-      ],
-    });
-
-    const { args: spawnArgs, restore } = codexExecSpy();
-    const { client, cleanup } = createMockClient(url);
-
-    try {
-      const thread = client.startThread({
-        modelReasoningEffort: "high",
+  it.each(["high", "persistent"] as const)(
+    "passes %s modelReasoningEffort to exec",
+    async (effort) => {
+      const { url, close } = await startResponsesTestProxy({
+        statusCode: 200,
+        responseBodies: [
+          sse(
+            responseStarted("response_1"),
+            assistantMessage("Reasoning effort applied", "item_1"),
+            responseCompleted("response_1"),
+          ),
+        ],
       });
-      await thread.run("apply reasoning effort");
 
-      const commandArgs = spawnArgs[0];
-      expect(commandArgs).toBeDefined();
-      expectPair(commandArgs, ["--config", 'model_reasoning_effort="high"']);
-    } finally {
-      cleanup();
-      restore();
-      await close();
-    }
-  });
+      const { args: spawnArgs, restore } = codexExecSpy();
+      const { client, cleanup } = createMockClient(url);
+
+      try {
+        const thread = client.startThread({
+          modelReasoningEffort: effort,
+        });
+        await thread.run("apply reasoning effort");
+
+        const commandArgs = spawnArgs[0];
+        expect(commandArgs).toBeDefined();
+        expectPair(commandArgs, ["--config", `model_reasoning_effort="${effort}"`]);
+      } finally {
+        cleanup();
+        restore();
+        await close();
+      }
+    },
+  );
 
   it("passes networkAccessEnabled to exec", async () => {
     const { url, close } = await startResponsesTestProxy({
@@ -480,6 +489,48 @@ describe("Codex", () => {
         'approval_policy="on-request"',
       ]);
       expect(approvalPolicyOverrides.at(-1)).toBe('approval_policy="on-request"');
+    } finally {
+      cleanup();
+      restore();
+      await close();
+    }
+  });
+
+  it("passes raw permission maps unchanged while preserving override precedence", async () => {
+    const { url, close } = await startResponsesTestProxy({
+      statusCode: 200,
+      responseBodies: [
+        sse(
+          responseStarted("response_1"),
+          assistantMessage("Raw config overrides applied", "item_1"),
+          responseCompleted("response_1"),
+        ),
+      ],
+    });
+
+    // TODO(anp): Add the sandbox helper to the SDK workflow so this can use a deny-read override.
+    const writablePath = path.join(os.tmpdir(), "codex-sdk-config.env");
+    const permissionOverride = `permissions.sdk_test.filesystem={":root"="read",${JSON.stringify(writablePath)}="write"}`;
+    const { args: spawnArgs, restore } = codexExecSpy();
+    const { client, cleanup } = createTestClient({
+      baseUrl: url,
+      apiKey: "test",
+      config: { approval_policy: "never", default_permissions: "sdk_test" },
+      configOverrides: [permissionOverride, 'approval_policy="on-failure"'],
+    });
+
+    try {
+      const thread = client.startThread({ approvalPolicy: "on-request" });
+      await thread.run("apply raw config overrides");
+
+      const commandArgs = spawnArgs[0];
+      expectPair(commandArgs, ["--config", permissionOverride]);
+      expectPair(commandArgs, ["--config", 'default_permissions="sdk_test"']);
+      expect(collectConfigValues(commandArgs, "approval_policy")).toEqual([
+        'approval_policy="never"',
+        'approval_policy="on-failure"',
+        'approval_policy="on-request"',
+      ]);
     } finally {
       cleanup();
       restore();

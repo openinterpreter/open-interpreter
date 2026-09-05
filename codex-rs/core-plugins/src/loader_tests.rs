@@ -47,6 +47,121 @@ async fn agent_plugin_overlay_apps_are_not_runtime_active() {
     assert!(load_plugin_apps(&plugin_root).await.is_empty());
 }
 
+#[tokio::test]
+async fn agent_plugin_codex_mcp_overlay_only_forwards_matching_stdio_server_env_vars() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let plugin_root = temp_dir.path().join("plugin");
+    write_file(
+        &plugin_root.join("plugin.json"),
+        &format!(
+            r#"{{"$schema":"{AGENT_PLUGIN_SCHEMA_URI}","name":"plugin","extensions":{{"com.openai":{{"interface":{{"displayName":"Portable"}}}}}}}}"#
+        ),
+    );
+    write_file(
+        &plugin_root.join("mcp.json"),
+        r#"{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "shared": {
+      "type": "stdio",
+      "command": "portable-server",
+      "args": ["portable"],
+      "env": {
+        "DB_PASSWORD": "${DB_PASSWORD}",
+        "API_TOKEN": "portable-token",
+        "REMOTE_ONLY": "${REMOTE_ONLY}",
+        "UNLISTED": "${UNLISTED}"
+      }
+    },
+    "portable-only": {"type": "stdio", "command": "portable-only"}
+  }
+}"#,
+    );
+
+    let mut expected = load_plugin_mcp_servers(&plugin_root, /*auth_mode*/ None).await;
+    let Some(McpServerConfig {
+        transport: McpServerTransportConfig::Stdio { env, env_vars, .. },
+        ..
+    }) = expected.get_mut("shared")
+    else {
+        panic!("expected portable stdio server");
+    };
+    env.as_mut()
+        .expect("portable environment")
+        .remove("DB_PASSWORD");
+    env_vars.extend(["DB_PASSWORD".into(), "API_TOKEN".into()]);
+
+    write_file(
+        &plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"legacy-plugin"}"#,
+    );
+    write_file(
+        &plugin_root.join(".mcp.json"),
+        r#"{
+  "mcpServers": {
+    "shared": {
+      "command": "legacy-server",
+      "args": ["legacy"],
+      "env_vars": ["DB_PASSWORD", "API_TOKEN", {"name": "REMOTE_ONLY", "source": "remote"}]
+    },
+    "legacy-only": {"command": "legacy-only", "env_vars": ["UNLISTED"]}
+  }
+}"#,
+    );
+
+    assert_eq!(
+        load_plugin_mcp_servers(&plugin_root, /*auth_mode*/ None).await,
+        expected
+    );
+}
+
+#[tokio::test]
+async fn agent_plugin_codex_mcp_overlay_supports_inline_legacy_servers_without_portable_env() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let plugin_root = temp_dir.path().join("plugin");
+    write_file(
+        &plugin_root.join("plugin.json"),
+        &format!(r#"{{"$schema":"{AGENT_PLUGIN_SCHEMA_URI}","name":"plugin"}}"#),
+    );
+    write_file(
+        &plugin_root.join("mcp.json"),
+        r#"{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "shared": {
+      "type": "stdio",
+      "command": "portable-server"
+    }
+  }
+}"#,
+    );
+
+    let mut expected = load_plugin_mcp_servers(&plugin_root, /*auth_mode*/ None).await;
+    let Some(McpServerConfig {
+        transport: McpServerTransportConfig::Stdio { env_vars, .. },
+        ..
+    }) = expected.get_mut("shared")
+    else {
+        panic!("expected portable stdio server");
+    };
+    env_vars.push("TOKEN".into());
+
+    write_file(
+        &plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{
+  "name": "legacy-plugin",
+  "mcpServers": {
+    "shared": {"command": "legacy-server", "env_vars": ["TOKEN"]}
+  }
+}"#,
+    );
+
+    assert_eq!(
+        load_plugin_mcp_servers(&plugin_root, /*auth_mode*/ None).await,
+        expected
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn agent_plugin_mcp_rejects_config_symlink_outside_plugin_root() {
@@ -169,6 +284,7 @@ async fn installed_agent_plugin_uses_isolated_data_root_for_stdio_mcp() {
         Some(Product::Codex),
         /*remote_global_catalog_active*/ false,
         test_skill_root_loader().as_ref(),
+        &BTreeSet::new(),
     )
     .await;
 
@@ -199,10 +315,16 @@ async fn installed_agent_plugin_uses_isolated_data_root_for_stdio_mcp() {
 }
 
 #[test]
-fn configured_plugins_from_stack_merges_user_layers() {
+fn configured_plugins_from_stack_merges_enabled_effective_layers() {
     let temp_dir = TempDir::new().expect("tempdir");
     let stack = ConfigLayerStack::new(
         vec![
+            ConfigLayerEntry::new(
+                ConfigLayerSource::System {
+                    file: user_config_path(&temp_dir, "system.toml"),
+                },
+                toml::from_str("[plugins.system]\nenabled = true\n").expect("system config toml"),
+            ),
             user_layer(
                 user_config_path(&temp_dir, "config.toml"),
                 "[plugins.base]\nenabled = true\n",
@@ -211,12 +333,36 @@ fn configured_plugins_from_stack_merges_user_layers() {
                 user_config_path(&temp_dir, "work.config.toml"),
                 "[plugins.profile]\nenabled = false\n",
             ),
+            ConfigLayerEntry::new(
+                ConfigLayerSource::Project {
+                    dot_codex_folder: user_config_path(&temp_dir, "project/.codex"),
+                },
+                toml::from_str(
+                    "[plugins.profile]\nenabled = true\n[plugins.profile.mcp_servers.example]\nenabled = false\n",
+                )
+                .expect("project config toml"),
+            ),
+            ConfigLayerEntry::new_disabled(
+                ConfigLayerSource::Project {
+                    dot_codex_folder: user_config_path(&temp_dir, "project/untrusted/.codex"),
+                },
+                toml::from_str("[plugins.untrusted]\nenabled = true\n")
+                    .expect("untrusted project config toml"),
+                "project is untrusted",
+            ),
         ],
         ConfigRequirements::default(),
         ConfigRequirementsToml::default(),
     )
     .expect("valid config layer stack");
 
+    let project_mcp_servers = HashMap::from([(
+        "example".to_string(),
+        PluginMcpServerConfig {
+            enabled: false,
+            ..PluginMcpServerConfig::default()
+        },
+    )]);
     let plugins = configured_plugins_from_stack(&stack, temp_dir.path());
 
     assert_eq!(
@@ -232,11 +378,22 @@ fn configured_plugins_from_stack_merges_user_layers() {
             (
                 "profile".to_string(),
                 PluginConfig {
-                    enabled: false,
+                    enabled: true,
+                    mcp_servers: project_mcp_servers.clone(),
+                },
+            ),
+            (
+                "system".to_string(),
+                PluginConfig {
+                    enabled: true,
                     mcp_servers: HashMap::new(),
                 },
             ),
         ])
+    );
+    assert_eq!(
+        configured_plugin_mcp_server_policies(&stack).get("profile"),
+        Some(&project_mcp_servers)
     );
 }
 
@@ -338,11 +495,13 @@ enabled = true
         Some(Product::Codex),
         /*remote_global_catalog_active*/ false,
         test_skill_root_loader().as_ref(),
+        &BTreeSet::new(),
     )
     .await;
     let hooks_only = load_plugins_from_layer_stack_with_scope(
         &stack,
         HashMap::new(),
+        &BTreeSet::new(),
         &store,
         /*remote_global_catalog_active*/ false,
         PluginLoadScope::HooksOnly,
@@ -630,6 +789,9 @@ fn load_plugin_hooks_supports_inline_manifest_hook_list() {
 
 #[test]
 fn materialize_git_subdir_uses_sparse_checkout() {
+    let run_git = |args: &[&str], cwd| super::run_git(args, cwd, PluginGitMode::Manual);
+    let run_git_output =
+        |args: &[&str], cwd| super::run_git_output(args, cwd, PluginGitMode::Manual);
     let codex_home = tempfile::tempdir().expect("create codex home");
     let repo = tempfile::tempdir().expect("create git repo");
     let plugin_dir = repo.path().join("plugins/toolkit");
@@ -678,6 +840,9 @@ fn materialize_git_subdir_uses_sparse_checkout() {
 
 #[test]
 fn materialize_git_source_rejects_sha_that_resolves_to_hostile_default_branch() {
+    let run_git = |args: &[&str], cwd| super::run_git(args, cwd, PluginGitMode::Manual);
+    let run_git_output =
+        |args: &[&str], cwd| super::run_git_output(args, cwd, PluginGitMode::Manual);
     let codex_home = tempfile::tempdir().expect("create codex home");
     let repo = tempfile::tempdir().expect("create git repo");
     run_git(&["init"], Some(repo.path())).expect("init git repo");

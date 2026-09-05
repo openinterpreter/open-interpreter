@@ -1,3 +1,7 @@
+use std::error::Error;
+use std::fmt;
+use std::time::Duration;
+
 use codex_protocol::ToolName;
 use serde::Deserialize;
 use serde::Serialize;
@@ -38,6 +42,29 @@ pub enum WaitOutcome {
     MissingCell(RuntimeResponse),
 }
 
+impl WaitOutcome {
+    /// Returns timing for this wait or termination request, when supplied by its host.
+    pub fn code_mode_host_duration(&self) -> Option<Duration> {
+        match self {
+            Self::LiveCell(response) | Self::MissingCell(response) => {
+                response.code_mode_host_duration()
+            }
+        }
+    }
+
+    /// Records the enclosing host request's duration before wire conversion.
+    pub fn with_code_mode_host_duration(self, code_mode_host_duration: Duration) -> Self {
+        match self {
+            Self::LiveCell(response) => {
+                Self::LiveCell(response.with_code_mode_host_duration(code_mode_host_duration))
+            }
+            Self::MissingCell(response) => {
+                Self::MissingCell(response.with_code_mode_host_duration(code_mode_host_duration))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
 pub enum ExecuteToPendingOutcome {
     Pending {
@@ -62,22 +89,85 @@ impl From<WaitOutcome> for RuntimeResponse {
     }
 }
 
+/// Runtime output with optional timing for the host request that observed it.
+///
+/// The JavaScript session returns untimed output. The host handler records its
+/// complete request duration before conversion; wire conversions preserve that
+/// field and reject untimed output. Decoded host responses always contain timing,
+/// including measured zero. Raw traces also retain timing when present.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum RuntimeResponse {
     Yielded {
         cell_id: CellId,
         content_items: Vec<FunctionCallOutputContentItem>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code_mode_host_duration: Option<Duration>,
     },
     Terminated {
         cell_id: CellId,
         content_items: Vec<FunctionCallOutputContentItem>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code_mode_host_duration: Option<Duration>,
     },
     Result {
         cell_id: CellId,
         content_items: Vec<FunctionCallOutputContentItem>,
         error_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code_mode_host_duration: Option<Duration>,
     },
 }
+
+impl RuntimeResponse {
+    /// Returns timing for this observation, excluding background work between requests.
+    pub fn code_mode_host_duration(&self) -> Option<Duration> {
+        match self {
+            Self::Yielded {
+                code_mode_host_duration,
+                ..
+            }
+            | Self::Terminated {
+                code_mode_host_duration,
+                ..
+            }
+            | Self::Result {
+                code_mode_host_duration,
+                ..
+            } => *code_mode_host_duration,
+        }
+    }
+
+    /// Records the enclosing host request's duration before wire conversion.
+    pub fn with_code_mode_host_duration(mut self, code_mode_host_duration: Duration) -> Self {
+        match &mut self {
+            Self::Yielded {
+                code_mode_host_duration: value,
+                ..
+            }
+            | Self::Terminated {
+                code_mode_host_duration: value,
+                ..
+            }
+            | Self::Result {
+                code_mode_host_duration: value,
+                ..
+            } => *value = Some(code_mode_host_duration),
+        }
+        self
+    }
+}
+
+/// An untimed runtime response cannot be encoded for delivery to a host client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MissingCodeModeHostDuration;
+
+impl fmt::Display for MissingCodeModeHostDuration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("code-mode response is missing host duration")
+    }
+}
+
+impl Error for MissingCodeModeHostDuration {}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CodeModeNestedToolCall {
@@ -87,3 +177,7 @@ pub struct CodeModeNestedToolCall {
     pub tool_kind: CodeModeToolKind,
     pub input: Option<JsonValue>,
 }
+
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;

@@ -4,7 +4,8 @@ expression: contents
 ---
   Would you like to make the following edits?
 
-  Reason: The model wants to apply changes
+  Description: The model wants to apply changes
+  Destination: /tmp/project/README.md
 
 › 1. Yes, proceed (y)
   2. Yes, and don't ask again for these files (a)

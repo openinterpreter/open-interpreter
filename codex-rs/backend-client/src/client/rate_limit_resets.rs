@@ -25,6 +25,9 @@ impl Client {
         Ok(RateLimitsWithResetCredits {
             rate_limits: Self::rate_limit_snapshots_from_payload(payload.rate_limits),
             rate_limit_reset_credits: payload.rate_limit_reset_credits,
+            account_id: payload.account_id,
+            user_id: payload.user_id,
+            rate_limit_upsell: payload.rate_limit_upsell,
         })
     }
 

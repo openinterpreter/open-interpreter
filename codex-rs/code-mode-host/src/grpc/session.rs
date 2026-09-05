@@ -71,6 +71,7 @@ pub(super) struct SessionState {
 
 pub(super) struct ExecutionState {
     pub(super) execution_id: String,
+    pub(super) traceparent: Option<String>,
     pub(super) tool_call_sequence: u64,
     permit: OwnedSemaphorePermit,
 }
@@ -296,6 +297,7 @@ impl GrpcSession {
         execution_id: String,
         cell_id: String,
         permit: OwnedSemaphorePermit,
+        traceparent: Option<String>,
     ) -> Result<(), Status> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if !state.pending_executions.remove(&execution_id) {
@@ -308,6 +310,7 @@ impl GrpcSession {
         };
         entry.insert(ExecutionState {
             execution_id,
+            traceparent,
             tool_call_sequence: 0,
             permit,
         });

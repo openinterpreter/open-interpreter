@@ -5,6 +5,13 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AllowDenyRequirement": {
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
+    },
     "AnalyticsConfig": {
       "additionalProperties": true,
       "properties": {
@@ -55,6 +62,17 @@
           "default": true,
           "type": "boolean"
         },
+        "links": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppLinksConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Per-account approval settings keyed by link ID."
+        },
         "open_world_enabled": {
           "type": [
             "boolean",
@@ -72,6 +90,36 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "AppLinkConfig": {
+      "description": "Approval settings for a connected account within an app.",
+      "properties": {
+        "approvals_reviewer": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ApprovalsReviewer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "default_tools_approval_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppToolApproval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AppLinksConfig": {
+      "description": "Account settings for a single app.",
       "type": "object"
     },
     "AppToolApproval": {
@@ -237,6 +285,178 @@
         }
       ]
     },
+    "BrowserUseConfig": {
+      "properties": {
+        "allow_history_access": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "default_origin_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BrowserUseOriginPolicyConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "origins": {
+          "additionalProperties": {
+            "$ref": "#/definitions/BrowserUseOriginPolicyConfig"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "BrowserUseOriginPolicyConfig": {
+      "properties": {
+        "access": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AllowDenyRequirement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "downloads": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AllowDenyRequirement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "full_cdp_access": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AllowDenyRequirement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uploads": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AllowDenyRequirement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ComputerUseConfig": {
+      "properties": {
+        "default_app_access": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AllowDenyRequirement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "macos": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ComputerUseMacosConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "windows": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ComputerUseWindowsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ComputerUseMacosConfig": {
+      "properties": {
+        "bundle_ids": {
+          "additionalProperties": {
+            "$ref": "#/definitions/AllowDenyRequirement"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ComputerUseWindowsConfig": {
+      "properties": {
+        "aumids": {
+          "additionalProperties": {
+            "$ref": "#/definitions/AllowDenyRequirement"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "exes": {
+          "items": {
+            "$ref": "#/definitions/ComputerUseWindowsExeConfig"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ComputerUseWindowsExeConfig": {
+      "properties": {
+        "access": {
+          "$ref": "#/definitions/AllowDenyRequirement"
+        },
+        "binary_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "product_name": {
+          "type": "string"
+        },
+        "publisher_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "access",
+        "product_name",
+        "publisher_name"
+      ],
+      "type": "object"
+    },
     "Config": {
       "additionalProperties": true,
       "properties": {
@@ -271,10 +491,30 @@
           ],
           "description": "[UNSTABLE] Optional default for where approval requests are routed for review."
         },
+        "browser_use": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BrowserUseConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "compact_prompt": {
           "type": [
             "string",
             "null"
+          ]
+        },
+        "computer_use": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ComputerUseConfig"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "desktop": {

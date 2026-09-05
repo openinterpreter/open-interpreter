@@ -95,7 +95,9 @@ def _smoothstep(value: float) -> float:
     return value * value * (3.0 - 2.0 * value)
 
 
-def _soft_alpha(distance: int, transparent_threshold: float, opaque_threshold: float) -> int:
+def _soft_alpha(
+    distance: int, transparent_threshold: float, opaque_threshold: float
+) -> int:
     if distance <= transparent_threshold:
         return 0
     if distance >= opaque_threshold:
@@ -132,7 +134,9 @@ def _spill_channels(key: Color) -> list[int]:
     key_max = max(key)
     if key_max < 128:
         return []
-    return [idx for idx, value in enumerate(key) if value >= key_max - 16 and value >= 128]
+    return [
+        idx for idx, value in enumerate(key) if value >= key_max - 16 and value >= 128
+    ]
 
 
 def _key_channel_dominance(rgb: Color, key: Color) -> float:
@@ -358,7 +362,10 @@ def _remove_chroma_key(args: argparse.Namespace) -> None:
     print(f"Transparent pixels: {transparent_after}/{total}")
     print(f"Partially transparent pixels: {partial_after}/{total}")
     if transparent == 0:
-        print("Warning: no pixels matched the key color before feathering.", file=sys.stderr)
+        print(
+            "Warning: no pixels matched the key color before feathering.",
+            file=sys.stderr,
+        )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -425,7 +432,9 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Alias for --spill-cleanup; decontaminate key-color edge spill.",
     )
-    parser.add_argument("--force", action="store_true", help="Overwrite an existing output file.")
+    parser.add_argument(
+        "--force", action="store_true", help="Overwrite an existing output file."
+    )
     return parser
 
 

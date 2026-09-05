@@ -1,0 +1,31 @@
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["exec_server_compat_test.bzl"])
+
+# exec_server_compat_test wraps this shared binary with current or released builds.
+# Keep it manual so only wrapped compatibility tests enter the normal test graph.
+rust_test(
+    name = "exec-server-compat-test-bin",
+    srcs = ["exec_server_compat_test.rs"],
+    crate_name = "exec_server_compat_test",
+    crate_root = "exec_server_compat_test.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+    ],
+    visibility = ["//codex-rs/exec-server:__pkg__"],
+    deps = [
+        "//codex-rs/exec-server",
+        "//codex-rs/exec-server/tests/support",
+        "@crates//:anyhow",
+        "@crates//:pretty_assertions",
+        "@crates//:serde_json",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+        "@crates//:wiremock",
+    ],
+)

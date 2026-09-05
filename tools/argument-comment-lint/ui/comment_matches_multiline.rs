@@ -6,6 +6,8 @@ fn run_git_for_stdout(repo_root: &str, args: Vec<&str>, env: Option<&str>) -> St
     String::new()
 }
 
+// Keep the call split across lines so this fixture tests multiline arguments.
+#[rustfmt::skip]
 fn main() {
     let _ = run_git_for_stdout(
         "/tmp/repo",

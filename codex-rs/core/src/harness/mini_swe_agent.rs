@@ -319,8 +319,28 @@ fn build_messages(items: &[ResponseItem]) -> Result<Vec<Value>, serde_json::Erro
             }
             ResponseItem::FunctionCallOutput {
                 call_id, output, ..
+            } => {
+                let Some(call_id) = call_id.as_ref() else {
+                    continue;
+                };
+                flush_pending_assistant_content(
+                    &mut messages,
+                    &mut pending_assistant_content,
+                    &mut pending_reasoning_content,
+                );
+                flush_pending_tool_calls(
+                    &mut messages,
+                    &mut pending_tool_calls,
+                    &mut pending_tool_call_content,
+                    &mut pending_reasoning_content,
+                );
+                messages.push(json!({
+                    "content": mini_swe_agent_tool_output_content(output),
+                    "tool_call_id": call_id,
+                    "role": "tool",
+                }));
             }
-            | ResponseItem::CustomToolCallOutput {
+            ResponseItem::CustomToolCallOutput {
                 call_id, output, ..
             } => {
                 flush_pending_assistant_content(

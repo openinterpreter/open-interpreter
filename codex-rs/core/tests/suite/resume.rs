@@ -1,5 +1,6 @@
 use anyhow::Result;
 use codex_core::TurnInputRequest;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::ByteRange;
@@ -18,6 +19,38 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_restores_windows_sandbox_override() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex();
+    let initial = builder.build(&server).await?;
+    core_test_support::submit_thread_settings(
+        &initial.codex,
+        ThreadSettingsOverrides {
+            windows_sandbox_level: Some(WindowsSandboxLevel::Elevated),
+            ..Default::default()
+        },
+    )
+    .await?;
+    initial.codex.ensure_rollout_materialized().await;
+    let settings = initial.codex.restorable_thread_settings().await;
+
+    let resumed = builder.restart(&server, &initial).await?;
+    resumed.codex.restore_thread_settings(settings).await?;
+
+    assert_eq!(
+        resumed
+            .codex
+            .restorable_thread_settings()
+            .await
+            .windows_sandbox_level,
+        Some(WindowsSandboxLevel::Elevated)
+    );
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {

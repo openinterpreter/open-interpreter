@@ -57,6 +57,7 @@ fn environment_state(
         .collect();
     EnvironmentsState {
         environments,
+        shell_version: None,
         current_date,
         timezone,
         network,
@@ -352,4 +353,45 @@ fn serialize_environment_context_prefers_environment_shell_when_present() {
     );
 
     assert_eq!(context.render(), expected);
+}
+
+fn powershell_environment() -> EnvironmentsState {
+    let cwd = PathUri::from_abs_path(&test_abs_path("/repo"));
+    EnvironmentsState {
+        environments: [environment("local", cwd, "powershell")].into(),
+        shell_version: Some("5.1".to_string()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn shell_version_diff_restates_shell_from_legacy_snapshot() {
+    let current = powershell_environment();
+    let mut previous = current.snapshot();
+    previous.shell_version = None;
+    previous.environments.get_mut("local").expect("local").shell = None;
+    let rendered = current
+        .render_diff(PreviousSectionState::Known(&previous))
+        .expect("shell version update")
+        .render();
+    assert!(
+        rendered.contains("<shell>powershell</shell>\n  <shell_version>5.1</shell_version>"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn shell_version_diff_clears_previously_visible_version() {
+    let previous = powershell_environment();
+    let current = EnvironmentsState {
+        shell_version: None,
+        ..previous.clone()
+    };
+    assert_eq!(
+        current
+            .render_diff(PreviousSectionState::Known(&previous.snapshot()))
+            .expect("removed shell version")
+            .render(),
+        "<environment_context>\n  <shell_version status=\"unavailable\" />\n</environment_context>"
+    );
 }

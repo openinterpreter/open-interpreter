@@ -5,21 +5,6 @@ use pretty_assertions::assert_eq;
 use url::Url;
 
 #[test]
-fn websocket_host_accepts_local_and_secure_endpoints() {
-    for endpoint in [
-        "ws://127.0.0.1:8765",
-        "wss://example.test/code-mode",
-        "ws://alice:secret@example.test/code-mode",
-        "wss://alice:secret@example.test/code-mode",
-    ] {
-        assert_eq!(
-            parse_host_url(endpoint),
-            Ok(Url::parse(endpoint).expect("test endpoint should parse"))
-        );
-    }
-}
-
-#[test]
 fn grpc_host_accepts_local_and_secure_endpoints() {
     for endpoint in ["http://127.0.0.1:8765", "https://example.test"] {
         assert_eq!(
@@ -50,8 +35,13 @@ fn code_mode_host_rejects_invalid_endpoints() {
     for endpoint in [
         "ftp://127.0.0.1:8765",
         "ws://",
-        "not a host endpoint",
+        "ws://127.0.0.1:8765",
+        "wss://example.test/code-mode",
+        "ws://alice:secret@example.test/code-mode",
+        "wss://alice:secret@example.test/code-mode",
         "wss://example.test/code-mode#fragment",
+        "http://",
+        "not a host endpoint",
         "https://example.test/code-mode#fragment",
         "https://example.test/code-mode",
         "http://example.test/?token=secret",
@@ -64,22 +54,10 @@ fn code_mode_host_rejects_invalid_endpoints() {
 }
 
 #[test]
-fn omitted_websocket_host_selects_local_transport() {
+fn omitted_host_selects_local_transport() {
     assert_eq!(
         CodeModeHostTransport::from(AppServerCodeModeHostArgs::default()),
         CodeModeHostTransport::Local
-    );
-}
-
-#[test]
-fn explicit_websocket_host_selects_remote_transport() {
-    let url = Url::parse("wss://example.test/code-mode").expect("test endpoint should parse");
-
-    assert_eq!(
-        CodeModeHostTransport::from(AppServerCodeModeHostArgs {
-            code_mode_host: Some(url.clone()),
-        }),
-        CodeModeHostTransport::WebSocket(url)
     );
 }
 

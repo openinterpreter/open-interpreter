@@ -114,7 +114,8 @@ fn apply_reasoning_effort(request: &mut Value, reasoning_effort: Option<Reasonin
         ReasoningEffort::High
         | ReasoningEffort::XHigh
         | ReasoningEffort::Max
-        | ReasoningEffort::Ultra => {
+        | ReasoningEffort::Ultra
+        | ReasoningEffort::Persistent => {
             request_object.insert("reasoning_effort".to_string(), json!("high"));
             request_object.insert("thinking".to_string(), json!({ "type": "enabled" }));
         }
@@ -449,6 +450,9 @@ pub(super) fn build_messages_with_options(
             ResponseItem::FunctionCallOutput {
                 call_id, output, ..
             } => {
+                let Some(call_id) = call_id.as_deref() else {
+                    continue;
+                };
                 push_tool_output_if_expected(
                     &mut messages,
                     &mut pending_tool_calls,

@@ -15,6 +15,8 @@ use tracing::debug;
 use crate::http_client_adapter::StreamableHttpRedirectMode;
 use crate::oauth::StoredOAuthTokenStatus;
 use crate::oauth::oauth_token_status;
+use crate::oauth_callback::McpOAuthCallbackMode;
+use crate::oauth_callback::callback_mode;
 use crate::oauth_http_client::OAuthHttpClientAdapter;
 use crate::utils::build_default_headers;
 use codex_config::types::AuthKeyringBackendKind;
@@ -39,6 +41,7 @@ impl OAuthDiscoveryTimeout {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamableHttpOAuthDiscovery {
     pub scopes_supported: Option<Vec<String>>,
+    pub callback_mode: McpOAuthCallbackMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,17 +228,19 @@ async fn discover_streamable_http_oauth_with_headers_and_http_client(
         OAuthDiscoveryTimeout::Requested => OAuthHttpClientAdapter::new_with_redirect_mode(
             http_client,
             default_headers,
+            url,
             has_configured_headers,
             redirect_mode,
-        ),
+        )?,
         OAuthDiscoveryTimeout::Capped(max_timeout) => {
             OAuthHttpClientAdapter::new_with_max_timeout_and_redirect_mode(
                 http_client,
                 default_headers,
+                url,
                 max_timeout,
                 has_configured_headers,
                 redirect_mode,
-            )
+            )?
         }
     };
     let mut authorization_manager =
@@ -261,9 +266,14 @@ async fn discover_streamable_http_oauth_with_manager(
 ) -> Result<Option<StreamableHttpOAuthDiscovery>> {
     match authorization_manager.resolve_metadata().boxed().await {
         Ok(resolution) if !resolution.source.is_discovered() => Ok(None),
-        Ok(resolution) => Ok(Some(StreamableHttpOAuthDiscovery {
-            scopes_supported: normalize_scopes(resolution.metadata.scopes_supported),
-        })),
+        Ok(resolution) => {
+            let metadata = resolution.metadata;
+            Ok(Some(StreamableHttpOAuthDiscovery {
+                callback_mode: callback_mode(&metadata)
+                    .unwrap_or(McpOAuthCallbackMode::CallbackSpecific),
+                scopes_supported: normalize_scopes(metadata.scopes_supported),
+            }))
+        }
         Err(AuthError::NoAuthorizationSupport) => Ok(None),
         Err(err) => Err(err.into()),
     }
@@ -666,6 +676,7 @@ mod tests {
         let server = spawn_oauth_discovery_server(serde_json::json!({
             "authorization_endpoint": "https://example.com/authorize",
             "token_endpoint": "https://example.com/token",
+            "authorization_response_iss_parameter_supported": true,
             "scopes_supported": ["profile", " email ", "profile", "", "   "],
         }))
         .await;
@@ -683,8 +694,42 @@ mod tests {
         .expect("oauth support should be detected");
 
         assert_eq!(
-            discovery.scopes_supported,
-            Some(vec!["profile".to_string(), "email".to_string()])
+            discovery,
+            StreamableHttpOAuthDiscovery {
+                scopes_supported: Some(vec!["profile".to_string(), "email".to_string()]),
+                callback_mode: McpOAuthCallbackMode::IssuerBound,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn issuer_support_without_a_metadata_issuer_falls_back_to_distinct_callbacks() {
+        let server = spawn_oauth_discovery_server(serde_json::json!({
+            "issuer": null,
+            "authorization_endpoint": "https://example.com/authorize",
+            "token_endpoint": "https://example.com/token",
+            "authorization_response_iss_parameter_supported": true,
+        }))
+        .await;
+
+        let discovery = discover_streamable_http_oauth(
+            &server.url,
+            /*http_headers*/ None,
+            /*env_http_headers*/ None,
+            test_http_client(),
+            OAuthDiscoveryTimeout::LOCAL,
+            StreamableHttpRedirectMode::Legacy,
+        )
+        .await
+        .expect("discovery should succeed")
+        .expect("oauth support should be detected");
+
+        assert_eq!(
+            discovery,
+            StreamableHttpOAuthDiscovery {
+                scopes_supported: None,
+                callback_mode: McpOAuthCallbackMode::CallbackSpecific,
+            }
         );
     }
 

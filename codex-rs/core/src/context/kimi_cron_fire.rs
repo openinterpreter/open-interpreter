@@ -1,4 +1,5 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItemKind;
 
 /// A scheduled Kimi Code prompt re-injected into its owning thread.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +33,10 @@ impl KimiCronFire {
 }
 
 impl ContextualUserFragment for KimiCronFire {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("kimi.cron_fire".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "user"
     }

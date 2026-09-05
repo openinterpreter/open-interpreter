@@ -25,19 +25,20 @@ pub enum ModelContextScanProgress {
 /// The scan stops once it has both:
 ///
 /// - `saw_compaction`: a `CompactedItem` with `replacement_history` and `window_number`;
-/// - `saw_completed_turn_context`: a completed user turn with a compatible `TurnContextItem`.
+/// - `saw_completed_turn_context`: a completed turn with a compatible `TurnContextItem` and a
+///   durable context baseline.
 ///
 /// If the scan reaches the beginning before finding a bounded cutoff, it has already collected
 /// the complete replay and so we can return that directly.
 ///
-/// `TurnContextItem` does not identify whether it came from a user turn, so one only counts after
-/// the same turn also proves a user-turn boundary: a paginated
-/// `ItemCompleted(UserMessage)` marker, agent message, or inter-agent message. Paginated writers
-/// persist that marker for real user turns; older rollouts without it conservatively scan to the
-/// beginning. A raw `role=user` response item is not sufficient because contextual user fragments
-/// use that role but do not count as turn boundaries during reconstruction. The compaction restores
-/// model-visible items; the turn context restores previous settings (`model`, `comp_hash`, and
-/// `realtime_active`) and the reference baseline.
+/// A turn establishes a context baseline with a user-turn boundary (a paginated
+/// `ItemCompleted(UserMessage)` marker, agent message, or inter-agent message), or a full
+/// `WorldState` snapshot newer than that turn's latest compaction. The snapshot also lets turns
+/// with empty input supply resume metadata, matching rollout reconstruction. Without either,
+/// the scan continues to older turns. A raw `role=user` response item is not sufficient because
+/// contextual user fragments use that role but do not count as turn boundaries during reconstruction.
+/// The compaction restores model-visible items; the turn context restores previous settings
+/// (`model`, `comp_hash`, and `realtime_active`) and the reference baseline.
 ///
 /// These paginated shapes disable the bounded cutoff:
 ///
@@ -91,6 +92,7 @@ impl ModelContextScan {
             }
             RolloutItem::Compacted(_) => {
                 self.saw_compaction = true;
+                self.active_segment.saw_compaction = true;
             }
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_)) => {
                 // Paginated threads reject rollback. Keep old rollouts correct rather than
@@ -150,11 +152,16 @@ impl ModelContextScan {
             RolloutItem::EventMsg(EventMsg::UserMessage(_)) => {
                 self.active_segment.has_user_turn = true;
             }
+            RolloutItem::WorldState(state) => {
+                self.active_segment.has_full_world_state |=
+                    state.full && !self.active_segment.saw_compaction;
+            }
             RolloutItem::EventMsg(_)
             | RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::RealtimeItem(_)
             | RolloutItem::SecurityRiskScore(_)
-            | RolloutItem::WorldState(_) => {}
+            | RolloutItem::TokenUsageRecord(_) => {}
         }
 
         if self.has_bounded_cutoff() {
@@ -165,7 +172,9 @@ impl ModelContextScan {
     }
 
     fn finalize_active_segment(&mut self) {
-        if self.active_segment.has_user_turn && self.active_segment.has_turn_context {
+        if self.active_segment.has_turn_context
+            && (self.active_segment.has_user_turn || self.active_segment.has_full_world_state)
+        {
             self.saw_completed_turn_context = true;
         }
         self.active_segment = ActiveTurnSegment::default();
@@ -181,6 +190,8 @@ struct ActiveTurnSegment {
     turn_id: Option<String>,
     has_user_turn: bool,
     has_turn_context: bool,
+    has_full_world_state: bool,
+    saw_compaction: bool,
 }
 
 fn turn_ids_are_compatible(active_turn_id: Option<&str>, item_turn_id: Option<&str>) -> bool {

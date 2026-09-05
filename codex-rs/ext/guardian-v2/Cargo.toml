@@ -13,19 +13,26 @@ doctest = false
 workspace = true
 
 [dependencies]
+codex-analytics = { workspace = true }
 codex-api = { workspace = true }
 codex-core = { workspace = true }
 codex-extension-api = { workspace = true }
 codex-features = { workspace = true }
+codex-guardian-context = { workspace = true }
 codex-history = { workspace = true }
 codex-http-client = { workspace = true }
 codex-login = { workspace = true }
 codex-model-provider = { workspace = true }
+codex-models-manager = { workspace = true }
+codex-network-proxy = { workspace = true }
 codex-protocol = { workspace = true }
+dirs = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }

@@ -845,6 +845,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             client_metadata: None,
+            access_programs: None,
             text: Some(TextControls {
                 verbosity: Some(OpenAiVerbosity::Low),
                 format: None,

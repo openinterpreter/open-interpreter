@@ -1,0 +1,22 @@
+---
+source: tui/src/bottom_pane/mod.rs
+expression: "render_snapshot(&pane, area)"
+---
+                                            
+  Choose how to continue working            
+  A long description wraps to fit the       
+  available terminal width.                 
+  A long description wraps to fit the       
+  available terminal width.                 
+  A long description wraps to fit the       
+  available terminal width.                 
+  …                                         
+                                            
+› 1. Open usage settings                    
+  2. Notify owner                           
+                                            
+  Press a number to choose · esc to dismiss 
+                                            
+› Ask Codex to do anything                  
+                                            
+  ? for shortcuts        100% context left

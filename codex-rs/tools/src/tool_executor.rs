@@ -123,5 +123,8 @@ pub trait ToolExecutor<Invocation>: Send + Sync {
         false
     }
 
-    fn handle(&self, invocation: Invocation) -> ToolExecutorFuture<'_>;
+    /// Handles one invocation without retaining capabilities borrowed by the host.
+    fn handle<'a>(&'a self, invocation: Invocation) -> ToolExecutorFuture<'a>
+    where
+        Invocation: 'a;
 }

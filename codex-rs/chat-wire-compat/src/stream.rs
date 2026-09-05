@@ -416,6 +416,7 @@ async fn finalize_and_complete(
                 }),
                 codex_rollout_budget_units: None,
             }),
+            usage_metadata: None,
             end_turn: None,
         }))
         .await

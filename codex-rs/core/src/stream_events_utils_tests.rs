@@ -70,6 +70,14 @@ fn external_context_pollution_items_include_web_search_and_tool_search() {
             tools: Vec::new(),
             internal_chat_message_metadata_passthrough: None,
         },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: None,
+            name: Some("notifications".to_string()),
+            namespace: Some("slack".to_string()),
+            output: FunctionCallOutputPayload::from_text("new message".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
     ];
 
     assert!(
@@ -106,7 +114,9 @@ fn external_context_pollution_items_exclude_local_tool_calls() {
         },
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "call-1".to_string(),
+            call_id: Some("call-1".to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text("ok".to_string()),
             internal_chat_message_metadata_passthrough: None,
         },
@@ -281,6 +291,7 @@ async fn handle_output_item_done_returns_contributed_last_agent_message() {
     let (registry, hosted_specs) = tool_registry_for_test_step(step_context.as_ref());
     let router = Arc::new(ToolRouter::from_registry(
         step_context.turn.as_ref(),
+        step_context.turn.model_info(),
         registry,
         hosted_specs,
         &Default::default(),

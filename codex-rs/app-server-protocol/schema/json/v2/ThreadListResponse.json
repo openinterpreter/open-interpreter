@@ -5,8 +5,35 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AgentMessageDelivery": {
+      "enum": [
+        "async"
+      ],
+      "type": "string"
+    },
     "AgentPath": {
       "type": "string"
+    },
+    "AsyncUserInputQuestion": {
+      "additionalProperties": false,
+      "properties": {
+        "options": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "type": "object"
     },
     "ByteRange": {
       "properties": {
@@ -35,6 +62,7 @@
             "contextWindowExceeded",
             "sessionBudgetExceeded",
             "usageLimitExceeded",
+            "rateLimitExceeded",
             "serverOverloaded",
             "cyberPolicy",
             "misalignmentPolicyViolation",
@@ -201,7 +229,11 @@
         "sendInput",
         "resumeAgent",
         "wait",
-        "closeAgent"
+        "closeAgent",
+        "sendMessage",
+        "followupTask",
+        "interruptAgent",
+        "listAgents"
       ],
       "type": "string"
     },
@@ -209,7 +241,8 @@
       "enum": [
         "inProgress",
         "completed",
-        "failed"
+        "failed",
+        "interrupted"
       ],
       "type": "string"
     },
@@ -432,6 +465,114 @@
       ],
       "type": "object"
     },
+    "FunctionCallOutputBody": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/definitions/FunctionCallOutputContentItem"
+          },
+          "type": "array"
+        }
+      ]
+    },
+    "FunctionCallOutputContentItem": {
+      "description": "Responses API compatible content items that can be returned by a tool call. This is a subset of ContentItem with the types we support as function call outputs.",
+      "oneOf": [
+        {
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "input_text"
+              ],
+              "title": "InputTextFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "type"
+          ],
+          "title": "InputTextFunctionCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ImageDetail"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "image_url": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "input_image"
+              ],
+              "title": "InputImageFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "image_url",
+            "type"
+          ],
+          "title": "InputImageFunctionCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "audio_url": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "input_audio"
+              ],
+              "title": "InputAudioFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "audio_url",
+            "type"
+          ],
+          "title": "InputAudioFunctionCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "encrypted_content": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "encrypted_content"
+              ],
+              "title": "EncryptedContentFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "encrypted_content",
+            "type"
+          ],
+          "title": "EncryptedContentFunctionCallOutputContentItem",
+          "type": "object"
+        }
+      ]
+    },
     "GitInfo": {
       "properties": {
         "branch": {
@@ -648,6 +789,47 @@
         }
       ]
     },
+    "MisalignmentErrorDetails": {
+      "properties": {
+        "detailedExplanation": {
+          "description": "A substantive localized explanation is required before offering continuation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorType": {
+          "description": "Open-ended classification; clients must accept categories added by Responses.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steer": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MisalignmentSteer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Instruction to submit as the next turn's user input if continuation is confirmed."
+        }
+      },
+      "type": "object"
+    },
+    "MisalignmentSteer": {
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "type": "object"
+    },
     "NonSteerableTurnKind": {
       "enum": [
         "review",
@@ -771,7 +953,8 @@
       "enum": [
         "started",
         "interacted",
-        "interrupted"
+        "interrupted",
+        "completed"
       ],
       "type": "string"
     },
@@ -929,9 +1112,25 @@
           ],
           "description": "Optional Git metadata captured when the thread was created."
         },
+        "historyMode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThreadHistoryMode"
+            }
+          ],
+          "default": "legacy",
+          "description": "Persisted thread history contract selected when this thread was created."
+        },
         "id": {
           "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
           "type": "string"
+        },
+        "model": {
+          "description": "Current configured model when loaded, otherwise the latest persisted model. Null when unavailable. This is not per-turn execution telemetry.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "modelProvider": {
           "description": "Model provider used for this thread (for example, 'openai').",
@@ -961,6 +1160,24 @@
         "preview": {
           "description": "Usually the first user message in the thread, if available.",
           "type": "string"
+        },
+        "projectId": {
+          "description": "Canonical project assignment owned by app-server, if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoningEffort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Current configured reasoning effort when loaded, otherwise the latest persisted effort. Null when unset or unavailable. This is not per-turn execution telemetry."
         },
         "recencyAt": {
           "description": "Unix timestamp (in seconds) used for thread recency ordering.",
@@ -1043,6 +1260,7 @@
         "id",
         "modelProvider",
         "preview",
+        "projectId",
         "sessionId",
         "source",
         "status",
@@ -1136,6 +1354,17 @@
         },
         {
           "properties": {
+            "delivery": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AgentMessageDelivery"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "id": {
               "type": "string"
             },
@@ -1161,6 +1390,16 @@
               ],
               "default": null
             },
+            "questions": {
+              "default": null,
+              "items": {
+                "$ref": "#/definitions/AsyncUserInputQuestion"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
             "text": {
               "type": "string"
             },
@@ -1178,6 +1417,40 @@
             "type"
           ],
           "title": "AgentMessageThreadItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "output": {
+              "$ref": "#/definitions/FunctionCallOutputBody"
+            },
+            "type": {
+              "enum": [
+                "functionCallOutput"
+              ],
+              "title": "FunctionCallOutputThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "output",
+            "type"
+          ],
+          "title": "FunctionCallOutputThreadItem",
           "type": "object"
         },
         {
@@ -2078,6 +2351,18 @@
         },
         "message": {
           "type": "string"
+        },
+        "misalignment": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MisalignmentErrorDetails"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional public explanation and continuation instruction for a misalignment block."
         }
       },
       "required": [

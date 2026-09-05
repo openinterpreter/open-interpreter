@@ -109,7 +109,9 @@ def validate_skill(skill_path):
                 fence_length = 0
             continue
 
-        if fence_marker is None and re.fullmatch(r"[ ]{0,3}\[TODO:[^\n]*\][ \t]*", line):
+        if fence_marker is None and re.fullmatch(
+            r"[ ]{0,3}\[TODO:[^\n]*\][ \t]*", line
+        ):
             return False, "Skill instructions contain an unfinished TODO placeholder"
 
     return True, "Skill is valid!"

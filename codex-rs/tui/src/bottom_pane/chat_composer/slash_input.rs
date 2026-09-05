@@ -211,7 +211,7 @@ impl ChatComposer {
         &mut self,
         key_event: KeyEvent,
     ) -> (InputResult, bool) {
-        if self.handle_shortcut_overlay_key(&key_event) {
+        if self.handle_empty_prompt_shortcut(&key_event) {
             return (InputResult::None, true);
         }
         if key_event.code == KeyCode::Esc {

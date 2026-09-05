@@ -8,6 +8,16 @@ use serde::Serialize;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct AuthRecoveryNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub provider: String,
+    pub message: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct DeprecationNoticeNotification {
     /// Concise summary of what is deprecated.
     pub summary: String,
@@ -33,6 +43,17 @@ pub struct GuardianWarningNotification {
     pub thread_id: String,
     /// Concise guardian warning message for the user.
     pub message: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct StrictReviewRequiredNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    /// Unix timestamp (in milliseconds) when this review started.
+    #[ts(type = "number")]
+    pub started_at_ms: i64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

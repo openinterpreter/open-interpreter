@@ -60,12 +60,13 @@ fn session_end_ignores_successful_output() {
 
 fn handler(matcher: Option<&str>) -> ConfiguredHandler {
     ConfiguredHandler {
+        builtin: false,
         event_name: HookEventName::SessionEnd,
         matcher: matcher.map(str::to_string),
         timeout_sec: 2,
         status_message: None,
         additional_context_limit: Default::default(),
-        source_path: test_path_buf("/tmp/hooks.json").abs(),
+        source_path: test_path_buf("/tmp/hooks.json").abs().into(),
         source: HookSource::User,
         display_order: 0,
         kind: crate::engine::ConfiguredHandlerKind::Command {

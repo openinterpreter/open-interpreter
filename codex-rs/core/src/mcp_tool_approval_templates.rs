@@ -70,7 +70,7 @@ pub(crate) fn render_mcp_tool_approval_template(
 
 fn load_consequential_tool_message_templates() -> Option<Vec<ConsequentialToolMessageTemplate>> {
     let templates = match serde_json::from_str::<ConsequentialToolMessageTemplatesFile>(
-        include_str!("consequential_tool_message_templates.json"),
+        include_str!("../assets/consequential_tool_message_templates.json"),
     ) {
         Ok(templates) => templates,
         Err(err) => {

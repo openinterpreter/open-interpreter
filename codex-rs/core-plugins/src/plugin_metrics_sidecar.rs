@@ -1,9 +1,11 @@
 use crate::ResolvedPluginMetricsOperation;
 use codex_analytics::PluginMeasurementRow;
+use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::Environment;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::FileSystemReadStream;
 use codex_exec_server::RemoveOptions;
+use codex_exec_server::WriteFileOptions;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -71,6 +73,7 @@ impl Drop for RemotePluginMetricsDirectory {
                     RemoveOptions {
                         recursive: true,
                         force: true,
+                        follow_symlinks: true,
                     },
                     /*sandbox*/ None,
                 )
@@ -140,18 +143,31 @@ impl PluginMetricsSidecar {
             .join(&format!("codex-plugin-metrics-{execution_id}"))
             .ok()?;
         let absolute_output_dir = directory_path.to_abs_path().ok()?;
-        environment
-            .create_private_directory(&directory_path)
+        let filesystem = environment.get_filesystem();
+        filesystem
+            .create_directory(
+                &directory_path,
+                CreateDirectoryOptions {
+                    recursive: false,
+                    follow_symlinks: true,
+                },
+                /*sandbox*/ None,
+            )
             .await
             .ok()?;
         let directory = RemotePluginMetricsDirectory {
-            filesystem: environment.get_filesystem(),
+            filesystem,
             path: directory_path,
         };
         let output_path = directory.path.join("measurements.json").ok()?;
         directory
             .filesystem
-            .write_file(&output_path, Vec::new(), /*sandbox*/ None)
+            .write_file(
+                &output_path,
+                Vec::new(),
+                WriteFileOptions::default(),
+                /*sandbox*/ None,
+            )
             .await
             .ok()?;
         let file_stream = directory

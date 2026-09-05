@@ -7,8 +7,15 @@ use crate::fs_helper::FsHelperOpenResponse;
 use crate::fs_helper::FsHelperPayload;
 use crate::fs_helper::FsHelperRequest;
 use crate::fs_helper::FsHelperResponse;
+#[cfg(windows)]
+use crate::fs_sandbox::drain_helper_stderr;
 use crate::fs_sandbox::io_error;
+#[cfg(windows)]
+use crate::fs_sandbox::read_helper_response;
+#[cfg(windows)]
+use crate::fs_sandbox::reap_helper_after_response;
 use crate::fs_sandbox::spawn_command;
+#[cfg(unix)]
 use crate::fs_sandbox::wait_for_helper_output;
 use crate::protocol::FsReadFileParams;
 use crate::rpc::internal_error;
@@ -20,6 +27,7 @@ pub(crate) async fn open(
 ) -> Result<tokio::fs::File, JSONRPCErrorError> {
     let request = serde_json::to_vec(&FsHelperRequest::Open(FsReadFileParams {
         path,
+        follow_symlinks: None,
         sandbox: None,
     }))
     .map_err(|error| internal_error(format!("invalid fs sandbox helper request: {error}")))?;
@@ -68,7 +76,6 @@ async fn open_platform(
     command: SandboxExecRequest,
     mut request: Vec<u8>,
 ) -> Result<tokio::fs::File, JSONRPCErrorError> {
-    use tokio::io::AsyncBufReadExt;
     use tokio::io::AsyncWriteExt;
 
     let mut child = spawn_command(command, std::process::Stdio::piped())?;
@@ -82,19 +89,17 @@ async fn open_platform(
         .ok_or_else(|| internal_error("missing fs sandbox helper stdout".to_string()))?;
     request.push(b'\n');
     stdin.write_all(&request).await.map_err(io_error)?;
+    stdin.flush().await.map_err(io_error)?;
+    let stderr = drain_helper_stderr(&mut child);
 
     let result = async {
-        let mut response = Vec::new();
-        tokio::io::BufReader::new(stdout)
-            .read_until(b'\n', &mut response)
-            .await
-            .map_err(io_error)?;
+        let response = read_helper_response(stdout).await?;
         let response = open_response(&response)?;
         duplicate_file_handle(response.process_id, response.file_handle).map_err(io_error)
     }
     .await;
     drop(stdin);
-    wait_for_helper_output(child).await?;
+    reap_helper_after_response(child, stderr).await?;
     result.map(tokio::fs::File::from_std)
 }
 

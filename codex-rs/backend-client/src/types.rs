@@ -45,6 +45,9 @@ pub struct RateLimitResetCreditDetails {
 pub struct RateLimitsWithResetCredits {
     pub rate_limits: Vec<RateLimitSnapshot>,
     pub rate_limit_reset_credits: Option<RateLimitResetCreditsSummary>,
+    pub account_id: Option<String>,
+    pub user_id: Option<String>,
+    pub rate_limit_upsell: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -52,6 +55,10 @@ pub(crate) struct RateLimitStatusWithResetCredits {
     #[serde(flatten)]
     pub rate_limits: RateLimitStatusPayload,
     pub rate_limit_reset_credits: Option<RateLimitResetCreditsSummary>,
+    pub account_id: Option<String>,
+    pub user_id: Option<String>,
+    // Preserve the backend-owned banner contract without making optional UI data break usage.
+    pub rate_limit_upsell: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]

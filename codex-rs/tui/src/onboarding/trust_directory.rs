@@ -127,7 +127,7 @@ impl WidgetRef for &TrustDirectoryWidget {
 
 impl KeyboardHandler for TrustDirectoryWidget {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        if key_event.kind == KeyEventKind::Release {
+        if key_event.kind != KeyEventKind::Press {
             return;
         }
 
@@ -136,7 +136,9 @@ impl KeyboardHandler for TrustDirectoryWidget {
         } else if keys::MOVE_DOWN.is_pressed(key_event) {
             self.highlighted = TrustDirectorySelection::Quit;
         } else if keys::SELECT_FIRST.is_pressed(key_event) {
-            self.handle_trust();
+            // A terminal response fragment can start with `1`; trust always requires an explicit
+            // Enter confirmation after the directory prompt is visible.
+            self.highlighted = TrustDirectorySelection::Trust;
         } else if keys::SELECT_SECOND.is_pressed(key_event)
             || keys::QUIT.is_pressed(key_event)
             || keys::CANCEL.is_pressed(key_event)
@@ -222,9 +224,32 @@ mod tests {
         widget.handle_key_event(release);
         assert_eq!(widget.selection, None);
 
+        let repeat =
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat);
+        widget.handle_key_event(repeat);
+        assert_eq!(widget.selection, None);
+
         let press = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         widget.handle_key_event(press);
         assert!(widget.should_quit);
+    }
+
+    #[test]
+    fn fragmented_terminal_response_cannot_grant_directory_trust() {
+        let mut widget = widget(/*error*/ None);
+        widget.highlighted = TrustDirectorySelection::Quit;
+
+        // The prefix may have been consumed by the protected-screen input drain, leaving the
+        // numeric OSC slot as the first key delivered after the trust prompt becomes active.
+        for character in "10;rgb:ffff/ffff/ffff".chars() {
+            widget.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        assert_eq!(widget.selection, None);
+        assert_eq!(widget.highlighted, TrustDirectorySelection::Trust);
+
+        widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(widget.selection, Some(TrustDirectorySelection::Trust));
     }
 
     #[test]
@@ -238,6 +263,31 @@ mod tests {
             .expect("draw");
 
         insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn renders_snapshot_for_remote_git_subdirectory() {
+        let widget = TrustDirectoryWidget {
+            cwd: PathBuf::from("/srv/remote/project/nested"),
+            trust_target: PathBuf::from("/srv/remote/project"),
+            ..widget(/*error*/ None)
+        };
+
+        let mut terminal =
+            Terminal::new(VT100Backend::new(/*width*/ 70, /*height*/ 18)).expect("terminal");
+        terminal
+            .draw(|f| (&widget).render_ref(f.area(), f.buffer_mut()))
+            .expect("draw");
+
+        insta::assert_snapshot!(
+            terminal
+                .backend()
+                .to_string()
+                .lines()
+                .map(str::trim_end)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 
     #[test]

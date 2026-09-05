@@ -168,9 +168,7 @@ def main() -> None:
         canary = canary_required(files, base_version, head_version)
         windows_source = windows_source_required(files, base_version, head_version)
         if base_version != head_version:
-            canary_reason = (
-                f"v8 version changed from {base_version} to {head_version}"
-            )
+            canary_reason = f"v8 version changed from {base_version} to {head_version}"
             windows_source_reason = canary_reason
         else:
             canary_reason = (

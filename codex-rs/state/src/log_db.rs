@@ -4,6 +4,8 @@
 //! formats each one into a `LogEntry`, and sends entries to a bounded background
 //! queue. The background task inserts into the dedicated `logs` SQLite database
 //! in batches to keep logging overhead low.
+//! SQLx diagnostics are always excluded so database writes cannot generate more
+//! database writes, even without an external subscriber filter.
 //!
 //! ## Usage
 //!
@@ -22,6 +24,7 @@
 use std::future::Future;
 use std::sync::OnceLock;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -46,16 +49,24 @@ use uuid::Uuid;
 use crate::LogEntry;
 use crate::StateRuntime;
 
-const LOG_QUEUE_CAPACITY: usize = 512;
-const LOG_BATCH_SIZE: usize = 128;
-const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
+const LOG_QUEUE_CAPACITY: usize = 2048;
+const LOG_BATCH_SIZE: usize = 512;
+const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(10);
+const SQLX_LOG_TARGETS: [&str; 3] = ["sqlx", "sqlx_core", "sqlx_sqlite"];
 
 pub fn default_filter() -> Targets {
     Targets::new()
         .with_default(LevelFilter::TRACE)
+        .with_target("h2", LevelFilter::WARN)
         .with_target("hyper_util", LevelFilter::WARN)
         .with_target("log", LevelFilter::OFF)
+        // Avoid constructing backend diagnostics when no other layer needs them.
+        .with_targets(SQLX_LOG_TARGETS.map(|target| (format!("{target}::"), LevelFilter::OFF)))
         .with_target("codex_rmcp_client", LevelFilter::INFO)
+        .with_target("opentelemetry-otlp", LevelFilter::OFF)
+        .with_target("opentelemetry-http", LevelFilter::OFF)
+        .with_target("tonic::transport", LevelFilter::WARN)
+        .with_target("tower::buffer", LevelFilter::WARN)
         .with_target("codex_otel.log_only", LevelFilter::OFF)
         .with_target("codex_otel.trace_safe", LevelFilter::OFF)
         .with_target("rmcp", LevelFilter::INFO)
@@ -157,7 +168,13 @@ impl LogDbLayer {
     }
 
     fn try_send(&self, entry: LogEntry) {
-        let _ = self.sender.try_send(LogDbCommand::Entry(Box::new(entry)));
+        if let Err(error) = self.sender.try_send(LogDbCommand::Entry(Box::new(entry))) {
+            let reason = match error {
+                mpsc::error::TrySendError::Full(_) => "full",
+                mpsc::error::TrySendError::Closed(_) => "closed",
+            };
+            crate::telemetry::record_log_queue_drop(reason, /*telemetry*/ None);
+        }
     }
 }
 
@@ -211,16 +228,30 @@ where
 
     fn on_event(&self, event: &Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
         let metadata = event.metadata();
+        let target = metadata.target();
+        // SQLx can emit from both the inserter task and its separate worker threads.
+        // This guard must remain local to the sink and independent of optional filters.
+        if target
+            .split("::")
+            .next()
+            .is_some_and(|target| SQLX_LOG_TARGETS.contains(&target))
+        {
+            return;
+        }
+
         // `tracing-log` checks filters with the original log target before
         // dispatching an event whose tracing target is `log`, so the outer
         // target filter cannot reliably reject these bridged events.
-        if metadata.target() == "log" {
+        // OTLP exporters and their HTTP adapters log every export. Recording
+        // those events would create another SQLite-write metric and keep the
+        // exporter active indefinitely, including when its queue is full.
+        if matches!(target, "log" | "opentelemetry-otlp" | "opentelemetry-http") {
             return;
         }
 
         // The SDK emits DEBUG timer meta-events every second per process; these
         // were over 30% of retained logs in measured high-fanout Codex environments.
-        if metadata.target() == "opentelemetry_sdk"
+        if target == "opentelemetry_sdk"
             && matches!(
                 *metadata.level(),
                 tracing::Level::TRACE | tracing::Level::DEBUG
@@ -231,6 +262,18 @@ where
 
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
+        // OTLP gRPC connections run on their own task, so an unsolicited PING
+        // ACK can emit this benign warning after every otherwise successful
+        // export. Drop only that warning before queue/drop accounting; other
+        // HTTP/2 diagnostics must remain available to unrelated clients.
+        if target == "h2::proto::ping_pong"
+            && visitor
+                .message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("recv PING ack that we never sent: "))
+        {
+            return;
+        }
         let thread_id = visitor
             .thread_id
             .clone()
@@ -441,7 +484,14 @@ async fn flush(state_db: &StateRuntime, buffer: &mut Vec<LogEntry>) {
         return;
     }
     let entries = buffer.split_off(0);
-    let _ = state_db.insert_logs(entries.as_slice()).await;
+    let started = Instant::now();
+    let result = state_db.insert_logs(entries.as_slice()).await;
+    crate::telemetry::record_log_write(
+        /*telemetry*/ None,
+        started.elapsed(),
+        entries.as_slice(),
+        &result,
+    );
 }
 
 #[derive(Default)]

@@ -3,6 +3,7 @@ use crate::agent::control::SpawnAgentOptions;
 use crate::config::test_config;
 use crate::init_state_db;
 use crate::installation_id::INSTALLATION_ID_FILENAME;
+use crate::mcp::McpEnvironmentScope;
 use crate::mcp::McpThreadIdentity;
 use crate::rollout::RolloutRecorder;
 use crate::session::session::SessionSettingsUpdate;
@@ -10,6 +11,7 @@ use crate::session::tests::build_world_state_from_turn_context;
 use crate::session::tests::make_session_and_context;
 use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::tasks::interrupted_turn_history_marker;
+use crate::windows_sandbox::WindowsSandboxLevelExt;
 use codex_extension_api::empty_extension_registry;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
@@ -17,10 +19,13 @@ use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ResponseItemId;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::MCP_APP_UI_EXTENSION_ID;
 use codex_protocol::mcp::OPENAI_FORM_EXTENSION_ID;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelsResponse;
@@ -56,6 +61,62 @@ fn thread_id_generator_defaults_to_standard_ids() {
         agent_control.generate_thread_id(),
         agent_control.generate_thread_id()
     );
+}
+
+#[tokio::test]
+async fn reserved_thread_id_is_used_without_changing_normal_id_generation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let generated_ids = [
+        ThreadId::from_u128(/*value*/ 0x018f_0000_0000_7000_8000_0000_0000_0001),
+        ThreadId::from_u128(/*value*/ 0x018f_0000_0000_7000_8000_0000_0000_0002),
+        ThreadId::from_u128(/*value*/ 0x018f_0000_0000_7000_8000_0000_0000_0003),
+    ];
+    let next_id = std::sync::atomic::AtomicUsize::new(0);
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    )
+    .with_thread_id_generator(move || generated_ids[next_id.fetch_add(1, Ordering::Relaxed)]);
+
+    let reserved_id = manager.reserve_thread_id();
+    let mut reserved_options = StartThreadOptions::new(config.clone());
+    reserved_options.reserved_thread_id = Some(reserved_id);
+    let reserved = manager
+        .start_thread(reserved_options)
+        .await
+        .expect("start reserved thread");
+    let mut resumed_options = StartThreadOptions::new(config.clone());
+    resumed_options.initial_history = InitialHistory::Resumed(ResumedHistory {
+        conversation_id: reserved.thread_id,
+        history: Arc::new(Vec::new()),
+        rollout_path: None,
+    });
+    let resumed_id = manager.reserve_thread_id();
+    resumed_options.reserved_thread_id = Some(resumed_id);
+    let resume_error = manager
+        .start_thread(resumed_options)
+        .await
+        .err()
+        .expect("reject reserved ID for resume");
+    let generated = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start generated thread");
+
+    assert_eq!(reserved.thread_id, generated_ids[0]);
+    assert!(matches!(
+        resume_error.details(),
+        codex_protocol::error::CodexErrorDetails::InvalidRequest(message)
+            if message == "reserved thread ID cannot be used when resuming a thread"
+    ));
+    assert_eq!(generated.thread_id, generated_ids[2]);
 }
 
 /// One custom ID factory supplies identifiers for roots, actual child agents, and forks.
@@ -818,6 +879,322 @@ async fn start_thread_keeps_internal_threads_hidden_from_normal_lookups() {
 }
 
 #[tokio::test]
+async fn spawn_internal_guardian_session_preserves_windows_sandbox_proxy_settings() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let parent = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start parent thread");
+    let reviewer = manager
+        .spawn_internal_session(
+            parent.thread_id,
+            StartThreadOptions {
+                session_source: Some(SessionSource::Internal(InternalSessionSource::Guardian)),
+                ..StartThreadOptions::new(config)
+            },
+        )
+        .await
+        .expect("start internal reviewer");
+
+    assert_eq!(
+        (
+            parent.thread.session.windows_sandbox_proxy_settings_mode,
+            reviewer.thread.session.windows_sandbox_proxy_settings_mode,
+        ),
+        (
+            codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
+            codex_sandboxing::WindowsSandboxProxySettingsMode::Preserve,
+        )
+    );
+
+    manager
+        .shutdown_all_threads_bounded(Duration::from_secs(10))
+        .await;
+}
+
+#[tokio::test]
+async fn spawn_internal_session_preserves_parent_lineage_without_forking_history() {
+    struct ParentLifecycleContributor {
+        observed_mcp_sources: Arc<std::sync::Mutex<Vec<SessionSource>>>,
+    }
+
+    impl codex_extension_api::ThreadLifecycleContributor<Config> for ParentLifecycleContributor {}
+
+    impl codex_extension_api::McpServerContributor<Config> for ParentLifecycleContributor {
+        fn id(&self) -> &'static str {
+            "parent_mcp_contributor"
+        }
+
+        fn contribute<'a>(
+            &'a self,
+            context: codex_extension_api::McpServerContributionContext<'a, Config>,
+        ) -> codex_extension_api::ExtensionFuture<'a, Vec<codex_extension_api::McpServerContribution>>
+        {
+            Box::pin(async move {
+                if let Some(session_source) = context.session_source() {
+                    self.observed_mcp_sources
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(session_source.clone());
+                }
+                Vec::new()
+            })
+        }
+    }
+
+    struct ParentInstructionsProvider(codex_extension_api::Instructions);
+
+    impl codex_extension_api::UserInstructionsProvider for ParentInstructionsProvider {
+        fn load_user_instructions(&self) -> codex_extension_api::LoadUserInstructionsFuture<'_> {
+            Box::pin(async move {
+                codex_extension_api::LoadedUserInstructions {
+                    instructions: Some(self.0.clone()),
+                    warnings: Vec::new(),
+                }
+            })
+        }
+    }
+
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let mut managed_exec_policy = codex_execpolicy::Policy::empty();
+    managed_exec_policy
+        .add_prefix_rule(&["rm".to_string()], codex_execpolicy::Decision::Forbidden)
+        .expect("add managed execution restriction");
+    let mut requirements = config.config_layer_stack.requirements().clone();
+    requirements.exec_policy = Some(codex_config::Sourced::new(
+        codex_execpolicy::RequirementsExecPolicy::new(managed_exec_policy),
+        codex_config::RequirementSource::Unknown,
+    ));
+    requirements.additional_developer_instructions = Some(codex_config::Sourced::new(
+        "managed instructions must not shape the reviewer".to_string(),
+        codex_config::RequirementSource::Unknown,
+    ));
+    let mut requirements_toml = config.config_layer_stack.requirements_toml().clone();
+    requirements_toml.additional_developer_instructions =
+        Some("managed instructions must not shape the reviewer".to_string());
+    config.config_layer_stack = codex_config::ConfigLayerStack::new(
+        config
+            .config_layer_stack
+            .all_layers_low_to_high()
+            .cloned()
+            .collect(),
+        requirements,
+        requirements_toml,
+    )
+    .expect("managed requirements stack");
+
+    let parent_instructions = codex_extension_api::Instructions {
+        text: "parent user instructions must not be inherited".to_string(),
+        source: config.codex_home.join("AGENTS.md"),
+    };
+    let mut manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let observed_mcp_sources = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let parent_contributor = Arc::new(ParentLifecycleContributor {
+        observed_mcp_sources: Arc::clone(&observed_mcp_sources),
+    });
+    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
+    extensions.thread_lifecycle_contributor(parent_contributor.clone());
+    extensions.mcp_server_contributor(parent_contributor);
+    let manager_state = Arc::get_mut(&mut manager.state).expect("unshared thread manager state");
+    manager_state.extensions = Arc::new(extensions.build());
+    manager_state.mcp_manager = Arc::new(McpManager::new_with_extensions(
+        Arc::clone(&manager_state.plugins_manager),
+        Arc::clone(&manager_state.extensions),
+        manager_state.mcp_manager.codex_apps_tools_cache(),
+    ));
+    manager_state.user_instructions_provider =
+        Arc::new(ParentInstructionsProvider(parent_instructions.clone()));
+    let parent = manager
+        .start_thread(StartThreadOptions {
+            metrics_service_name: Some("codex_work_desktop".to_string()),
+            ..StartThreadOptions::new(config.clone())
+        })
+        .await
+        .expect("start parent thread");
+    parent
+        .thread
+        .session
+        .set_multi_agent_version_if_unset(MultiAgentVersion::V2);
+    assert_eq!(
+        parent.thread.session.user_instructions().await,
+        Some(parent_instructions)
+    );
+    assert_eq!(
+        parent
+            .thread
+            .session
+            .services
+            .extensions
+            .thread_lifecycle_contributors()
+            .len(),
+        1
+    );
+    let mut reviewer_environments = parent
+        .thread
+        .session
+        .services
+        .turn_environments
+        .selections();
+    let reviewer_environment = reviewer_environments
+        .first_mut()
+        .expect("parent should have an environment");
+    reviewer_environment.config =
+        EnvironmentConfigState::Ready(codex_protocol::protocol::EnvironmentConfig {
+            allow_login_shell: true,
+            workspace_roots: reviewer_environment.workspace_roots.clone(),
+            permission_profile: config.permissions.permission_profile_state().snapshot(),
+            shell_environment_policy: Default::default(),
+            windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
+            windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
+            use_legacy_landlock: config.features.use_legacy_landlock(),
+            exec_policy: Some(codex_execpolicy::RequirementsExecPolicy::new(
+                codex_execpolicy::Policy::empty(),
+            )),
+            mcp_policy: None,
+            network_policy: None,
+            selected_capability_roots: Vec::new(),
+        });
+    let reviewer = manager
+        .spawn_internal_session(
+            parent.thread_id,
+            StartThreadOptions {
+                session_source: Some(SessionSource::Internal(InternalSessionSource::Guardian)),
+                initial_history: InitialHistory::Forked(vec![RolloutItem::ResponseItem(
+                    user_msg("parent history must not be inherited").into(),
+                )]),
+                environments: Some(reviewer_environments),
+                ..StartThreadOptions::new(config)
+            },
+        )
+        .await
+        .expect("start internal reviewer");
+    let reviewer_config = reviewer.thread.config_snapshot().await;
+
+    assert_eq!(
+        reviewer.session_configured.session_id,
+        parent.session_configured.session_id
+    );
+    assert!(std::ptr::eq(
+        reviewer
+            .thread
+            .session
+            .services
+            .agent_control
+            .rollout_budget(),
+        parent
+            .thread
+            .session
+            .services
+            .agent_control
+            .rollout_budget(),
+    ));
+    assert_eq!(reviewer_config.parent_thread_id, Some(parent.thread_id));
+    assert_eq!(reviewer_config.forked_from_thread_id, None);
+    assert_eq!(reviewer_config.originator, "codex_work_desktop");
+    assert_eq!(
+        reviewer.thread.multi_agent_version(),
+        Some(MultiAgentVersion::Disabled)
+    );
+    assert_eq!(
+        reviewer.session_configured.parent_thread_id,
+        Some(parent.thread_id)
+    );
+    assert_eq!(reviewer.session_configured.forked_from_id, None);
+    assert!(reviewer.thread.session.user_instructions().await.is_none());
+    assert!(
+        reviewer
+            .thread
+            .session
+            .services
+            .exec_policy
+            .current()
+            .rules()
+            .contains_key("rm")
+    );
+    let reviewer_turn = reviewer.thread.session.new_default_turn().await;
+    let reviewer_world_state =
+        build_world_state_from_turn_context(&reviewer.thread.session, &reviewer_turn).await;
+    let reviewer_context = reviewer
+        .thread
+        .session
+        .build_initial_context_with_world_state(&reviewer_turn, &reviewer_world_state)
+        .await;
+    assert!(
+        !serde_json::to_string(&reviewer_context)
+            .expect("reviewer context should serialize")
+            .contains("managed instructions must not shape the reviewer")
+    );
+    let reviewer_environment = reviewer
+        .thread
+        .environment_selections()
+        .await
+        .into_iter()
+        .next()
+        .expect("reviewer should retain its selected environment");
+    assert!(matches!(
+        reviewer_environment.config,
+        EnvironmentConfigState::Ready(config) if config.exec_policy.is_some()
+    ));
+    assert!(
+        reviewer
+            .thread
+            .session
+            .services
+            .extensions
+            .thread_lifecycle_contributors()
+            .is_empty()
+    );
+    {
+        let observed_mcp_sources = observed_mcp_sources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(!observed_mcp_sources.is_empty());
+        assert!(
+            observed_mcp_sources
+                .iter()
+                .all(|source| !source.is_internal())
+        );
+    }
+    assert_eq!(manager.list_thread_ids().await, vec![parent.thread_id]);
+    assert!(manager.get_thread(reviewer.thread_id).await.is_err());
+    assert!(
+        reviewer
+            .thread
+            .session
+            .clone_history()
+            .await
+            .raw_items()
+            .next()
+            .is_none()
+    );
+
+    manager
+        .shutdown_all_threads_bounded(Duration::from_secs(10))
+        .await;
+}
+
+#[tokio::test]
 async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() {
     struct InitialDataRecorder {
         lifecycle_observed: Arc<std::sync::Mutex<Vec<(String, String)>>>,
@@ -975,6 +1352,7 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
             McpThreadIdentity {
                 session_source: &SessionSource::Exec,
                 originator: &first_originator,
+                environments: McpEnvironmentScope::Live(&first_session.services.turn_environments),
             },
             /*ready_selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
@@ -992,6 +1370,7 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
             McpThreadIdentity {
                 session_source: &second_session_source,
                 originator: &second_originator,
+                environments: McpEnvironmentScope::Live(&second_session.services.turn_environments),
             },
             /*ready_selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
@@ -1183,12 +1562,17 @@ async fn resume_and_fork_do_not_restore_thread_environments_from_rollout() {
         )
         .await
         .expect("resume source thread");
-    let resumed_turn = resumed
+    let (prepared_turn, _) = resumed
         .thread
         .session
-        .new_turn_with_sub_id("resume-turn".to_string(), SessionSettingsUpdate::default())
+        .new_turn_with_sub_id(
+            "resume-turn".to_string(),
+            SessionSettingsUpdate::default(),
+            Default::default(),
+        )
         .await
         .expect("build resumed turn context");
+    let resumed_turn = prepared_turn;
     assert_eq!(resumed_turn.environments.turn_environments().count(), 1);
     assert_eq!(
         resumed_turn
@@ -1217,12 +1601,17 @@ async fn resume_and_fork_do_not_restore_thread_environments_from_rollout() {
         )
         .await
         .expect("fork source thread");
-    let forked_turn = forked
+    let (prepared_turn, _) = forked
         .thread
         .session
-        .new_turn_with_sub_id("fork-turn".to_string(), SessionSettingsUpdate::default())
+        .new_turn_with_sub_id(
+            "fork-turn".to_string(),
+            SessionSettingsUpdate::default(),
+            Default::default(),
+        )
         .await
         .expect("build forked turn context");
+    let forked_turn = prepared_turn;
     assert_eq!(forked_turn.environments.turn_environments().count(), 1);
     assert_eq!(
         forked_turn
@@ -2013,19 +2402,27 @@ fn interrupted_snapshot_is_not_mid_turn() {
 
 #[test]
 fn multi_agent_v2_interrupted_marker_uses_developer_input_message() {
-    let marker = developer_interrupted_marker();
-
-    let ResponseItem::Message { role, content, .. } = marker else {
-        panic!("expected interrupted marker to be a message");
-    };
-    assert_eq!(role, "developer");
-    assert!(
-        matches!(
-            content.as_slice(),
-            [ContentItem::InputText { text }]
-                if text.contains(crate::context::TurnAborted::INTERRUPTED_DEVELOPER_GUIDANCE)
-        ),
-        "expected interrupted marker to use developer InputText content"
+    assert_eq!(
+        developer_interrupted_marker(),
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: format!(
+                    "<turn_aborted>\n{}\n</turn_aborted>",
+                    crate::context::TurnAborted::INTERRUPTED_DEVELOPER_GUIDANCE
+                ),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![ContentItemKind(
+                        "generic.turn_aborted".to_string()
+                    )]),
+                    ..Default::default()
+                }
+            ),
+        }
     );
 }
 
@@ -2044,6 +2441,8 @@ fn completed_legacy_event_history_is_not_mid_turn() {
             message: "done".to_string(),
             phase: None,
             memory_citation: None,
+            delivery: None,
+            questions: None,
         })),
     ]);
 

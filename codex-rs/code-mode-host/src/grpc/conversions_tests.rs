@@ -1,13 +1,18 @@
+use std::time::Duration;
+
 use codex_code_mode_protocol::CellId;
 use codex_code_mode_protocol::FunctionCallOutputContentItem;
 use codex_code_mode_protocol::ImageDetail;
+use codex_code_mode_protocol::MissingCodeModeHostDuration;
 use codex_code_mode_protocol::RuntimeResponse;
+use codex_code_mode_protocol::WaitOutcome;
 use codex_code_mode_protocol::grpc as proto;
 use pretty_assertions::assert_eq;
 use tonic::Code;
 
 use super::execute_request;
 use super::execution_outcome;
+use super::wait_response;
 
 #[test]
 fn rejects_missing_names_unknown_tool_kinds_and_invalid_json_schemas() {
@@ -65,6 +70,7 @@ fn rejects_missing_names_unknown_tool_kinds_and_invalid_json_schemas() {
 #[test]
 fn maps_text_image_audio_and_terminal_error_without_losing_details() {
     let outcome = execution_outcome(RuntimeResponse::Result {
+        code_mode_host_duration: Some(Duration::from_nanos(/*nanos*/ 123_456_789)),
         cell_id: CellId::new("cell".to_string()),
         content_items: vec![
             FunctionCallOutputContentItem::InputText {
@@ -83,7 +89,8 @@ fn maps_text_image_audio_and_terminal_error_without_losing_details() {
 
     assert_eq!(
         outcome,
-        proto::ExecutionOutcome {
+        Ok(proto::ExecutionOutcome {
+            code_mode_host_duration_ns: 123_456_789,
             cell_id: "cell".to_string(),
             content_items: vec![
                 proto::ContentItem {
@@ -108,6 +115,27 @@ fn maps_text_image_audio_and_terminal_error_without_losing_details() {
                     error_text: Some("failed".to_string()),
                 },
             )),
-        }
+        })
     );
+}
+
+/// Encoding must not turn a missing request measurement into measured zero,
+/// including when no live cell remains to supply output.
+#[test]
+fn grpc_encoding_rejects_untimed_runtime_output() {
+    let response = RuntimeResponse::Terminated {
+        cell_id: CellId::new("cell".to_string()),
+        content_items: Vec::new(),
+        code_mode_host_duration: None,
+    };
+    assert_eq!(
+        execution_outcome(response.clone()),
+        Err(MissingCodeModeHostDuration)
+    );
+    for outcome in [
+        WaitOutcome::LiveCell(response.clone()),
+        WaitOutcome::MissingCell(response),
+    ] {
+        assert_eq!(wait_response(outcome), Err(MissingCodeModeHostDuration));
+    }
 }

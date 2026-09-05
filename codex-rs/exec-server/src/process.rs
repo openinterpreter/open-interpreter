@@ -222,6 +222,17 @@ pub type ExecProcessFuture<'a, T> =
 pub trait ExecBackend: Send + Sync {
     fn start(&self, params: ExecParams) -> ExecBackendFuture<'_>;
 
+    /// Captures a local shell snapshot without starting the requested command.
+    /// Failures must remain retryable by real commands. Remote backends do not
+    /// support this operation; callers should leave them on the lazy path.
+    fn prewarm_shell_snapshot(&self, _params: ExecParams) -> ExecProcessFuture<'_, ()> {
+        Box::pin(async {
+            Err(ExecServerError::Protocol(
+                "exec backend does not support shell snapshot prewarming".to_string(),
+            ))
+        })
+    }
+
     /// Starts a process with an authoritative controller-side policy decider.
     fn start_with_network_policy_decider(
         &self,

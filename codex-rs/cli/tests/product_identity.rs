@@ -66,6 +66,58 @@ fn json_contains_string(value: &serde_json::Value, needle: &str) -> bool {
     }
 }
 
+fn interpreter_alias(codex_bin: &Path, alias_dir: &Path) -> anyhow::Result<std::path::PathBuf> {
+    let alias = alias_dir.join("interpreter");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(codex_bin, &alias)?;
+    #[cfg(not(unix))]
+    std::fs::copy(codex_bin, &alias)?;
+    Ok(alias)
+}
+
+fn assert_no_codex_brand(surface: &str, stdout: &str, stderr: &str) {
+    let output = format!("{stdout}\n{stderr}");
+    assert!(
+        !output.to_ascii_lowercase().contains("codex"),
+        "{surface} leaked Codex branding:\n{output}"
+    );
+}
+
+#[test]
+fn interpreter_help_version_errors_and_completions_keep_product_identity() -> anyhow::Result<()> {
+    let codex_bin = codex_utils_cargo_bin::cargo_bin("codex")?;
+    let alias_dir = tempfile::tempdir()?;
+    let interpreter = interpreter_alias(&codex_bin, alias_dir.path())?;
+    let interpreter_home = tempfile::tempdir()?;
+    let home = canonical_str(interpreter_home.path())?;
+    let envs = [("INTERPRETER_HOME", home.as_str())];
+
+    for (surface, args) in [
+        ("root help", &["--help"][..]),
+        ("exec help", &["exec", "--help"][..]),
+        ("completion help", &["completion", "--help"][..]),
+        ("version", &["--version"][..]),
+        (
+            "invalid argument",
+            &["--definitely-not-an-interpreter-option"][..],
+        ),
+        ("debug update error", &["update"][..]),
+    ] {
+        let (stdout, stderr) = run(&interpreter, args, &envs, &[])?;
+        assert_no_codex_brand(surface, &stdout, &stderr);
+    }
+
+    for shell in ["bash", "zsh", "fish", "powershell"] {
+        let (stdout, stderr) = run(&interpreter, &["completion", shell], &envs, &[])?;
+        assert_no_codex_brand(shell, &stdout, &stderr);
+        assert!(
+            stdout.to_ascii_lowercase().contains("interpreter"),
+            "{shell} completion should target interpreter: {stdout}"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn i_alias_runs_as_open_interpreter_with_interpreter_home() -> anyhow::Result<()> {
     let codex_bin = codex_utils_cargo_bin::cargo_bin("codex")?;

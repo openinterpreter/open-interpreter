@@ -109,8 +109,8 @@ pub async fn accepted_line_repo_hash_for_cwd(cwd: &Path) -> Option<String> {
         .get("origin")
         .or_else(|| remotes.values().next())
         .map(|remote_url| {
-            let canonical_remote_url =
-                canonicalize_git_remote_url(remote_url).unwrap_or_else(|| remote_url.to_string());
+            let canonical_remote_url = canonicalize_git_remote_url(remote_url.as_str())
+                .unwrap_or_else(|| remote_url.to_string());
             fingerprint_hash("repo", &canonical_remote_url)
         })
 }

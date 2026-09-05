@@ -174,6 +174,7 @@ fn filter_codex_apps_mcp_tools<'a>(
         app_tool_policy
             .policy(AppToolPolicyInput {
                 connector_id: Some(connector_id),
+                link_id: None,
                 tool_name: &tool.tool.name,
                 tool_title: tool.tool.title.as_deref(),
                 destructive_hint: annotations.and_then(|annotations| annotations.destructive_hint),

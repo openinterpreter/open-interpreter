@@ -34,13 +34,9 @@ impl FileSystemContext {
         permission_profile: &PermissionProfile,
         workspace_roots: &[PathUri],
     ) -> Self {
-        let materialized_workspace_roots = workspace_roots
-            .iter()
-            .filter_map(|workspace_root| workspace_root.to_abs_path().ok())
-            .collect::<Vec<_>>();
         let permission_profile = permission_profile
             .clone()
-            .materialize_project_roots_with_workspace_roots(&materialized_workspace_roots);
+            .materialize_project_roots_with_path_uris(workspace_roots);
         let workspace_roots = workspace_roots
             .iter()
             .map(PathUri::inferred_native_path_string)
@@ -154,7 +150,7 @@ fn render_file_system_entry(rendered: &mut String, entry: &FileSystemSandboxEntr
     rendered.push_str("\">");
     match &entry.path {
         FileSystemPath::Path { path } => {
-            push_text_element(rendered, "path", path.to_string_lossy().as_ref());
+            push_text_element(rendered, "path", &path.inferred_native_path_string());
         }
         FileSystemPath::GlobPattern { pattern } => {
             push_text_element(rendered, "glob", pattern);

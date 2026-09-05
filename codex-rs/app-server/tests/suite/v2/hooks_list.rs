@@ -818,6 +818,104 @@ async fn hooks_list_shows_discovered_plugin_mcp_tool_hook() -> Result<()> {
     Ok(())
 }
 
+#[test_case::test_case("browser", "node_repl"; "node_repl")]
+#[test_case::test_case("unified-computer-use", "cua_repl"; "cua_repl")]
+#[tokio::test]
+async fn hooks_list_hides_builtin_cleanup_and_preserves_other_plugin_hooks(
+    plugin_name: &str,
+    server: &str,
+) -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let cwd = TempDir::new()?;
+    let plugin_id = format!("{plugin_name}@openai-bundled");
+    let plugin_root = codex_home
+        .path()
+        .join(format!("plugins/cache/openai-bundled/{plugin_name}/local"));
+    std::fs::create_dir_all(plugin_root.join(".codex-plugin"))?;
+    std::fs::create_dir_all(plugin_root.join("hooks"))?;
+    std::fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        serde_json::to_vec(&serde_json::json!({ "name": plugin_name }))?,
+    )?;
+    let ordinary_command = "echo ordinary plugin hook";
+    std::fs::write(
+        plugin_root.join("hooks/hooks.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "hooks": { "Stop": [{ "hooks": [
+                { "type": "mcp_tool", "server": server, "tool": "turn_ended" },
+                { "type": "command", "command": ordinary_command, "timeout": 5 },
+            ] }] },
+        }))?,
+    )?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!(
+            r#"[features]
+plugins = true
+hooks = true
+
+[plugins."{plugin_id}"]
+enabled = true
+
+[hooks.state."{plugin_id}:hooks/hooks.json:stop:0:1"]
+enabled = false
+"#
+        ),
+    )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+    let request_id = mcp
+        .send_hooks_list_request(HooksListParams {
+            cwds: vec![cwd.path().to_path_buf()],
+        })
+        .await?;
+    let HooksListResponse { data } =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
+    let source_path = AbsolutePathBuf::from_absolute_path(std::fs::canonicalize(
+        plugin_root.join("hooks/hooks.json"),
+    )?)?;
+    assert_eq!(
+        data,
+        vec![HooksListEntry {
+            cwd: cwd.path().to_path_buf(),
+            hooks: vec![HookMetadata {
+                key: format!("{plugin_id}:hooks/hooks.json:stop:0:1"),
+                event_name: HookEventName::Stop,
+                handler: HookHandlerMetadata::Command {
+                    command: ordinary_command.to_string(),
+                    r#async: false,
+                },
+                matcher: None,
+                timeout_sec: 5,
+                status_message: None,
+                additional_context_limit: None,
+                source_path,
+                source: HookSource::Plugin,
+                plugin_id: Some(plugin_id),
+                display_order: 1,
+                enabled: false,
+                is_managed: false,
+                current_hash: command_hook_hash(
+                    "stop",
+                    /*matcher*/ None,
+                    ordinary_command,
+                    /*timeout_sec*/ 5,
+                    /*async*/ false,
+                    /*status_message*/ None,
+                    /*additional_context_limit*/ None,
+                ),
+                trust_status: HookTrustStatus::Untrusted,
+            }],
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        }]
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn hooks_list_warms_plugin_capabilities_for_thread_start() -> Result<()> {
     let codex_home = TempDir::new()?;
@@ -1032,6 +1130,11 @@ async fn hooks_list_uses_root_repo_hooks_for_linked_worktrees() -> Result<()> {
         worktree_root.join(".git"),
         format!("gitdir: {}\n", worktree_git_dir.display()),
     )?;
+    std::fs::write(
+        worktree_git_dir.join("gitdir"),
+        format!("{}\n", worktree_root.join(".git").display()),
+    )?;
+    std::fs::write(worktree_git_dir.join("commondir"), "../..\n")?;
     write_project_hook_config(&repo_root.join(".codex"), "echo root hook")?;
     write_project_hook_config(&worktree_root.join(".codex"), "echo worktree hook")?;
     set_project_trust_level(codex_home.path(), &repo_root, TrustLevel::Trusted)?;

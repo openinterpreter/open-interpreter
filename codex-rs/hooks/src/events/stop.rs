@@ -8,12 +8,16 @@ use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
+use codex_protocol::protocol::HookSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use serde_json::Map;
+use serde_json::Value;
 
 use super::common;
 use crate::engine::ClaudeHooksEngine;
 use crate::engine::ConfiguredHandler;
 use crate::engine::HandlerRunResult;
+use crate::engine::HandlerSourcePath;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
 use crate::schema::NullableString;
@@ -28,6 +32,7 @@ pub struct StopRequest {
     pub transcript_path: Option<PathBuf>,
     pub model: String,
     pub permission_mode: String,
+    pub request_metadata: Option<Map<String, Value>>,
     pub stop_hook_active: bool,
     pub last_assistant_message: Option<String>,
     pub target: StopHookTarget,
@@ -36,6 +41,8 @@ pub struct StopRequest {
 #[derive(Debug, Clone)]
 pub enum StopHookTarget {
     Stop,
+    /// Internal memory work runs policy and executor hooks, not project completion checks.
+    MemoryConsolidation,
     SubagentStop {
         agent_id: String,
         agent_type: String,
@@ -46,16 +53,43 @@ pub enum StopHookTarget {
 impl StopHookTarget {
     fn event_name(&self) -> HookEventName {
         match self {
-            Self::Stop => HookEventName::Stop,
+            Self::Stop | Self::MemoryConsolidation => HookEventName::Stop,
             Self::SubagentStop { .. } => HookEventName::SubagentStop,
         }
     }
 
     fn matcher_input(&self) -> Option<&str> {
         match self {
-            Self::Stop => None,
+            Self::Stop | Self::MemoryConsolidation => None,
             Self::SubagentStop { agent_type, .. } => Some(agent_type.as_str()),
         }
+    }
+
+    fn select_handlers(&self, handlers: &[ConfiguredHandler]) -> Vec<ConfiguredHandler> {
+        dispatcher::select_handlers(handlers, self.event_name(), self.matcher_input())
+            .into_iter()
+            .filter(|handler| {
+                !matches!(self, Self::MemoryConsolidation)
+                    || matches!(
+                        handler.source_path,
+                        HandlerSourcePath::ExecutorScoped { .. }
+                    )
+                    || match handler.source {
+                        HookSource::User
+                        | HookSource::Project
+                        | HookSource::SessionFlags
+                        | HookSource::Plugin => false,
+                        HookSource::System
+                        | HookSource::Mdm
+                        | HookSource::CloudRequirements
+                        | HookSource::CloudManagedConfig
+                        | HookSource::LegacyManagedConfigFile
+                        | HookSource::LegacyManagedConfigMdm
+                        // Required hooks can have unknown attribution; retain them fail-closed.
+                        | HookSource::Unknown => true,
+                    }
+            })
+            .collect()
     }
 }
 
@@ -82,22 +116,17 @@ pub(crate) fn preview(
     handlers: &[ConfiguredHandler],
     request: &StopRequest,
 ) -> Vec<HookRunSummary> {
-    dispatcher::select_handlers(
-        handlers,
-        request.target.event_name(),
-        request.target.matcher_input(),
-    )
-    .into_iter()
-    .map(|handler| dispatcher::running_summary(&handler))
-    .collect()
+    request
+        .target
+        .select_handlers(handlers)
+        .into_iter()
+        .filter(|handler| matches!(handler.source_path, HandlerSourcePath::Local(_)))
+        .map(|handler| dispatcher::running_summary(&handler))
+        .collect()
 }
 
 pub(crate) async fn run(engine: &ClaudeHooksEngine, request: StopRequest) -> StopOutcome {
-    let matched = dispatcher::select_handlers(
-        &engine.handlers,
-        request.target.event_name(),
-        request.target.matcher_input(),
-    );
+    let matched = request.target.select_handlers(&engine.handlers);
     if matched.is_empty() {
         return StopOutcome {
             hook_events: Vec::new(),
@@ -109,8 +138,17 @@ pub(crate) async fn run(engine: &ClaudeHooksEngine, request: StopRequest) -> Sto
         };
     }
 
+    // Memory workers terminate on managed rejection rather than continuing the turn,
+    // so their executor cleanup must also run when a managed hook blocks completion.
+    let (executor_cleanup, matched): (Vec<_>, Vec<_>) = matched.into_iter().partition(|handler| {
+        matches!(request.target, StopHookTarget::MemoryConsolidation)
+            && matches!(
+                handler.source_path,
+                HandlerSourcePath::ExecutorScoped { .. }
+            )
+    });
     let input_json = match request.target {
-        StopHookTarget::Stop => {
+        StopHookTarget::Stop | StopHookTarget::MemoryConsolidation => {
             let input = StopCommandInput {
                 session_id: request.session_id.to_string(),
                 turn_id: request.turn_id.clone(),
@@ -173,15 +211,29 @@ pub(crate) async fn run(engine: &ClaudeHooksEngine, request: StopRequest) -> Sto
         }
     };
 
-    let results = dispatcher::execute_handlers(
+    let results = dispatcher::execute_handlers_with_metadata(
         engine,
         matched,
-        input_json,
+        input_json.clone(),
         request.cwd.as_path(),
-        Some(request.turn_id),
+        Some(request.turn_id.clone()),
+        request.request_metadata.as_ref(),
         parse_completed,
     )
     .await;
+
+    if !executor_cleanup.is_empty() {
+        dispatcher::execute_handlers_with_metadata(
+            engine,
+            executor_cleanup,
+            input_json,
+            request.cwd.as_path(),
+            Some(request.turn_id),
+            request.request_metadata.as_ref(),
+            parse_completed,
+        )
+        .await;
+    }
 
     let aggregate = aggregate_results(results.iter().map(|result| &result.data));
 
@@ -640,12 +692,13 @@ mod tests {
 
     fn handler_with_async(r#async: bool) -> ConfiguredHandler {
         ConfiguredHandler {
+            builtin: false,
             event_name: HookEventName::Stop,
             matcher: None,
             timeout_sec: 600,
             status_message: None,
             additional_context_limit: Default::default(),
-            source_path: test_path_buf("/tmp/hooks.json").abs(),
+            source_path: test_path_buf("/tmp/hooks.json").abs().into(),
             source: codex_protocol::protocol::HookSource::User,
             display_order: 0,
             kind: crate::engine::ConfiguredHandlerKind::Command {

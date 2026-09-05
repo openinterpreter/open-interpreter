@@ -10,12 +10,13 @@
 
 use super::TurnInput;
 use super::session::Session;
+use super::session::SessionConfiguration;
 use super::session::SessionSettingsUpdate;
 use super::thread_settings;
+use super::turn_context::NewTurnContextOptions;
 use super::turn_context::TurnContext;
 use crate::state::ActiveTurn;
 use crate::state::TurnState;
-use crate::tasks::MailboxParentProvenance;
 use crate::tasks::RegularTask;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::error::CodexErr;
@@ -45,6 +46,33 @@ use uuid::Uuid;
 #[path = "turn_input_tests.rs"]
 mod tests;
 
+/// Why input is starting a turn; shared by admission and input delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnStartKind {
+    User,
+    Automatic,
+    Recovery,
+}
+
+impl TurnStartKind {
+    fn permits_mode(self, mode: ModeKind) -> bool {
+        match self {
+            Self::User | Self::Recovery => true,
+            Self::Automatic => mode != ModeKind::Plan,
+        }
+    }
+
+    /// Automatic work may neither leave an existing Plan mode nor enter it.
+    fn permits_settings(
+        self,
+        current: &SessionConfiguration,
+        proposed: &SessionConfiguration,
+    ) -> bool {
+        self.permits_mode(current.step_settings.collaboration_mode.mode)
+            && self.permits_mode(proposed.step_settings.collaboration_mode.mode)
+    }
+}
+
 /// Thread settings and start-only options prepared before Core knows whether
 /// turn input starts or steers.
 ///
@@ -66,7 +94,7 @@ impl PreparedTurnInputSettings {
         let thread_settings_update = if thread_settings == ThreadSettingsOverrides::default() {
             None
         } else {
-            let updates = thread_settings::prepare_update(session, thread_settings).await;
+            let updates = thread_settings::prepare_update(thread_settings);
             session
                 .preview_settings(&updates)
                 .await
@@ -83,35 +111,63 @@ impl PreparedTurnInputSettings {
         self.start_options.final_output_json_schema.as_ref()
     }
 
-    fn would_enter_plan_mode(&self) -> bool {
-        self.thread_settings_update
-            .as_ref()
-            .and_then(|updates| updates.collaboration_mode.as_ref())
-            .is_some_and(|collaboration_mode| collaboration_mode.mode == ModeKind::Plan)
-    }
-
     /// Applies persistent settings and start-only options before creating a
-    /// new turn context.
+    /// new turn context. Returns `None` if admission rejects the candidate,
+    /// without committing its settings.
     async fn apply_started(
         self,
         session: &Arc<Session>,
         submission_id: String,
-    ) -> CodexResult<Arc<TurnContext>> {
+        kind: TurnStartKind,
+    ) -> CodexResult<Option<Arc<TurnContext>>> {
         let TurnStartOptions {
+            turn_trigger,
             final_output_json_schema,
+            service_tier,
             parent_turn_id,
             root_turn_id,
+            cyber_access_program,
         } = self.start_options;
         let emit_thread_settings_applied = self.thread_settings_update.is_some();
+        let _settings_guard = if emit_thread_settings_applied {
+            Some(thread_settings::acquire_persistence_lock(session).await)
+        } else {
+            None
+        };
         let mut updates = self.thread_settings_update.unwrap_or_default();
-        updates.final_output_json_schema = Some(final_output_json_schema);
+        updates.service_tier_for_turn = service_tier;
 
-        // new_turn_with_sub_id already emits an error event when settings are invalid.
-        let turn_context = session
-            .new_turn_with_sub_id(submission_id.clone(), updates)
-            .await?;
+        let options = NewTurnContextOptions {
+            final_output_json_schema,
+            cyber_access_program,
+        };
+        let turn_context = match kind {
+            TurnStartKind::User | TurnStartKind::Recovery => Some(
+                session
+                    .new_turn_with_sub_id(submission_id.clone(), updates, options)
+                    .await?,
+            ),
+            TurnStartKind::Automatic => {
+                session
+                    .new_turn_with_sub_id_if(
+                        submission_id.clone(),
+                        updates,
+                        options,
+                        |current, proposed| kind.permits_settings(current, proposed),
+                    )
+                    .await?
+            }
+        };
+        let Some((turn_context, settings_snapshot)) = turn_context else {
+            return Ok(None);
+        };
+        if let Some(turn_trigger) = turn_trigger {
+            turn_context
+                .turn_metadata_state
+                .set_turn_trigger(turn_trigger);
+        }
         if emit_thread_settings_applied {
-            thread_settings::emit_applied(session, submission_id).await;
+            thread_settings::emit_applied(session, submission_id, settings_snapshot).await;
         }
         if let Some(parent_turn_id) = parent_turn_id {
             turn_context
@@ -123,7 +179,7 @@ impl PreparedTurnInputSettings {
                 .turn_metadata_state
                 .set_root_turn_id(root_turn_id);
         }
-        Ok(turn_context)
+        Ok(Some(turn_context))
     }
 
     /// Applies only persistent settings after steering succeeds. The active
@@ -147,7 +203,15 @@ pub(super) async fn handle(
     match mode {
         TurnInputMode::StartOrSteer => start_or_steer(session, request, submission_id).await,
         TurnInputMode::StartIfIdle => {
-            start_if_idle(session, request, submission_id, /*is_recovery*/ false).await
+            let kind = match &request.input {
+                SubmittedTurnInput::UserInput { content, .. } if !content.is_empty() => {
+                    TurnStartKind::User
+                }
+                SubmittedTurnInput::UserInput { .. }
+                | SubmittedTurnInput::ResponseItem(_)
+                | SubmittedTurnInput::InterAgentCommunication(_) => TurnStartKind::Automatic,
+            };
+            start_if_idle(session, request, submission_id, kind).await
         }
         TurnInputMode::Steer { expected_turn_id } => {
             steer(session, request, expected_turn_id, submission_id).await
@@ -158,10 +222,16 @@ pub(super) async fn handle(
 pub(super) async fn handle_recovery(
     session: &Arc<Session>,
     thread_settings: ThreadSettingsOverrides,
+    start_options: TurnStartOptions,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
-    let request = TurnInputRequest::user_input(Vec::new()).with_thread_settings(thread_settings);
-    start_if_idle(session, request, submission_id, /*is_recovery*/ true).await
+    let request = TurnInputRequest::user_input(Vec::new())
+        .with_thread_settings(thread_settings)
+        .on_start(TurnStartOptions {
+            turn_trigger: Some("retry".to_string()),
+            ..start_options
+        });
+    start_if_idle(session, request, submission_id, TurnStartKind::Recovery).await
 }
 
 async fn start_or_steer(
@@ -170,21 +240,25 @@ async fn start_or_steer(
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
     let TurnInputRequest {
-        input,
+        mut input,
         thread_settings,
         start,
         additional_context,
         responsesapi_client_metadata,
         ..
     } = request;
-    let SubmittedTurnInput::UserInput {
-        content: mut items,
-        client_id,
-    } = input
-    else {
-        return Err(CodexErr::InvalidRequest(
-            "only user input can steer a turn".to_string(),
-        ));
+    let has_explicit_input = match &input {
+        SubmittedTurnInput::UserInput { content, .. } => !content.is_empty(),
+        SubmittedTurnInput::ResponseItem(ResponseItem::FunctionCallOutput {
+            call_id: None,
+            ..
+        }) => true,
+        _ => {
+            return Err(CodexErr::InvalidRequest(
+                "only user input or standalone function-call outputs can start or steer a turn"
+                    .to_string(),
+            ));
+        }
     };
     let can_start_root_turn = start.parent_turn_id.is_none() && start.root_turn_id.is_none();
     let incoming_root_turn_id = start
@@ -194,11 +268,10 @@ async fn start_or_steer(
     let settings = PreparedTurnInputSettings::prepare(session, thread_settings, start).await?;
     match session
         .steer_input(
-            &mut items,
+            &mut input,
             additional_context.clone(),
             /*expected_turn_id*/ None,
             settings.required_active_final_output_json_schema(),
-            client_id.clone(),
             responsesapi_client_metadata.clone(),
             incoming_root_turn_id,
         )
@@ -209,11 +282,14 @@ async fn start_or_steer(
             Ok(TurnInputSubmission::Steered { turn_id })
         }
         Err(NotSubmittedReason::NoActiveTurn) => {
-            let turn_context = settings
-                .apply_started(session, submission_id.clone())
-                .await?;
+            let Some(turn_context) = settings
+                .apply_started(session, submission_id.clone(), TurnStartKind::User)
+                .await?
+            else {
+                unreachable!("explicit user input can enter Plan mode");
+            };
             if can_start_root_turn
-                && !items.is_empty()
+                && has_explicit_input
                 && turn_context
                     .turn_metadata_state
                     .can_start_root_turn(&turn_context.session_source)
@@ -230,13 +306,12 @@ async fn start_or_steer(
             session
                 .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
                 .await;
-            turn_context.session_telemetry.user_prompt(&items);
+            if let SubmittedTurnInput::UserInput { content, .. } = &input {
+                turn_context.session_telemetry.user_prompt(content);
+            }
             let mut task_input = merge_additional_context_input(session, additional_context).await;
-            if !items.is_empty() {
-                task_input.push(TurnInput::UserInput {
-                    content: items,
-                    client_id,
-                });
+            if has_explicit_input {
+                task_input.push(pending_turn_input(input));
             }
             session
                 .spawn_task(turn_context, task_input, RegularTask::new())
@@ -253,7 +328,7 @@ async fn start_if_idle(
     session: &Arc<Session>,
     request: TurnInputRequest,
     submission_id: String,
-    is_recovery: bool,
+    kind: TurnStartKind,
 ) -> CodexResult<TurnInputSubmission> {
     let TurnInputRequest {
         input,
@@ -263,17 +338,17 @@ async fn start_if_idle(
         responsesapi_client_metadata,
         ..
     } = request;
-    let has_user_input = has_nonempty_user_input(&input);
-    let is_automatic_idle_work = !has_user_input && !is_recovery;
     let can_start_root_turn = start.parent_turn_id.is_none() && start.root_turn_id.is_none();
     if session.input_queue.has_trigger_turn_mailbox_items().await {
         return Ok(TurnInputSubmission::NotSubmitted {
             reason: NotSubmittedReason::PendingTriggerTurn,
         });
     }
-    // Empty non-recovery starts are automatic wakeups, not explicit user requests.
-    // Do not let them start a Plan turn.
-    if is_automatic_idle_work && session.collaboration_mode().await.mode == ModeKind::Plan {
+    // Preserve current-Plan rejection before reservation and settings errors.
+    // The commit-time decision also checks the proposed mode.
+    if kind == TurnStartKind::Automatic
+        && !kind.permits_mode(session.collaboration_mode().await.mode)
+    {
         return Ok(TurnInputSubmission::NotSubmitted {
             reason: NotSubmittedReason::PlanMode,
         });
@@ -305,17 +380,17 @@ async fn start_if_idle(
             return Err(error);
         }
     };
-    // Automatic work must not use persistent settings to start a turn
-    // whose effective collaboration mode is Plan.
-    if is_automatic_idle_work && settings.would_enter_plan_mode() {
-        session.clear_reserved_idle_turn(&turn_state).await;
-        return Ok(TurnInputSubmission::NotSubmitted {
-            reason: NotSubmittedReason::PlanMode,
-        });
-    }
-
-    let turn_context = match settings.apply_started(session, submission_id.clone()).await {
-        Ok(turn_context) => turn_context,
+    let turn_context = match settings
+        .apply_started(session, submission_id.clone(), kind)
+        .await
+    {
+        Ok(Some(turn_context)) => turn_context,
+        Ok(None) => {
+            session.clear_reserved_idle_turn(&turn_state).await;
+            return Ok(TurnInputSubmission::NotSubmitted {
+                reason: NotSubmittedReason::PlanMode,
+            });
+        }
         Err(error) => {
             session.clear_reserved_idle_turn(&turn_state).await;
             return Err(error);
@@ -326,7 +401,7 @@ async fn start_if_idle(
             .turn_metadata_state
             .set_responsesapi_client_metadata(responsesapi_client_metadata);
     }
-    if has_user_input
+    if kind == TurnStartKind::User
         && can_start_root_turn
         && turn_context
             .turn_metadata_state
@@ -341,30 +416,32 @@ async fn start_if_idle(
         .await;
 
     let mut task_input = merge_additional_context_input(session, additional_context).await;
-    if has_user_input {
-        session.clear_connector_selection().await;
-        if let SubmittedTurnInput::UserInput { content, .. } = &input {
-            turn_context.session_telemetry.user_prompt(content);
+    match kind {
+        TurnStartKind::User => {
+            session.clear_connector_selection().await;
+            if let SubmittedTurnInput::UserInput { content, .. } = &input {
+                turn_context.session_telemetry.user_prompt(content);
+            }
+            task_input.push(pending_turn_input(input));
         }
-        task_input.push(pending_turn_input(input));
-    } else if is_automatic_idle_work {
-        // Recovery resumes an existing turn, so it must not queue a new empty
-        // user message for that turn.
-        session
-            .input_queue
-            .extend_pending_input_for_turn_state(
-                turn_state.as_ref(),
-                vec![pending_turn_input(input)],
-            )
-            .await;
+        TurnStartKind::Automatic => {
+            // Empty automatic user input resumes sampling without a new message.
+            if !matches!(&input, SubmittedTurnInput::UserInput { .. }) {
+                session
+                    .input_queue
+                    .extend_pending_input_for_turn_state(
+                        turn_state.as_ref(),
+                        vec![pending_turn_input(input)],
+                    )
+                    .await;
+            }
+        }
+        TurnStartKind::Recovery => {
+            // Recovery resumes an existing turn without a new empty user message.
+        }
     }
     session
-        .start_task(
-            turn_context,
-            task_input,
-            RegularTask::new(),
-            MailboxParentProvenance::Ignore,
-        )
+        .start_task(turn_context, task_input, RegularTask::new())
         .await;
     Ok(TurnInputSubmission::Started {
         turn_id: submission_id,
@@ -378,22 +455,18 @@ async fn steer(
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
     let TurnInputRequest {
-        input,
+        mut input,
         thread_settings,
         start,
         additional_context,
         responsesapi_client_metadata,
         ..
     } = request;
-    let SubmittedTurnInput::UserInput {
-        content: mut items,
-        client_id,
-    } = input
-    else {
+    if !matches!(&input, SubmittedTurnInput::UserInput { .. }) {
         return Err(CodexErr::InvalidRequest(
             "only user input can steer a turn".to_string(),
         ));
-    };
+    }
     let incoming_root_turn_id = start
         .parent_turn_id
         .as_ref()
@@ -401,11 +474,10 @@ async fn steer(
     let settings = PreparedTurnInputSettings::prepare(session, thread_settings, start).await?;
     match session
         .steer_input(
-            &mut items,
+            &mut input,
             additional_context,
             Some(expected_turn_id.as_str()),
             settings.required_active_final_output_json_schema(),
-            client_id,
             responsesapi_client_metadata,
             incoming_root_turn_id,
         )
@@ -427,7 +499,11 @@ impl Session {
             TurnInputRequest::user_input(vec![UserInput::Text {
                 text,
                 text_elements: Vec::new(),
-            }]),
+            }])
+            .on_start(TurnStartOptions {
+                turn_trigger: Some("realtime".to_string()),
+                ..Default::default()
+            }),
             TurnInputMode::StartOrSteer,
             submission_id.clone(),
         )
@@ -438,6 +514,7 @@ impl Session {
                 self.send_event_raw(Event {
                     id: submission_id,
                     msg: EventMsg::Error(ErrorEvent {
+                        misalignment: None,
                         message: format!("failed to submit turn input: {reason:?}"),
                         codex_error_info: Some(CodexErrorInfo::BadRequest),
                     }),
@@ -464,24 +541,19 @@ impl Session {
         }
     }
 
-    /// Inject additional user input into the currently active turn.
+    /// Inject additional user input or a standalone tool output into the active turn.
     ///
     /// Returns the active turn id when accepted.
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
     )]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "steering carries the accepted input plus its turn-scoped metadata"
-    )]
     async fn steer_input(
         &self,
-        input: &mut Vec<UserInput>,
+        input: &mut SubmittedTurnInput,
         additional_context: BTreeMap<String, AdditionalContextEntry>,
         expected_turn_id: Option<&str>,
         required_final_output_json_schema: Option<&Value>,
-        client_user_message_id: Option<String>,
         responsesapi_client_metadata: Option<HashMap<String, String>>,
         incoming_root_turn_id: Option<Option<String>>,
     ) -> Result<String, NotSubmittedReason> {
@@ -518,7 +590,7 @@ impl Session {
             }
         }
 
-        if input.is_empty() {
+        if matches!(input, SubmittedTurnInput::UserInput { content, .. } if content.is_empty()) {
             return Err(NotSubmittedReason::EmptyInput);
         }
         // Compare JSON values directly instead of serialized schema text.
@@ -529,11 +601,6 @@ impl Session {
         {
             return Err(NotSubmittedReason::ActiveTurnOutputSchemaMismatch);
         }
-        active_task
-            .turn_context
-            .session_telemetry
-            .user_prompt(input);
-
         let mut pending_input = merge_additional_context_input(self, additional_context).await;
 
         if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
@@ -543,17 +610,31 @@ impl Session {
                 .set_responsesapi_client_metadata(responsesapi_client_metadata);
         }
 
-        pending_input.push(TurnInput::UserInput {
-            content: std::mem::take(input),
-            client_id: client_user_message_id,
-        });
-        if let Some(incoming_root_turn_id) = incoming_root_turn_id
-            && active_task.turn_context.turn_metadata_state.root_turn_id() != incoming_root_turn_id
+        let input = match input {
+            SubmittedTurnInput::UserInput { content, client_id } => {
+                active_task
+                    .turn_context
+                    .session_telemetry
+                    .user_prompt(content);
+                TurnInput::UserInput {
+                    content: std::mem::take(content),
+                    client_id: client_id.clone(),
+                }
+            }
+            input => pending_turn_input(input.clone()),
+        };
+        pending_input.push(input);
+        if active_task
+            .turn_context
+            .turn_metadata_state
+            .root_turn_id()
+            .is_none()
+            && let Some(Some(incoming_root_turn_id)) = incoming_root_turn_id
         {
             active_task
                 .turn_context
                 .turn_metadata_state
-                .mark_root_turn_ambiguous();
+                .set_root_turn_id(incoming_root_turn_id);
         }
         self.input_queue
             .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
@@ -563,10 +644,6 @@ impl Session {
             .await;
         Ok(active_turn_id.clone())
     }
-}
-
-fn has_nonempty_user_input(input: &SubmittedTurnInput) -> bool {
-    matches!(input, SubmittedTurnInput::UserInput { content, .. } if !content.is_empty())
 }
 
 async fn merge_additional_context_input(
@@ -579,7 +656,6 @@ async fn merge_additional_context_input(
     };
     additional_context_input
         .into_iter()
-        .map(ResponseItem::from)
         .map(|item| session.annotate_client_response_item(item))
         .map(TurnInput::ResponseItem)
         .collect()
@@ -589,6 +665,15 @@ fn pending_turn_input(input: SubmittedTurnInput) -> TurnInput {
     match input {
         SubmittedTurnInput::UserInput { content, client_id } => {
             TurnInput::UserInput { content, client_id }
+        }
+        SubmittedTurnInput::ResponseItem(mut item)
+            if matches!(
+                &item,
+                ResponseItem::FunctionCallOutput { call_id: None, .. }
+            ) =>
+        {
+            Session::assign_missing_response_item_id(&mut item);
+            TurnInput::FunctionCallOutput(item)
         }
         SubmittedTurnInput::ResponseItem(item) => TurnInput::ResponseItem(item.into()),
         SubmittedTurnInput::InterAgentCommunication(communication) => {

@@ -90,7 +90,7 @@ pub(crate) async fn run_remote_compact_task(
         trace_id: turn_context.trace_id.clone(),
         started_at: turn_context.turn_timing_state.started_at_unix_secs().await,
         model_context_window: turn_context.model_context_window(),
-        collaboration_mode_kind: turn_context.mode,
+        collaboration_mode_kind: turn_context.mode(),
     });
     sess.send_event(&turn_context, start_event).await;
 
@@ -206,7 +206,7 @@ async fn run_remote_compact_task_inner_impl(
     let compaction_trace = sess.services.rollout_thread_trace.compaction_trace_context(
         turn_context.sub_id.as_str(),
         compaction_id.as_str(),
-        turn_context.model_info.slug.as_str(),
+        turn_context.model_info().slug.as_str(),
         turn_context.provider.info().name.as_str(),
     );
     let compaction_item = TurnItem::ContextCompaction(context_compaction_item);
@@ -230,12 +230,14 @@ async fn run_remote_compact_task_inner_impl(
             if !should_retry_with_current_model(&error) {
                 return Err(error);
             }
+            sess.set_last_known_step_context(fallback_step_context)
+                .await;
             let fallback_turn_context = &fallback_step_context.turn;
             let fallback_compaction_trace =
                 sess.services.rollout_thread_trace.compaction_trace_context(
                     fallback_turn_context.sub_id.as_str(),
                     compaction_id.as_str(),
-                    fallback_turn_context.model_info.slug.as_str(),
+                    fallback_turn_context.model_info().slug.as_str(),
                     fallback_turn_context.provider.info().name.as_str(),
                 );
             let fallback_result = run_remote_compact_attempt(
@@ -249,8 +251,8 @@ async fn run_remote_compact_task_inner_impl(
             .await;
             record_model_fallback(
                 &sess.services.session_telemetry,
-                turn_context.model_info.slug.as_str(),
-                fallback_turn_context.model_info.slug.as_str(),
+                turn_context.model_info().slug.as_str(),
+                fallback_turn_context.model_info().slug.as_str(),
                 compaction_metadata.reason(),
                 compaction_metadata.implementation(),
                 fallback_result.as_ref().err(),
@@ -298,6 +300,7 @@ async fn run_remote_compact_task_inner_impl(
             message: String::new(),
             window_number: new_window_number,
             window_ids: new_window_ids,
+            compaction_response_id: None,
         },
     )
     .await;
@@ -461,11 +464,15 @@ fn rewritten_output_for_context_window(
         ResponseItem::FunctionCallOutput {
             id,
             call_id,
+            name,
+            namespace,
             output,
             internal_chat_message_metadata_passthrough: metadata,
         } => ResponseItem::FunctionCallOutput {
             id: id.clone(),
             call_id: call_id.clone(),
+            name: name.clone(),
+            namespace: namespace.clone(),
             output: truncated_output_payload(output),
             internal_chat_message_metadata_passthrough: metadata.clone(),
         },

@@ -259,6 +259,10 @@ pub use resolved_permissions::WindowsSandboxTokenMode;
 #[cfg(target_os = "windows")]
 pub use resolved_permissions::token_mode_for_permission_profile;
 #[cfg(target_os = "windows")]
+pub use setup::OFFLINE_USERNAME;
+#[cfg(target_os = "windows")]
+pub use setup::ONLINE_USERNAME;
+#[cfg(target_os = "windows")]
 pub use setup::SETUP_VERSION;
 #[cfg(target_os = "windows")]
 pub use setup::SandboxSetupRequest;
@@ -286,6 +290,8 @@ pub use setup_error::SetupErrorReport;
 pub use setup_error::SetupFailure;
 #[cfg(target_os = "windows")]
 pub use setup_error::extract_failure as extract_setup_failure;
+#[cfg(target_os = "windows")]
+pub use setup_error::read_setup_error_report;
 #[cfg(target_os = "windows")]
 pub use setup_error::sanitize_setup_metric_tag_value;
 #[cfg(target_os = "windows")]
@@ -570,7 +576,16 @@ mod windows_impl {
         )?;
         let (stdin_pair, stdout_pair, stderr_pair) = unsafe { setup_stdio_pipes()? };
         let ((in_r, in_w), (out_r, out_w), (err_r, err_w)) = (stdin_pair, stdout_pair, stderr_pair);
-        let spawn_res = unsafe {
+        let spawn_res = crate::LaunchDesktop::prepare_legacy(
+            use_private_desktop,
+            &permissions,
+            &current_dir,
+            &env_map,
+            &security,
+            &additional_deny_write_paths,
+            logs_base_dir,
+        )
+        .and_then(|desktop| unsafe {
             create_process_as_user(
                 security.h_token,
                 &command,
@@ -579,9 +594,9 @@ mod windows_impl {
                 logs_base_dir,
                 Some((in_r, out_w, err_w)),
                 ConsoleMode::Inherit,
-                use_private_desktop,
+                desktop,
             )
-        };
+        });
         let created = match spawn_res {
             Ok(v) => v,
             Err(err) => {

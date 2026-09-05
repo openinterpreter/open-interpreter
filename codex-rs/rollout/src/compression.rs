@@ -244,7 +244,6 @@ mod worker {
     use tokio::task::JoinSet;
 
     use crate::ARCHIVED_SESSIONS_SUBDIR;
-    use crate::RolloutReferenceIndex;
     use crate::SESSIONS_SUBDIR;
 
     use super::RolloutFile;
@@ -374,15 +373,6 @@ mod worker {
         let started_at = Instant::now();
         let result = async {
             cleanup_stale_temps(codex_home.as_path()).await?;
-            let Some(reference_index) = RolloutReferenceIndex::scan_until(
-                codex_home.as_path(),
-                started_at,
-                WORKER_MAX_RUNTIME,
-            )
-            .await?
-            else {
-                return Ok(CompressionStats::default());
-            };
             let mut stats = CompressionStats::default();
             for root in [
                 codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
@@ -391,8 +381,7 @@ mod worker {
                 if started_at.elapsed() >= WORKER_MAX_RUNTIME {
                     break;
                 }
-                compress_rollouts_in_root(root.as_path(), started_at, &reference_index, &mut stats)
-                    .await?;
+                compress_rollouts_in_root(root.as_path(), started_at, &mut stats).await?;
             }
             Ok::<_, io::Error>(stats)
         }
@@ -432,7 +421,6 @@ mod worker {
     async fn compress_rollouts_in_root(
         root: &Path,
         started_at: Instant,
-        reference_index: &RolloutReferenceIndex,
         stats: &mut CompressionStats,
     ) -> io::Result<()> {
         if !tokio::fs::try_exists(root).await.unwrap_or(false) {
@@ -491,24 +479,14 @@ mod worker {
                     continue;
                 }
                 let path = rollout_file.into_path();
-                let Some(rollout_id) = crate::rollout_id_from_path(path.as_path()) else {
+                if crate::rollout_id_from_path(path.as_path()).is_none() {
                     stats.skipped = stats.skipped.saturating_add(1);
                     metrics::file("skipped_unreadable_meta");
-                    continue;
-                };
-                let Ok(meta) = crate::read_session_meta_line(path.as_path()).await else {
-                    stats.skipped = stats.skipped.saturating_add(1);
-                    metrics::file("skipped_unreadable_meta");
-                    continue;
-                };
-                if reference_index.reference_count(rollout_id) > 0 {
-                    stats.skipped = stats.skipped.saturating_add(1);
-                    metrics::file("skipped_referenced");
                     continue;
                 }
-                if meta.meta.history_base.is_some() {
+                if crate::read_session_meta_line(path.as_path()).await.is_err() {
                     stats.skipped = stats.skipped.saturating_add(1);
-                    metrics::file("skipped_fork_pointer");
+                    metrics::file("skipped_unreadable_meta");
                     continue;
                 }
                 stats.scanned = stats.scanned.saturating_add(1);
@@ -745,6 +723,8 @@ mod worker {
     fn encode_zstd_to_writer(source: &Path, output: impl Write) -> io::Result<()> {
         let mut input = File::open(source)?;
         let mut encoder = zstd::stream::write::Encoder::new(output, COMPRESSION_LEVEL)?;
+        // Preserve fast byte-bound checks for paginated history without decoding the whole file.
+        encoder.set_pledged_src_size(Some(input.metadata()?.len()))?;
         io::copy(&mut input, &mut encoder)?;
         encoder.finish()?;
         Ok(())

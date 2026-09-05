@@ -12,6 +12,7 @@ use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxEntryMissingPathBehavior;
 use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::FileSystemSandboxPolicyContext;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::SandboxPolicy;
@@ -22,8 +23,6 @@ pub use find_up::find_nearest_native_ancestor_with_markers;
 use futures::Stream;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashSet;
-use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
 use std::num::NonZeroUsize;
@@ -34,21 +33,67 @@ use std::task::Poll;
 
 /// Maximum chunk size returned by [`ExecutorFileSystem::read_file_stream`].
 pub const FILE_READ_CHUNK_SIZE: usize = 1024 * 1024;
-const MAX_WALK_DEPTH: usize = 64;
-const MAX_WALK_DIRECTORIES: usize = 10_000;
-const MAX_WALK_ENTRIES: usize = 50_000;
-const MAX_WALK_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const WALK_RESPONSE_ITEM_OVERHEAD_BYTES: usize = 64;
+/// Maximum accepted directory depth for a filesystem walk.
+pub const MAX_WALK_DEPTH: usize = 64;
+/// Maximum accepted directory count, including the walk root.
+pub const MAX_WALK_DIRECTORIES: usize = 10_000;
+/// Maximum accepted number of directory entries to examine.
+pub const MAX_WALK_ENTRIES: usize = 50_000;
+/// Maximum estimated size of a walk response.
+pub const MAX_WALK_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// Per-entry or per-error overhead charged to the walk response budget.
+pub const WALK_RESPONSE_ITEM_OVERHEAD_BYTES: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReadFileOptions {
+    pub follow_symlinks: bool,
+}
+
+impl Default for ReadFileOptions {
+    fn default() -> Self {
+        Self {
+            follow_symlinks: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WriteFileOptions {
+    pub follow_symlinks: bool,
+}
+
+impl Default for WriteFileOptions {
+    fn default() -> Self {
+        Self {
+            follow_symlinks: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GetMetadataOptions {
+    pub follow_symlinks: bool,
+}
+
+impl Default for GetMetadataOptions {
+    fn default() -> Self {
+        Self {
+            follow_symlinks: true,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CreateDirectoryOptions {
     pub recursive: bool,
+    pub follow_symlinks: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RemoveOptions {
     pub recursive: bool,
     pub force: bool,
+    pub follow_symlinks: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,9 +180,7 @@ pub enum ExecFileSystemPath {
 impl From<FileSystemPath> for ExecFileSystemPath {
     fn from(value: FileSystemPath) -> Self {
         match value {
-            FileSystemPath::Path { path } => Self::Path {
-                path: PathUri::from_abs_path(&path),
-            },
+            FileSystemPath::Path { path } => Self::Path { path },
             FileSystemPath::GlobPattern { pattern } => Self::GlobPattern { pattern },
             FileSystemPath::Special { value } => Self::Special { value },
         }
@@ -149,9 +192,10 @@ impl TryFrom<ExecFileSystemPath> for FileSystemPath {
 
     fn try_from(value: ExecFileSystemPath) -> Result<Self, Self::Error> {
         Ok(match value {
-            ExecFileSystemPath::Path { path } => Self::Path {
-                path: path.to_abs_path()?,
-            },
+            ExecFileSystemPath::Path { path } => {
+                path.to_abs_path()?;
+                Self::Path { path }
+            }
             ExecFileSystemPath::GlobPattern { pattern } => Self::GlobPattern { pattern },
             ExecFileSystemPath::Special { value } => Self::Special { value },
         })
@@ -289,6 +333,12 @@ pub struct FileSystemSandboxContext {
     pub cwd: Option<PathUri>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_roots: Vec<PathUri>,
+    /// Executor-local user home used to resolve home-relative policy paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_home_dir: Option<PathUri>,
+    /// Executor-local default directories used to resolve `:tmpdir` policy entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporary_directories: Option<Vec<PathUri>>,
     pub windows_sandbox_level: WindowsSandboxLevel,
     #[serde(default)]
     pub windows_sandbox_private_desktop: bool,
@@ -333,6 +383,8 @@ impl FileSystemSandboxContext {
             permissions: permissions.into(),
             cwd,
             workspace_roots,
+            user_home_dir: None,
+            temporary_directories: None,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
             windows_sandbox_private_desktop: false,
             windows_sandbox_proxy_settings_mode: None,
@@ -348,6 +400,18 @@ impl FileSystemSandboxContext {
         let file_system_policy = permissions.file_system_sandbox_policy();
         matches!(file_system_policy.kind, FileSystemSandboxKind::Restricted)
             && !file_system_policy.has_full_disk_write_access()
+    }
+
+    /// Borrows the executor-owned paths needed to interpret filesystem policy entries.
+    ///
+    /// Returns `None` after the cwd has been omitted from a transport context.
+    pub fn policy_context(&self) -> Option<FileSystemSandboxPolicyContext<'_>> {
+        Some(FileSystemSandboxPolicyContext {
+            cwd: self.cwd.as_ref()?,
+            workspace_roots: &self.workspace_roots,
+            user_home_dir: self.user_home_dir.as_ref(),
+            temporary_directories: self.temporary_directories.as_deref(),
+        })
     }
 
     pub fn has_cwd_dependent_permissions(&self) -> bool {
@@ -421,6 +485,7 @@ pub trait ExecutorFileSystem: Send + Sync {
     fn read_file<'a>(
         &'a self,
         path: &'a PathUri,
+        options: ReadFileOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, Vec<u8>>;
 
@@ -435,10 +500,11 @@ pub trait ExecutorFileSystem: Send + Sync {
     fn read_file_text<'a>(
         &'a self,
         path: &'a PathUri,
+        options: ReadFileOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, String> {
         Box::pin(async move {
-            let bytes = self.read_file(path, sandbox).await?;
+            let bytes = self.read_file(path, options, sandbox).await?;
             String::from_utf8(bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
         })
     }
@@ -447,6 +513,7 @@ pub trait ExecutorFileSystem: Send + Sync {
         &'a self,
         path: &'a PathUri,
         contents: Vec<u8>,
+        options: WriteFileOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, ()>;
 
@@ -460,6 +527,7 @@ pub trait ExecutorFileSystem: Send + Sync {
     fn get_metadata<'a>(
         &'a self,
         path: &'a PathUri,
+        options: GetMetadataOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, FileMetadata>;
 
@@ -475,21 +543,7 @@ pub trait ExecutorFileSystem: Send + Sync {
         path: &'a PathUri,
         options: WalkOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
-    ) -> ExecutorFileSystemFuture<'a, WalkOutcome> {
-        self.walk_via_directory_reads(path, options, sandbox)
-    }
-
-    /// Performs a bounded walk using the primitive filesystem operations.
-    ///
-    /// Implementations with an optimized walk transport can use this as a compatibility fallback.
-    fn walk_via_directory_reads<'a>(
-        &'a self,
-        path: &'a PathUri,
-        options: WalkOptions,
-        sandbox: Option<&'a FileSystemSandboxContext>,
-    ) -> ExecutorFileSystemFuture<'a, WalkOutcome> {
-        Box::pin(walk_via_directory_reads(self, path, options, sandbox))
-    }
+    ) -> ExecutorFileSystemFuture<'a, WalkOutcome>;
 
     fn remove<'a>(
         &'a self,
@@ -505,189 +559,4 @@ pub trait ExecutorFileSystem: Send + Sync {
         copy_options: CopyOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, ()>;
-}
-
-async fn walk_via_directory_reads<F: ExecutorFileSystem + ?Sized>(
-    file_system: &F,
-    root: &PathUri,
-    options: WalkOptions,
-    sandbox: Option<&FileSystemSandboxContext>,
-) -> FileSystemResult<WalkOutcome> {
-    if options.max_directories == 0 || options.max_entries == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "filesystem walk limits must be greater than zero",
-        ));
-    }
-    if options.max_depth > MAX_WALK_DEPTH
-        || options.max_directories > MAX_WALK_DIRECTORIES
-        || options.max_entries > MAX_WALK_ENTRIES
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "filesystem walk limits exceed maximums: depth={MAX_WALK_DEPTH}, directories={MAX_WALK_DIRECTORIES}, entries={MAX_WALK_ENTRIES}"
-            ),
-        ));
-    }
-
-    let root_metadata = file_system.get_metadata(root, sandbox).await?;
-    if !root_metadata.is_directory
-        || (root_metadata.is_symlink && !options.follow_directory_symlinks)
-    {
-        return Ok(WalkOutcome::default());
-    }
-
-    let root_identity = if options.follow_directory_symlinks {
-        file_system.canonicalize(root, sandbox).await?
-    } else {
-        root.clone()
-    };
-    let mut outcome = WalkOutcome::default();
-    let mut queue = VecDeque::from([(root.clone(), 0usize)]);
-    let mut visited_directories = HashSet::from([root_identity]);
-    let mut directory_count = 1usize;
-    let mut entry_count = 0usize;
-    let mut response_bytes = 0usize;
-
-    while let Some((directory, depth)) = queue.pop_front() {
-        let mut entries = match file_system.read_directory(&directory, sandbox).await {
-            Ok(entries) => entries,
-            Err(error) => {
-                if !push_walk_error(
-                    &mut outcome,
-                    &mut response_bytes,
-                    directory,
-                    error.to_string(),
-                ) {
-                    return Ok(outcome);
-                }
-                continue;
-            }
-        };
-        entries.sort_by(|left, right| left.file_name.cmp(&right.file_name));
-
-        for entry in entries {
-            if entry_count == options.max_entries {
-                outcome.truncated = true;
-                return Ok(outcome);
-            }
-            entry_count += 1;
-
-            let path = match directory.join(&entry.file_name) {
-                Ok(path) => path,
-                Err(error) => {
-                    if !push_walk_error(
-                        &mut outcome,
-                        &mut response_bytes,
-                        directory.clone(),
-                        error.to_string(),
-                    ) {
-                        return Ok(outcome);
-                    }
-                    continue;
-                }
-            };
-            let metadata = match file_system.get_metadata(&path, sandbox).await {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    if !push_walk_error(&mut outcome, &mut response_bytes, path, error.to_string())
-                    {
-                        return Ok(outcome);
-                    }
-                    continue;
-                }
-            };
-            if metadata.is_symlink && (!options.follow_directory_symlinks || !metadata.is_directory)
-            {
-                continue;
-            }
-
-            let kind = if metadata.is_directory {
-                WalkEntryKind::Directory
-            } else if metadata.is_file {
-                WalkEntryKind::File
-            } else {
-                continue;
-            };
-            if !reserve_walk_response_bytes(
-                &mut outcome,
-                &mut response_bytes,
-                path.to_string().len(),
-            ) {
-                return Ok(outcome);
-            }
-            outcome.entries.push(WalkEntry {
-                path: path.clone(),
-                kind,
-            });
-
-            if kind == WalkEntryKind::Directory && depth < options.max_depth {
-                if options.prune_hidden_directories && entry.file_name.starts_with('.') {
-                    continue;
-                }
-                let directory_identity = if options.follow_directory_symlinks {
-                    match file_system.canonicalize(&path, sandbox).await {
-                        Ok(path) => path,
-                        Err(error) => {
-                            if !push_walk_error(
-                                &mut outcome,
-                                &mut response_bytes,
-                                path,
-                                error.to_string(),
-                            ) {
-                                return Ok(outcome);
-                            }
-                            continue;
-                        }
-                    }
-                } else {
-                    path.clone()
-                };
-                if !visited_directories.insert(directory_identity) {
-                    continue;
-                }
-                if directory_count == options.max_directories {
-                    outcome.truncated = true;
-                } else {
-                    directory_count += 1;
-                    queue.push_back((path, depth + 1));
-                }
-            }
-        }
-    }
-
-    Ok(outcome)
-}
-
-fn push_walk_error(
-    outcome: &mut WalkOutcome,
-    response_bytes: &mut usize,
-    path: PathUri,
-    message: String,
-) -> bool {
-    let item_bytes = path.to_string().len().saturating_add(message.len());
-    if !reserve_walk_response_bytes(outcome, response_bytes, item_bytes) {
-        return false;
-    }
-    outcome.errors.push(WalkError { path, message });
-    true
-}
-
-fn reserve_walk_response_bytes(
-    outcome: &mut WalkOutcome,
-    response_bytes: &mut usize,
-    content_bytes: usize,
-) -> bool {
-    let item_bytes = content_bytes.saturating_add(WALK_RESPONSE_ITEM_OVERHEAD_BYTES);
-    let Some(total_bytes) = response_bytes.checked_add(item_bytes) else {
-        outcome.truncated = true;
-        return false;
-    };
-    if total_bytes > MAX_WALK_RESPONSE_BYTES {
-        outcome.truncated = true;
-        return false;
-    }
-    *response_bytes = total_bytes;
-    true
 }

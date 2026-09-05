@@ -5,6 +5,9 @@ use super::TurnStatus;
 use crate::JsonSchema;
 use crate::TS;
 use codex_experimental_api_macros::ExperimentalApi;
+use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::MisalignmentErrorDetails as CoreMisalignmentErrorDetails;
+use codex_protocol::protocol::MisalignmentSteer as CoreMisalignmentSteer;
 use codex_protocol::protocol::SessionSource as CoreSessionSource;
 use codex_protocol::protocol::SubAgentSource as CoreSubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode as CoreThreadHistoryMode;
@@ -16,6 +19,7 @@ use schemars::r#gen::SchemaGenerator;
 use schemars::schema::Schema;
 use serde::Deserialize;
 use serde::Serialize;
+use std::fmt;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -101,6 +105,7 @@ impl From<ThreadHistoryMode> for CoreThreadHistoryMode {
 pub enum ThreadSource {
     User,
     Subagent,
+    GuardianReview,
     Feature(String),
     MemoryConsolidation,
 }
@@ -135,6 +140,7 @@ impl From<CoreThreadSource> for ThreadSource {
         match value {
             CoreThreadSource::User => ThreadSource::User,
             CoreThreadSource::Subagent => ThreadSource::Subagent,
+            CoreThreadSource::GuardianReview => ThreadSource::GuardianReview,
             CoreThreadSource::Feature(feature) => ThreadSource::Feature(feature),
             CoreThreadSource::MemoryConsolidation => ThreadSource::MemoryConsolidation,
         }
@@ -146,6 +152,7 @@ impl From<ThreadSource> for CoreThreadSource {
         match value {
             ThreadSource::User => CoreThreadSource::User,
             ThreadSource::Subagent => CoreThreadSource::Subagent,
+            ThreadSource::GuardianReview => CoreThreadSource::GuardianReview,
             ThreadSource::Feature(feature) => CoreThreadSource::Feature(feature),
             ThreadSource::MemoryConsolidation => CoreThreadSource::MemoryConsolidation,
         }
@@ -190,7 +197,7 @@ pub struct ThreadSectionAppearance {
     pub color: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
+#[derive(Serialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct Thread {
@@ -216,12 +223,23 @@ pub struct Thread {
     #[serde(default)]
     #[ts(type = "number | null")]
     pub section_entered_at: Option<i64>,
+    /// Canonical project assignment owned by app-server, if any.
+    #[schemars(
+        required,
+        schema_with = "crate::protocol::serde_helpers::nullable_string_schema"
+    )]
+    pub project_id: Option<String>,
     /// Persisted thread history contract selected when this thread was created.
-    #[experimental("thread.historyMode")]
     #[serde(default)]
     pub history_mode: ThreadHistoryMode,
     /// Model provider used for this thread (for example, 'openai').
     pub model_provider: String,
+    /// Current configured model when loaded, otherwise the latest persisted model.
+    /// Null when unavailable. This is not per-turn execution telemetry.
+    pub model: Option<String>,
+    /// Current configured reasoning effort when loaded, otherwise the latest persisted effort.
+    /// Null when unset or unavailable. This is not per-turn execution telemetry.
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Unix timestamp (in seconds) when the thread was created.
     #[ts(type = "number")]
     pub created_at: i64,
@@ -260,6 +278,86 @@ pub struct Thread {
     /// For all other responses and notifications returning a Thread,
     /// the turns field will be an empty list.
     pub turns: Vec<Turn>,
+}
+
+// TODO: Remove this compatibility decoder after app-server versions that omitted
+// `projectId` have aged out of the supported TUI -> remote app-server version-skew window.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadCompatibility {
+    id: String,
+    extra: Option<ThreadExtra>,
+    session_id: String,
+    forked_from_id: Option<String>,
+    parent_thread_id: Option<String>,
+    preview: String,
+    ephemeral: bool,
+    #[serde(default)]
+    section: Option<ThreadSection>,
+    #[serde(default)]
+    section_entered_at: Option<i64>,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    history_mode: ThreadHistoryMode,
+    model_provider: String,
+    model: Option<String>,
+    reasoning_effort: Option<ReasoningEffort>,
+    created_at: i64,
+    updated_at: i64,
+    recency_at: Option<i64>,
+    status: ThreadStatus,
+    path: Option<PathBuf>,
+    cwd: AbsolutePathBuf,
+    cli_version: String,
+    source: SessionSource,
+    can_accept_direct_input: Option<bool>,
+    thread_source: Option<ThreadSource>,
+    agent_nickname: Option<String>,
+    agent_role: Option<String>,
+    git_info: Option<GitInfo>,
+    name: Option<String>,
+    turns: Vec<Turn>,
+}
+
+impl<'de> Deserialize<'de> for Thread {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let thread = ThreadCompatibility::deserialize(deserializer)?;
+        Ok(Self {
+            id: thread.id,
+            extra: thread.extra,
+            session_id: thread.session_id,
+            forked_from_id: thread.forked_from_id,
+            parent_thread_id: thread.parent_thread_id,
+            preview: thread.preview,
+            ephemeral: thread.ephemeral,
+            section: thread.section,
+            section_entered_at: thread.section_entered_at,
+            project_id: thread.project_id,
+            history_mode: thread.history_mode,
+            model_provider: thread.model_provider,
+            model: thread.model,
+            reasoning_effort: thread.reasoning_effort,
+            created_at: thread.created_at,
+            updated_at: thread.updated_at,
+            recency_at: thread.recency_at,
+            status: thread.status,
+            path: thread.path,
+            cwd: thread.cwd,
+            cli_version: thread.cli_version,
+            source: thread.source,
+            can_accept_direct_input: thread.can_accept_direct_input,
+            thread_source: thread.thread_source,
+            agent_nickname: thread.agent_nickname,
+            agent_role: thread.agent_role,
+            git_info: thread.git_info,
+            name: thread.name,
+            turns: thread.turns,
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -309,4 +407,67 @@ pub struct TurnError {
     pub codex_error_info: Option<CodexErrorInfo>,
     #[serde(default)]
     pub additional_details: Option<String>,
+    /// Optional public explanation and continuation instruction for a misalignment block.
+    #[serde(default)]
+    pub misalignment: Option<MisalignmentErrorDetails>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MisalignmentErrorDetails {
+    /// Open-ended classification; clients must accept categories added by Responses.
+    pub error_type: Option<String>,
+    /// A substantive localized explanation is required before offering continuation.
+    pub detailed_explanation: Option<String>,
+    /// Instruction to submit as the next turn's user input if continuation is confirmed.
+    pub steer: Option<MisalignmentSteer>,
+}
+
+impl fmt::Debug for MisalignmentErrorDetails {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MisalignmentErrorDetails")
+            .field("error_type", &self.error_type)
+            .field(
+                "has_detailed_explanation",
+                &self.detailed_explanation.is_some(),
+            )
+            .field("has_steer", &self.steer.is_some())
+            .finish()
+    }
+}
+
+impl From<CoreMisalignmentErrorDetails> for MisalignmentErrorDetails {
+    fn from(value: CoreMisalignmentErrorDetails) -> Self {
+        Self {
+            error_type: value.error_type,
+            detailed_explanation: value.detailed_explanation,
+            steer: value.steer.map(Into::into),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MisalignmentSteer {
+    pub message: String,
+}
+
+impl fmt::Debug for MisalignmentSteer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MisalignmentSteer")
+            .field("message", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl From<CoreMisalignmentSteer> for MisalignmentSteer {
+    fn from(value: CoreMisalignmentSteer) -> Self {
+        Self {
+            message: value.message,
+        }
+    }
 }

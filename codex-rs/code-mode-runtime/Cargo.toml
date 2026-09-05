@@ -19,10 +19,12 @@ v8-runtime = ["dep:deno_core_icudata", "dep:v8"]
 workspace = true
 
 [dependencies]
+base64 = { workspace = true }
 codex-code-mode-protocol = { workspace = true }
 codex-protocol = { workspace = true }
 deno_core_icudata = { workspace = true, optional = true }
 futures = { workspace = true }
+opentelemetry = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }

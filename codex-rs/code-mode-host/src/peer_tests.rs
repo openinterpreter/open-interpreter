@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use codex_code_mode_protocol::CellId;
 use codex_code_mode_protocol::RuntimeResponse;
@@ -38,11 +39,13 @@ async fn start_cell_reports_when_initial_response_is_enqueued() {
         RequestId::new(/*value*/ 1),
         started,
         active_cell_permit,
+        Instant::now(),
     );
     assert_eq!(initial_response_sent.try_recv(), Err(TryRecvError::Empty));
 
     response_tx
         .send(RuntimeResponse::Result {
+            code_mode_host_duration: None,
             cell_id: cell_id.clone(),
             content_items: Vec::new(),
             error_text: None,

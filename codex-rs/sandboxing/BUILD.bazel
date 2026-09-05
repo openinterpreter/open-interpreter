@@ -3,9 +3,11 @@ load("//:defs.bzl", "codex_rust_crate")
 codex_rust_crate(
     name = "sandboxing",
     compile_data = [
-        "src/restricted_read_only_platform_defaults.sbpl",
+        "src/seatbelt_read_only_platform_defaults.sbpl",
         "src/seatbelt_base_policy.sbpl",
         "src/seatbelt_network_policy.sbpl",
+        "src/seatbelt_preferences_policy.sbpl",
     ],
     crate_name = "codex_sandboxing",
+    test_tags = ["no-sandbox"],
 )

@@ -1,52 +1,95 @@
 use super::ContextWindowGuidanceState;
+use super::REMOVAL_NOTICE;
 use crate::context::ContextWindowGuidance;
 use crate::context::ContextualUserFragment;
 use crate::context::world_state::WorldState;
+use crate::context::world_state::WorldStateSnapshot;
 use codex_protocol::models::ResponseItem;
 use pretty_assertions::assert_eq;
+use serde_json::json;
+use test_case::test_case;
 
-#[test]
-fn changed_guidance_is_rendered_once() {
+#[test_case(None, None, None; "absent guidance stays silent")]
+#[test_case(None, Some("guidance"), Some("guidance"); "initial guidance")]
+#[test_case(Some("guidance"), Some("guidance"), None; "unchanged guidance")]
+#[test_case(
+    Some("original guidance"),
+    Some("refreshed guidance"),
+    Some("This context-window guidance replaces all previously provided context-window guidance.\n\nrefreshed guidance");
+    "changed guidance"
+)]
+#[test_case(Some("guidance"), None, Some(REMOVAL_NOTICE); "removed guidance")]
+#[test_case(Some("guidance"), Some("  "), Some(REMOVAL_NOTICE); "blank guidance")]
+fn guidance_transitions_render_once(
+    previous: Option<&str>,
+    current: Option<&str>,
+    expected: Option<&str>,
+) {
     let mut original = WorldState::default();
-    original.add_section(ContextWindowGuidanceState::new("original guidance"));
-    let snapshot = original.snapshot();
-
-    let mut unchanged = WorldState::default();
-    unchanged.add_section(ContextWindowGuidanceState::new("original guidance"));
-    assert!(unchanged.render_diff(&snapshot).is_empty());
+    original.add_section(ContextWindowGuidanceState::new(previous));
 
     let mut refreshed = WorldState::default();
-    refreshed.add_section(ContextWindowGuidanceState::new("refreshed guidance"));
-    let fragments = refreshed.render_diff(&snapshot);
-
-    assert_eq!(fragments.len(), 1);
+    refreshed.add_section(ContextWindowGuidanceState::new(current));
+    let fragments = refreshed.render_diff(&original.snapshot());
     assert_eq!(
-        fragments[0].render(),
-        ContextWindowGuidance::new("refreshed guidance").render()
+        fragments
+            .iter()
+            .map(|fragment| fragment.render())
+            .collect::<Vec<_>>(),
+        expected
+            .map(|message| ContextWindowGuidance::new(message).render())
+            .into_iter()
+            .collect::<Vec<_>>()
     );
+
+    // Empty guidance must survive persistence as a known state, not a deleted section.
+    let snapshot: WorldStateSnapshot =
+        serde_json::from_value(serde_json::to_value(refreshed.snapshot()).unwrap()).unwrap();
+    assert!(refreshed.render_diff(&snapshot).is_empty());
 }
 
-#[test]
-fn legacy_guidance_is_reconciled_once() {
+#[test_case(
+    false,
+    Some("current guidance"),
+    Some("This context-window guidance replaces all previously provided context-window guidance.\n\ncurrent guidance");
+    "legacy history is replaced"
+)]
+#[test_case(false, None, Some(REMOVAL_NOTICE); "legacy history is cleared")]
+#[test_case(true, None, Some(REMOVAL_NOTICE); "legacy string snapshot is cleared")]
+#[test_case(true, Some("previous guidance"), None; "existing string snapshot is unchanged")]
+fn legacy_guidance_is_reconciled_once(
+    has_snapshot: bool,
+    current: Option<&str>,
+    expected: Option<&str>,
+) {
     let mut state = WorldState::default();
-    state.add_section(ContextWindowGuidanceState::new("current guidance"));
+    state.add_section(ContextWindowGuidanceState::new(current));
+    let snapshot: Option<WorldStateSnapshot> = has_snapshot.then(|| {
+        serde_json::from_value(json!({"context_window_guidance": "previous guidance"})).unwrap()
+    });
     let retained: ResponseItem =
         ContextualUserFragment::into(ContextWindowGuidance::new("previous guidance"));
-
-    let fragments =
-        state.render_history_diff(/*previous*/ None, std::slice::from_ref(&retained));
-    assert_eq!(fragments.len(), 1);
+    let fragments = state.render_history_diff(snapshot.as_ref(), std::slice::from_ref(&retained));
     assert_eq!(
-        fragments[0].render(),
-        ContextWindowGuidance::new("current guidance").render()
+        fragments
+            .iter()
+            .map(|fragment| fragment.render())
+            .collect::<Vec<_>>(),
+        expected
+            .map(|message| ContextWindowGuidance::new(message).render())
+            .into_iter()
+            .collect::<Vec<_>>()
     );
 
-    let snapshot = state.snapshot();
-    let reconciled: ResponseItem =
-        ContextualUserFragment::into(ContextWindowGuidance::new("current guidance"));
+    let mut history = vec![retained];
+    if let Some(message) = expected {
+        history.push(ContextualUserFragment::into(ContextWindowGuidance::new(
+            message,
+        )));
+    }
     assert!(
         state
-            .render_history_diff(Some(&snapshot), &[retained, reconciled])
+            .render_history_diff(Some(&state.snapshot()), &history)
             .is_empty()
     );
 }

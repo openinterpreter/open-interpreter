@@ -235,8 +235,23 @@ fn rollout_item_type(item: &RolloutItem) -> String {
         }
         RolloutItem::Compacted(_) => "compacted".to_string(),
         RolloutItem::TurnContext(_) => "turn_context".to_string(),
+        RolloutItem::TokenUsageRecord(_) => "token_usage_record".to_string(),
         RolloutItem::WorldState(_) => "world_state".to_string(),
         RolloutItem::SecurityRiskScore(_) => "security_risk_score".to_string(),
+        RolloutItem::RealtimeItem(item) => match &item.content {
+            codex_protocol::realtime::RealtimeItemContent::RealtimeSessionStarted => {
+                "realtime.session_started".to_string()
+            }
+            codex_protocol::realtime::RealtimeItemContent::TranscriptSegment { .. } => {
+                "realtime.transcript_segment".to_string()
+            }
+            codex_protocol::realtime::RealtimeItemContent::BemItemPromoted { .. } => {
+                "realtime.bem_item_promoted".to_string()
+            }
+            codex_protocol::realtime::RealtimeItemContent::RealtimeSessionClosed { .. } => {
+                "realtime.session_closed".to_string()
+            }
+        },
         RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => {
             format!("event.item_completed.{}", turn_item_type(&event.item))
         }
@@ -247,6 +262,7 @@ fn rollout_item_type(item: &RolloutItem) -> String {
 fn turn_item_type(item: &TurnItem) -> &'static str {
     match item {
         TurnItem::UserMessage(_) => "user_message",
+        TurnItem::FunctionCallOutput(_) => "function_call_output",
         TurnItem::HookPrompt(_) => "hook_prompt",
         TurnItem::AgentMessage(_) => "agent_message",
         TurnItem::Plan(_) => "plan",

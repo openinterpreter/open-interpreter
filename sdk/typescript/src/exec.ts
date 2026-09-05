@@ -13,6 +13,8 @@ export type CodexExecArgs = {
   baseUrl?: string;
   apiKey?: string;
   threadId?: string | null;
+  // --thread-source; only applies when creating a new thread
+  threadSource?: string;
   images?: string[];
   // --model
   model?: string;
@@ -65,11 +67,13 @@ export class CodexExec {
   private pathDirs: string[];
   private envOverride?: Record<string, string>;
   private configOverrides?: CodexConfigObject;
+  private rawConfigOverrides?: string[];
 
   constructor(
     executablePath: string | null = null,
     env?: Record<string, string>,
     configOverrides?: CodexConfigObject,
+    rawConfigOverrides?: string[],
   ) {
     if (executablePath) {
       this.executablePath = executablePath;
@@ -81,6 +85,7 @@ export class CodexExec {
     }
     this.envOverride = env;
     this.configOverrides = configOverrides;
+    this.rawConfigOverrides = rawConfigOverrides;
   }
 
   async *run(args: CodexExecArgs): AsyncGenerator<string> {
@@ -88,6 +93,12 @@ export class CodexExec {
 
     if (this.configOverrides) {
       for (const override of serializeConfigOverrides(this.configOverrides)) {
+        commandArgs.push("--config", override);
+      }
+    }
+
+    if (this.rawConfigOverrides) {
+      for (const override of this.rawConfigOverrides) {
         commandArgs.push("--config", override);
       }
     }
@@ -101,6 +112,10 @@ export class CodexExec {
 
     if (args.model) {
       commandArgs.push("--model", args.model);
+    }
+
+    if (args.threadSource !== undefined && !args.threadId) {
+      commandArgs.push("--thread-source", args.threadSource);
     }
 
     if (args.sandboxMode) {

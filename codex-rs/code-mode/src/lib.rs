@@ -6,4 +6,3 @@ pub use grpc_session::GrpcCodeModeSessionProvider;
 pub use remote_session::DisabledCodeModeSessionProvider;
 pub use remote_session::ProcessOwnedCodeModeSession;
 pub use remote_session::ProcessOwnedCodeModeSessionProvider;
-pub use remote_session::WebSocketCodeModeSessionProvider;

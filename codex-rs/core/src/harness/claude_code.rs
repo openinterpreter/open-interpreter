@@ -285,6 +285,7 @@ pub(crate) fn build_claude_code_responses_shaped_request(
         prompt_cache_key,
         text: None,
         client_metadata: None,
+        access_programs: None,
     })
 }
 
@@ -411,7 +412,8 @@ fn anthropic_output_effort(effort: ReasoningEffortConfig) -> String {
         ReasoningEffortConfig::High
         | ReasoningEffortConfig::XHigh
         | ReasoningEffortConfig::Max
-        | ReasoningEffortConfig::Ultra => "high".to_string(),
+        | ReasoningEffortConfig::Ultra
+        | ReasoningEffortConfig::Persistent => "high".to_string(),
         ReasoningEffortConfig::None => "none".to_string(),
         ReasoningEffortConfig::Custom(value) => value,
     }
@@ -521,6 +523,9 @@ fn build_messages(
             ResponseItem::FunctionCallOutput {
                 call_id, output, ..
             } => {
+                let Some(call_id) = call_id.as_ref() else {
+                    continue;
+                };
                 pending_tool_results.push(PendingToolResult {
                     order: tool_order_by_call_id
                         .get(call_id)

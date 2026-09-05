@@ -38,4 +38,12 @@ pub struct ImageGenerationItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub saved_path: Option<AbsolutePathBuf>,
+    /// Exact nested ImageGen request ID retained only for in-process analytics.
+    ///
+    /// This is deliberately excluded from the extension/app-server wire shape
+    /// and rollout persistence because it is not a client-facing item field.
+    #[serde(skip)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub imagegen_request_id: Option<String>,
 }

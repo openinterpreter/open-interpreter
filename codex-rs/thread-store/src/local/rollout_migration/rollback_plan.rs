@@ -219,7 +219,10 @@ impl RollbackPlanner {
                     self.pending_turn_records.push(index);
                 }
             }
-            RolloutItem::WorldState(_) => {}
+            RolloutItem::TokenUsageRecord(record) => {
+                self.assign_targeted_record(index, Some(record.turn_id.as_str()));
+            }
+            RolloutItem::WorldState(_) | RolloutItem::RealtimeItem(_) => {}
             RolloutItem::SecurityRiskScore(_) => self.record_boundaries[index] = None,
         }
 
@@ -240,6 +243,7 @@ impl RollbackPlanner {
             .filter_map(|mut frame| {
                 if Some(frame.record_index) == replay_anchor {
                     frame.item.replacement_history = Some(Vec::new());
+                    frame.item.mcp_resource_origins = None;
                     return Some((frame.record_index, frame.item));
                 }
                 frame
@@ -316,6 +320,7 @@ impl RollbackPlanner {
             let post_compaction_turns = depth_before.saturating_sub(frame.boundary_depth);
             let remaining = count.saturating_sub(post_compaction_turns);
             if remaining > 0 {
+                frame.item.mcp_resource_origins = None;
                 let replacement_history =
                     frame.item.replacement_history.as_mut().ok_or_else(|| {
                         migration_error(

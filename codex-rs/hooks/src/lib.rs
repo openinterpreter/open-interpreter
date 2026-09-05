@@ -16,9 +16,11 @@ pub use declarations::PluginHookDeclaration;
 pub use declarations::plugin_hook_declarations;
 pub use engine::HookListEntry;
 pub use engine::HookListEntryHandler;
+pub use engine::dispatcher::hook_execution_mode_label;
+pub use engine::dispatcher::hook_handler_type_label;
 pub use events::common::SubagentHookContext;
 /// Hook event names as they appear in hooks JSON and config files.
-pub const HOOK_EVENT_NAMES: [&str; 11] = [
+pub const HOOK_EVENT_NAMES: [&str; 12] = [
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
@@ -30,6 +32,7 @@ pub const HOOK_EVENT_NAMES: [&str; 11] = [
     "SubagentStart",
     "SubagentStop",
     "Stop",
+    "Interrupt",
 ];
 
 /// Hook event names whose matcher fields are meaningful during dispatch.
@@ -53,6 +56,8 @@ pub use events::compact::PostCompactRequest;
 pub use events::compact::PreCompactOutcome;
 pub use events::compact::PreCompactRequest;
 pub use events::compact::StatelessHookOutcome;
+pub use events::interrupt::InterruptOutcome;
+pub use events::interrupt::InterruptRequest;
 pub use events::permission_request::PermissionRequestDecision;
 pub use events::permission_request::PermissionRequestOutcome;
 pub use events::permission_request::PermissionRequestRequest;
@@ -72,13 +77,11 @@ pub use events::stop::StopRequest;
 pub use events::user_prompt_submit::UserPromptSubmitOutcome;
 pub use events::user_prompt_submit::UserPromptSubmitRequest;
 pub use legacy_notify::legacy_notify_json;
-pub use legacy_notify::notify_hook;
 pub use mcp::HookMcpCall;
 pub use mcp::HookMcpExecutor;
 pub use registry::HookListOutcome;
 pub use registry::Hooks;
 pub use registry::HooksConfig;
-pub use registry::command_from_argv;
 pub use registry::list_hooks;
 pub use schema::write_schema_fixtures;
 pub use types::Hook;
@@ -102,6 +105,7 @@ pub fn hook_event_key_label(event_name: HookEventName) -> &'static str {
         HookEventName::SubagentStart => "subagent_start",
         HookEventName::SubagentStop => "subagent_stop",
         HookEventName::Stop => "stop",
+        HookEventName::Interrupt => "interrupt",
     }
 }
 

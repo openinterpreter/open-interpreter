@@ -425,6 +425,7 @@ async fn process_anthropic_event(
             let completed = ResponseEvent::Completed {
                 response_id,
                 token_usage,
+                usage_metadata: None,
                 end_turn: None,
             };
             let _ = tx_event.send(Ok(completed)).await;

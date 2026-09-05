@@ -19,12 +19,14 @@ serde_json = { workspace = true }
 shlex = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-bash = { workspace = true }
+tree-sitter-powershell = { workspace = true }
 url = { workspace = true }
 which = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
 pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
 
 [lib]
 doctest = false

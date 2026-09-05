@@ -1,8 +1,9 @@
-//! Handles persistent thread-settings updates shared by standalone settings
-//! submissions and turn-input submission.
+//! Handles persistent thread-settings updates and serializes their persistence
+//! with compaction checkpoints.
 
 use super::session::Session;
 use super::session::SessionSettingsUpdate;
+use super::step_settings::StepSettingsUpdate;
 use crate::config::ConstraintResult;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
@@ -10,7 +11,9 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
 use std::sync::Arc;
+use tokio::sync::SemaphorePermit;
 
 /// Applies standalone thread settings and reports invalid overrides through the
 /// normal event stream.
@@ -19,12 +22,13 @@ pub(super) async fn update(
     submission_id: String,
     overrides: ThreadSettingsOverrides,
 ) {
-    let updates = prepare_update(session, overrides).await;
+    let updates = prepare_update(overrides);
     if let Err(error) = apply_update(session, submission_id.clone(), updates).await {
         session
             .send_event_raw(Event {
                 id: submission_id,
                 msg: EventMsg::Error(ErrorEvent {
+                    misalignment: None,
                     message: format!("invalid thread settings override: {error}"),
                     codex_error_info: Some(CodexErrorInfo::BadRequest),
                 }),
@@ -34,10 +38,7 @@ pub(super) async fn update(
 }
 
 /// Converts protocol overrides into the internal settings update shape.
-pub(super) async fn prepare_update(
-    session: &Session,
-    overrides: ThreadSettingsOverrides,
-) -> SessionSettingsUpdate {
+pub(super) fn prepare_update(overrides: ThreadSettingsOverrides) -> SessionSettingsUpdate {
     let ThreadSettingsOverrides {
         environments,
         profile_workspace_roots,
@@ -54,49 +55,58 @@ pub(super) async fn prepare_update(
         collaboration_mode,
         personality,
     } = overrides;
-    let collaboration_mode = match collaboration_mode {
-        Some(collaboration_mode) => collaboration_mode,
-        None => {
-            let state = session.state.lock().await;
-            // Model and reasoning effort live in CollaborationMode settings today, so
-            // partial thread-settings updates refresh those fields on the active mode.
-            state
-                .session_configuration
-                .collaboration_mode
-                .with_updates(model, effort, /*developer_instructions*/ None)
-        }
-    };
     SessionSettingsUpdate {
+        step_settings: StepSettingsUpdate {
+            model,
+            effort,
+            collaboration_mode,
+            reasoning_summary: summary,
+            service_tier,
+            personality,
+            approval_policy,
+            approvals_reviewer,
+        },
         environments,
         profile_workspace_roots,
-        approval_policy,
-        approvals_reviewer,
         sandbox_policy,
         permission_profile,
         active_permission_profile,
         windows_sandbox_level,
-        collaboration_mode: Some(collaboration_mode),
-        reasoning_summary: summary,
-        service_tier,
-        personality,
         ..Default::default()
     }
 }
 
-/// Applies persistent settings and emits the resulting effective snapshot.
+/// Acquires the shared permit before capturing or changing persistent settings.
+pub(super) async fn acquire_persistence_lock(session: &Session) -> SemaphorePermit<'_> {
+    session
+        .thread_settings_persistence
+        .acquire()
+        .await
+        .unwrap_or_else(|_| unreachable!("thread settings persistence semaphore is never closed"))
+}
+
+/// Applies persistent settings and emits the resulting thread-owned snapshot.
 pub(super) async fn apply_update(
     session: &Session,
     submission_id: String,
     updates: SessionSettingsUpdate,
 ) -> ConstraintResult<()> {
-    session.update_settings(updates).await?;
-    emit_applied(session, submission_id).await;
+    let _settings_guard = acquire_persistence_lock(session).await;
+    let commit = session.update_settings(updates).await?;
+    emit_applied(session, submission_id, commit.snapshot).await;
     Ok(())
 }
 
-/// Emits the effective thread settings after a successful update.
-pub(super) async fn emit_applied(session: &Session, submission_id: String) {
-    let msg = applied_event(session).await;
+/// Emits the snapshot published by one successful settings update.
+pub(super) async fn emit_applied(
+    session: &Session,
+    submission_id: String,
+    snapshot: ThreadSettingsSnapshot,
+) {
+    let msg = EventMsg::ThreadSettingsApplied(ThreadSettingsAppliedEvent {
+        thread_id: Some(session.thread_id()),
+        thread_settings: snapshot,
+    });
     session
         .send_event_raw_without_materializing_rollout(Event {
             id: submission_id,
@@ -105,11 +115,10 @@ pub(super) async fn emit_applied(session: &Session, submission_id: String) {
         .await;
 }
 
-/// Builds the effective thread-settings event used by live updates and
-/// synthesized fork history.
+/// Builds a current thread-owned snapshot for fork and compaction persistence.
 pub(super) async fn applied_event(session: &Session) -> EventMsg {
-    let snapshot = session.thread_config_snapshot().await;
     EventMsg::ThreadSettingsApplied(ThreadSettingsAppliedEvent {
-        thread_settings: snapshot.into_thread_settings_snapshot(),
+        thread_id: Some(session.thread_id()),
+        thread_settings: session.thread_settings_snapshot().await,
     })
 }

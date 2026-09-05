@@ -23,8 +23,6 @@ pub enum CodeModeHostTransport {
     /// Start and own the default local code-mode host.
     #[default]
     Local,
-    /// Share a connection to the specified remote code-mode host.
-    WebSocket(Url),
     /// Share an HTTP/2 gRPC connection to the specified remote code-mode host.
     Grpc(Url),
 }
@@ -32,8 +30,7 @@ pub enum CodeModeHostTransport {
 impl From<AppServerCodeModeHostArgs> for CodeModeHostTransport {
     fn from(args: AppServerCodeModeHostArgs) -> Self {
         match args.code_mode_host {
-            Some(url) if matches!(url.scheme(), "http" | "https") => Self::Grpc(url),
-            Some(url) => Self::WebSocket(url),
+            Some(url) => Self::Grpc(url),
             None => Self::Local,
         }
     }
@@ -66,22 +63,17 @@ impl TypedValueParser for RedactedHostUrlParser {
 
 fn parse_host_url(value: &str) -> Result<Url, String> {
     let url = Url::parse(value).map_err(|error| format!("invalid code-mode host URL: {error}"))?;
-    if !matches!(url.scheme(), "ws" | "wss" | "http" | "https") || url.host_str().is_none() {
-        return Err(
-            "code-mode host URL must use ws://, wss://, http://, or https:// with a host"
-                .to_string(),
-        );
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("code-mode host URL must use http:// or https:// with a host".to_string());
     }
     if url.fragment().is_some() {
         return Err("code-mode host URL must not contain a fragment".to_string());
     }
-    if matches!(url.scheme(), "http" | "https") {
-        if !url.username().is_empty() || url.password().is_some() {
-            return Err("gRPC code-mode host URL must not contain credentials".to_string());
-        }
-        if url.path() != "/" || url.query().is_some() {
-            return Err("gRPC code-mode host URL must not contain a path or query".to_string());
-        }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("gRPC code-mode host URL must not contain credentials".to_string());
+    }
+    if url.path() != "/" || url.query().is_some() {
+        return Err("gRPC code-mode host URL must not contain a path or query".to_string());
     }
     Ok(url)
 }

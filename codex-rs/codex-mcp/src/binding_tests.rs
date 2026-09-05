@@ -105,6 +105,9 @@ async fn test_step(
     } else {
         config.approvals_reviewer = ApprovalsReviewer::AutoReview;
     }
+    config
+        .server_permission_profiles
+        .insert(SERVER_NAME.to_string(), config.permission_profile.clone());
     let config = Arc::new(config);
     let prepared = PreparedMcpCall::new(
         Arc::clone(&connections),
@@ -125,7 +128,8 @@ async fn test_step(
         },
         Some(format!("{label}-plugin")),
         label == "old",
-    );
+    )
+    .expect("test call should retain its thread-owned permission profile");
     let calls = HashMap::from([((SERVER_NAME.to_string(), TOOL_NAME.to_string()), prepared)]);
 
     TestStep {
@@ -213,7 +217,7 @@ async fn prepared_call_keeps_captured_connection_and_authority_after_refresh() -
     assert_eq!(
         (
             old_call.config().approval_policy.value(),
-            &old_call.config().permission_profile,
+            old_call.permission_profile(),
             old_call.config().approvals_reviewer,
         ),
         (
@@ -269,6 +273,7 @@ async fn prepared_call_does_not_reroute_after_captured_connection_closes() {
         .call(
             Some(serde_json::json!({"query": "codex"})),
             /*meta*/ None,
+            /*timeout*/ None,
         )
         .await
         .expect_err("a call bound to a closed connection must fail");
@@ -297,6 +302,7 @@ async fn prepared_call_is_rejected_after_catalog_refresh() {
         .call(
             Some(serde_json::json!({"query": "codex"})),
             /*meta*/ None,
+            /*timeout*/ None,
         )
         .await
         .expect_err("a call from an older catalog must be rejected");
@@ -323,7 +329,7 @@ async fn stale_prepared_call_does_not_run_preparation() {
     let marker = Arc::clone(&prepared_side_effect_ran);
 
     prepared
-        .call_with_preparation(|| async move {
+        .call_with_preparation(/*requested_timeout*/ None, || async move {
             marker.store(true, Ordering::SeqCst);
             Ok((None, None))
         })
@@ -351,7 +357,7 @@ async fn preparation_holds_catalog_authority_until_it_finishes() {
     let finish = Arc::clone(&finish_preparation);
     let call = tokio::spawn(async move {
         prepared
-            .call_with_preparation(|| async move {
+            .call_with_preparation(/*requested_timeout*/ None, || async move {
                 started.notify_one();
                 finish.notified().await;
                 Err(anyhow::anyhow!("stop after preparation"))

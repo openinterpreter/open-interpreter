@@ -296,6 +296,21 @@ impl ResponsesRequest {
             .clone()
     }
 
+    /// Returns whether an input item's content annotations exactly match the given sequence.
+    pub fn has_content_kinds(&self, kinds: &[&str]) -> bool {
+        self.input().into_iter().any(|item| {
+            item["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                .as_array()
+                .is_some_and(|actual| {
+                    actual.len() == kinds.len()
+                        && actual
+                            .iter()
+                            .zip(kinds)
+                            .all(|(actual, expected)| actual.as_str() == Some(*expected))
+                })
+        })
+    }
+
     pub fn inputs_of_type(&self, ty: &str) -> Vec<Value> {
         self.input()
             .iter()
@@ -589,6 +604,7 @@ impl WebSocketTestServer {
         request_index: usize,
     ) -> WebSocketRequest {
         loop {
+            let notified = self.request_log_updated.notified();
             if let Some(request) = self
                 .connections
                 .lock()
@@ -599,7 +615,7 @@ impl WebSocketTestServer {
             {
                 return request;
             }
-            self.request_log_updated.notified().await;
+            notified.await;
         }
     }
 
@@ -1001,21 +1017,21 @@ pub fn ev_apply_patch_custom_tool_call(call_id: &str, patch: &str) -> Value {
     })
 }
 
-pub fn ev_shell_command_call(call_id: &str, command: &str) -> Value {
-    let args = serde_json::json!({ "command": command });
-    ev_shell_command_call_with_args(call_id, &args)
+pub fn ev_exec_command_call(call_id: &str, command: &str) -> Value {
+    let args = serde_json::json!({ "cmd": command });
+    ev_exec_command_call_with_args(call_id, &args)
 }
 
-pub fn ev_shell_command_call_with_args(call_id: &str, args: &serde_json::Value) -> Value {
-    let arguments = serde_json::to_string(args).expect("serialize shell command arguments");
-    ev_function_call(call_id, "shell_command", &arguments)
+pub fn ev_exec_command_call_with_args(call_id: &str, args: &serde_json::Value) -> Value {
+    let arguments = serde_json::to_string(args).expect("serialize exec command arguments");
+    ev_function_call(call_id, "exec_command", &arguments)
 }
 
-pub fn ev_apply_patch_shell_command_call_via_heredoc(call_id: &str, patch: &str) -> Value {
-    let args = serde_json::json!({ "command": format!("apply_patch <<'EOF'\n{patch}\nEOF\n") });
+pub fn ev_apply_patch_exec_command_call_via_heredoc(call_id: &str, patch: &str) -> Value {
+    let args = serde_json::json!({ "cmd": format!("apply_patch <<'EOF'\n{patch}\nEOF\n") });
     let arguments = serde_json::to_string(&args).expect("serialize apply_patch arguments");
 
-    ev_function_call(call_id, "shell_command", &arguments)
+    ev_function_call(call_id, "exec_command", &arguments)
 }
 
 pub fn sse_failed(id: &str, code: &str, message: &str) -> String {
@@ -1063,7 +1079,7 @@ where
 fn base_mock() -> (MockBuilder, ResponseMock) {
     let response_mock = ResponseMock::new();
     let mock = Mock::given(method("POST"))
-        .and(path_regex(".*/responses$"))
+        .and(path_regex(".*/(responses|guardian)$"))
         .and(response_mock.clone());
     (mock, response_mock)
 }
@@ -1647,10 +1663,11 @@ pub async fn mount_compact_response_sequence(
 
 /// Validate invariants on the request body sent to `/v1/responses`.
 ///
-/// - No `function_call_output`/`custom_tool_call_output` with missing/empty `call_id`.
+/// - A `function_call_output` with missing/empty `call_id` must have a nonempty `name`.
+/// - No `custom_tool_call_output` with missing/empty `call_id`.
 /// - `tool_search_output` must have a `call_id` unless it is a server-executed legacy item.
-/// - Every `function_call_output` must match a prior `function_call` or
-///   `local_shell_call` with the same `call_id` in the same `input`.
+/// - Every `function_call_output` with a `call_id` must match a prior `function_call`
+///   or `local_shell_call` with the same `call_id` in the same `input`.
 /// - Every `custom_tool_call_output` must match a prior `custom_tool_call`.
 /// - Every `tool_search_output` must match a prior `tool_search_call`.
 /// - Additionally, enforce symmetry: every `function_call`/`custom_tool_call`/
@@ -1696,9 +1713,19 @@ fn validate_request_body_invariants(request: &wiremock::Request) {
         items
             .iter()
             .filter(|item| item.get("type").and_then(Value::as_str) == Some(kind))
-            .map(|item| {
-                let id = get_call_id(item).expect(missing_msg);
-                id.to_string()
+            .filter_map(|item| {
+                if let Some(id) = get_call_id(item) {
+                    return Some(id.to_string());
+                }
+                if kind == "function_call_output"
+                    && item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| !name.is_empty())
+                {
+                    return None;
+                }
+                panic!("{missing_msg}");
             })
             .collect()
     }

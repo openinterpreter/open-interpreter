@@ -91,12 +91,13 @@ async fn mcp_tool_results_use_command_hook_output_contract() {
     }))
     .expect("object input");
     let handler = ConfiguredHandler {
+        builtin: false,
         event_name: HookEventName::PostToolUse,
         matcher: None,
         timeout_sec: 30,
         status_message: None,
         additional_context_limit: Default::default(),
-        source_path: test_path_buf("/tmp/hooks.json").abs(),
+        source_path: test_path_buf("/tmp/hooks.json").abs().into(),
         source: HookSource::User,
         display_order: 0,
         kind: ConfiguredHandlerKind::McpTool {
@@ -118,6 +119,7 @@ async fn mcp_tool_results_use_command_hook_output_contract() {
         "scan",
         &configured_input,
         r#"{"tool_input":{"file_path":"/tmp/example.rs"}}"#,
+        /*metadata*/ None,
     )
     .await;
 
@@ -129,6 +131,8 @@ async fn mcp_tool_results_use_command_hook_output_contract() {
         vec![HookMcpCall {
             server: "security".to_string(),
             tool: "scan".to_string(),
+            environment_id: None,
+            metadata: None,
             input: serde_json::from_value(json!({ "file_path": "/tmp/example.rs" }))
                 .expect("object input"),
             timeout: Duration::from_secs(30),

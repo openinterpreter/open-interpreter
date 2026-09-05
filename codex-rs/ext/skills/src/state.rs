@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 
+use codex_exec_server::Environment;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_extension_api::ExtensionMetrics;
 use codex_mcp::McpResourceClient;
@@ -23,6 +25,7 @@ use crate::provider::SkillListQuery;
 use crate::provider::SkillReadRequest;
 use crate::shadow_selection_experiment::RecentSkillInvocations;
 use crate::shadow_selection_experiment::ShadowSelectionTurnState;
+use crate::shadow_selection_experiment::ShadowTaskContext;
 use crate::sources::SkillProviders;
 
 const MAX_CACHED_ORCHESTRATOR_RESOURCES: usize = 100;
@@ -40,7 +43,9 @@ pub(crate) struct SkillsThreadState {
     executor_discovery_cache: Mutex<Option<CachedExecutorDiscoveryCatalog>>,
     orchestrator_cache: Mutex<Option<Arc<OrchestratorGenerationCache>>>,
     shadow_selection_turn: Mutex<Option<ShadowSelectionTurn>>,
+    pub(crate) executor_read_snapshot: Mutex<Option<ExecutorReadSnapshot>>,
     pub(crate) recent_skill_invocations: Arc<RecentSkillInvocations>,
+    pub(crate) shadow_task_context: Arc<ShadowTaskContext>,
 }
 
 impl SkillsThreadState {
@@ -52,7 +57,9 @@ impl SkillsThreadState {
             executor_discovery_cache: Mutex::new(None),
             orchestrator_cache: Mutex::new(None),
             shadow_selection_turn: Mutex::new(None),
+            executor_read_snapshot: Mutex::new(None),
             recent_skill_invocations: Arc::new(RecentSkillInvocations::default()),
+            shadow_task_context: Arc::new(ShadowTaskContext::default()),
         }
     }
 
@@ -215,7 +222,7 @@ impl SkillsThreadState {
     pub(crate) async fn read_skill(
         &self,
         providers: &SkillProviders,
-        request: SkillReadRequest,
+        request: SkillReadRequest<'_>,
     ) -> SkillProviderResult<SkillReadResult> {
         if request.authority.kind != SkillSourceKind::Orchestrator {
             return providers.read(request).await;
@@ -302,6 +309,17 @@ impl SkillsThreadState {
     }
 }
 
+/// One bounded executor resource, retained for continuations until replacement or thread drop.
+/// Interleaved resources may evict it; misses reread and validate the content-bound cursor.
+pub(crate) struct ExecutorReadSnapshot {
+    pub(crate) authority: SkillAuthority,
+    pub(crate) package: SkillPackageId,
+    // Named environments can be replaced; do not reuse their old resource or keep them alive.
+    pub(crate) environment: Weak<Environment>,
+    pub(crate) sandbox: Option<FileSystemSandboxContext>,
+    pub(crate) result: Arc<SkillReadResult>,
+}
+
 struct ShadowSelectionTurn {
     turn_id: String,
     state: Arc<ShadowSelectionTurnState>,
@@ -331,8 +349,8 @@ struct SkillReadCacheKey {
     resource: SkillResourceId,
 }
 
-impl From<&SkillReadRequest> for SkillReadCacheKey {
-    fn from(request: &SkillReadRequest) -> Self {
+impl From<&SkillReadRequest<'_>> for SkillReadCacheKey {
+    fn from(request: &SkillReadRequest<'_>) -> Self {
         Self {
             authority: request.authority.clone(),
             package: request.package.clone(),

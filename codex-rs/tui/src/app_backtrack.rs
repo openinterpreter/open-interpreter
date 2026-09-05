@@ -376,7 +376,7 @@ impl App {
     fn overlay_forward_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
         if matches!(
             &event,
-            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_)
+            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained
         ) && let Some(Overlay::Transcript(t)) = &mut self.overlay
         {
             let active_key = self.chat_widget.active_cell_transcript_key();

@@ -1,0 +1,9 @@
+---
+source: tui/src/app/tests/active_reconnect_tests.rs
+expression: "format!(\"{history}\\n{}\", render_bottom_popup(&app.chat_widget, 80))"
+---
+• This conversation is unavailable. Its cached transcript and draft remain here; input is paused. Open the agent picker or return to the parent to continue.
+• Reconnected. No input was resent. Review uncertain submissions before retrying; recovered queues remain paused.
+› unavailable draft
+
+  gpt-test default · /tmp/project

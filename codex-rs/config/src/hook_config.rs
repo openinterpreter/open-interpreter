@@ -56,6 +56,8 @@ pub struct HookEventsToml {
     pub subagent_stop: Vec<MatcherGroup>,
     #[serde(rename = "Stop", default)]
     pub stop: Vec<MatcherGroup>,
+    #[serde(rename = "Interrupt", default)]
+    pub interrupt: Vec<MatcherGroup>,
 }
 
 impl HookEventsToml {
@@ -72,6 +74,7 @@ impl HookEventsToml {
             subagent_start,
             subagent_stop,
             stop,
+            interrupt,
         } = self;
         pre_tool_use.is_empty()
             && permission_request.is_empty()
@@ -84,6 +87,7 @@ impl HookEventsToml {
             && subagent_start.is_empty()
             && subagent_stop.is_empty()
             && stop.is_empty()
+            && interrupt.is_empty()
     }
 
     pub fn handler_count(&self) -> usize {
@@ -99,6 +103,7 @@ impl HookEventsToml {
             subagent_start,
             subagent_stop,
             stop,
+            interrupt,
         } = self;
         [
             pre_tool_use,
@@ -112,6 +117,7 @@ impl HookEventsToml {
             subagent_start,
             subagent_stop,
             stop,
+            interrupt,
         ]
         .into_iter()
         .flatten()
@@ -119,19 +125,27 @@ impl HookEventsToml {
         .sum()
     }
 
-    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 11] {
+    pub fn into_matcher_groups(mut self) -> [(HookEventName, Vec<MatcherGroup>); 12] {
+        self.matcher_groups_mut()
+            .map(|(event, groups)| (event, std::mem::take(groups)))
+    }
+
+    pub fn matcher_groups_mut(&mut self) -> [(HookEventName, &mut Vec<MatcherGroup>); 12] {
+        use HookEventName as Event;
+
         [
-            (HookEventName::PreToolUse, self.pre_tool_use),
-            (HookEventName::PermissionRequest, self.permission_request),
-            (HookEventName::PostToolUse, self.post_tool_use),
-            (HookEventName::PreCompact, self.pre_compact),
-            (HookEventName::PostCompact, self.post_compact),
-            (HookEventName::SessionStart, self.session_start),
-            (HookEventName::SessionEnd, self.session_end),
-            (HookEventName::UserPromptSubmit, self.user_prompt_submit),
-            (HookEventName::SubagentStart, self.subagent_start),
-            (HookEventName::SubagentStop, self.subagent_stop),
-            (HookEventName::Stop, self.stop),
+            (Event::PreToolUse, &mut self.pre_tool_use),
+            (Event::PermissionRequest, &mut self.permission_request),
+            (Event::PostToolUse, &mut self.post_tool_use),
+            (Event::PreCompact, &mut self.pre_compact),
+            (Event::PostCompact, &mut self.post_compact),
+            (Event::SessionStart, &mut self.session_start),
+            (Event::SessionEnd, &mut self.session_end),
+            (Event::UserPromptSubmit, &mut self.user_prompt_submit),
+            (Event::SubagentStart, &mut self.subagent_start),
+            (Event::SubagentStop, &mut self.subagent_stop),
+            (Event::Stop, &mut self.stop),
+            (Event::Interrupt, &mut self.interrupt),
         ]
     }
 }

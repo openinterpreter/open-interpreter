@@ -18,7 +18,7 @@ fn catalog_cache_freshness_honors_ttl() {
 }
 
 #[test]
-fn catalog_cache_paths_are_isolated_by_scope() {
+fn catalog_cache_paths_are_isolated_by_scope_and_collection() {
     let codex_home = Path::new("/tmp/codex-home");
     let cache_key_for_scope = |scope| RemotePluginCatalogCacheKey {
         chatgpt_base_url: "https://chatgpt.com/backend-api".to_string(),
@@ -26,6 +26,7 @@ fn catalog_cache_paths_are_isolated_by_scope() {
         chatgpt_user_id: Some("user-id".to_string()),
         is_workspace_account: true,
         scope: (scope != RemotePluginScope::Global).then_some(scope),
+        collection: None,
     };
 
     let paths = [
@@ -38,6 +39,10 @@ fn catalog_cache_paths_are_isolated_by_scope() {
     assert_ne!(paths[0], paths[1]);
     assert_ne!(paths[0], paths[2]);
     assert_ne!(paths[1], paths[2]);
+
+    let mut collection_key = cache_key_for_scope(RemotePluginScope::Global);
+    collection_key.collection = Some("vertical".to_string());
+    assert!(!paths.contains(&cache_path(codex_home, &collection_key)));
 }
 
 #[test]
@@ -59,9 +64,14 @@ fn global_catalog_cache_reuses_legacy_cache_file() {
     let contents = serde_json::to_string_pretty(&legacy_cache).expect("serialize legacy cache");
     codex_utils_path::write_atomically(&legacy_cache_path, &contents).expect("write legacy cache");
 
-    let cached =
-        load_cached_directory_plugins(codex_home.path(), &config, &auth, RemotePluginScope::Global)
-            .expect("load legacy global cache");
+    let cached = load_cached_directory_plugins(
+        codex_home.path(),
+        &config,
+        &auth,
+        RemotePluginScope::Global,
+        /*collection*/ None,
+    )
+    .expect("load legacy global cache");
     assert!(cached.plugins.is_empty());
     assert_eq!(cached.freshness, RemotePluginCatalogCacheFreshness::Stale);
 
@@ -70,6 +80,7 @@ fn global_catalog_cache_reuses_legacy_cache_file() {
         &config,
         &auth,
         RemotePluginScope::Global,
+        /*collection*/ None,
         &[],
     );
     let refreshed_cache: RemotePluginCatalogDiskCache = serde_json::from_slice(
@@ -93,11 +104,18 @@ fn header_auth_does_not_cache_private_catalogs_without_a_stable_identity() {
         &config,
         &auth,
         RemotePluginScope::Global,
+        /*collection*/ None,
         &[],
     );
     assert!(
-        load_cached_directory_plugins(codex_home.path(), &config, &auth, RemotePluginScope::Global)
-            .is_some()
+        load_cached_directory_plugins(
+            codex_home.path(),
+            &config,
+            &auth,
+            RemotePluginScope::Global,
+            /*collection*/ None,
+        )
+        .is_some()
     );
 
     for scope in [RemotePluginScope::User, RemotePluginScope::Workspace] {
@@ -107,10 +125,18 @@ fn header_auth_does_not_cache_private_catalogs_without_a_stable_identity() {
             chatgpt_user_id: None,
             is_workspace_account: false,
             scope: Some(scope),
+            collection: None,
         };
         let insecure_cache_path = cache_path(codex_home.path(), &insecure_cache_key);
 
-        write_cached_directory_plugins(codex_home.path(), &config, &auth, scope, &[]);
+        write_cached_directory_plugins(
+            codex_home.path(),
+            &config,
+            &auth,
+            scope,
+            /*collection*/ None,
+            &[],
+        );
         assert!(!insecure_cache_path.exists());
 
         let insecure_cache = RemotePluginCatalogDiskCache {
@@ -122,6 +148,15 @@ fn header_auth_does_not_cache_private_catalogs_without_a_stable_identity() {
         codex_utils_path::write_atomically(&insecure_cache_path, &contents)
             .expect("write insecure cache");
 
-        assert!(load_cached_directory_plugins(codex_home.path(), &config, &auth, scope).is_none());
+        assert!(
+            load_cached_directory_plugins(
+                codex_home.path(),
+                &config,
+                &auth,
+                scope,
+                /*collection*/ None,
+            )
+            .is_none()
+        );
     }
 }

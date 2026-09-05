@@ -6,8 +6,10 @@ use std::time::Duration;
 
 use codex_code_mode_protocol::CellId;
 use codex_code_mode_protocol::grpc;
+use codex_protocol::protocol::W3cTraceContext;
 use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use tracing::warn;
 
 use super::SessionInner;
@@ -112,6 +114,23 @@ impl SessionInner {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .admit_invocation(&call)?;
+        let callback_span = tracing::info_span!(
+            "code_mode.grpc.callback",
+            otel.name = "code_mode.grpc.callback",
+            session.id = %call.session_id,
+            execution.id = %call.execution_id,
+            cell.id = %call.cell_id,
+            invocation.id = %call.invocation_id,
+        );
+        if let Some(traceparent) = call.traceparent.as_ref() {
+            codex_otel::set_parent_from_w3c_trace_context(
+                &callback_span,
+                &W3cTraceContext {
+                    traceparent: Some(traceparent.clone()),
+                    tracestate: None,
+                },
+            );
+        }
         let invocation_id = call.invocation_id.clone();
         let cancellation = match admission {
             CallbackAdmission::Active(cancellation) => Ok(cancellation),
@@ -133,31 +152,34 @@ impl SessionInner {
         };
         let invocation = conversion::tool_call(call);
         let inner = Arc::clone(self);
-        tokio::spawn(async move {
-            let result = match invocation {
-                Ok(invocation) => {
-                    let callback = AssertUnwindSafe(async {
-                        inner
-                            .delegate
-                            .invoke_tool(invocation, cancellation.child_token())
-                            .await
-                    })
-                    .catch_unwind();
-                    tokio::select! {
-                        biased;
-                        _ = cancellation.cancelled() => return,
-                        result = callback => match result {
-                            Ok(result) => result,
-                            Err(_) => Err("code-mode tool delegate panicked".to_string()),
-                        },
+        tokio::spawn(
+            async move {
+                let result = match invocation {
+                    Ok(invocation) => {
+                        let callback = AssertUnwindSafe(async {
+                            inner
+                                .delegate
+                                .invoke_tool(invocation, cancellation.child_token())
+                                .await
+                        })
+                        .catch_unwind();
+                        tokio::select! {
+                            biased;
+                            _ = cancellation.cancelled() => return,
+                            result = callback => match result {
+                                Ok(result) => result,
+                                Err(_) => Err("code-mode tool delegate panicked".to_string()),
+                            },
+                        }
                     }
-                }
-                Err(error) => Err(error),
-            };
-            inner
-                .complete_tool_call(invocation_id, cancellation, result)
-                .await;
-        });
+                    Err(error) => Err(error),
+                };
+                inner
+                    .complete_tool_call(invocation_id, cancellation, result)
+                    .await;
+            }
+            .instrument(callback_span),
+        );
         Ok(())
     }
 

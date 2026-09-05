@@ -94,7 +94,7 @@ fn hook_trusted_hash_edit(hook_key: &str, current_hash: &str) -> ConfigEdit {
     }
 }
 
-async fn trust_materialized_plugin_hooks(
+pub(crate) async fn trust_materialized_plugin_hooks(
     materializations: Vec<RemotePluginMaterialization>,
     auth_manager: &AuthManager,
     thread_manager: &ThreadManager,

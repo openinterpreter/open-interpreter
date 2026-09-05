@@ -31,6 +31,10 @@ pub enum AuthMode {
     #[serde(rename = "bedrockApiKey")]
     #[strum(serialize = "bedrockApiKey")]
     BedrockApiKey,
+    /// Amazon Bedrock AWS access keys managed by Codex.
+    #[serde(rename = "bedrockAccessKeys")]
+    #[strum(serialize = "bedrockAccessKeys")]
+    BedrockAccessKeys,
 }
 
 impl AuthMode {
@@ -38,7 +42,11 @@ impl AuthMode {
     pub fn has_chatgpt_account(self) -> bool {
         match self {
             Self::Chatgpt | Self::ChatgptAuthTokens | Self::PersonalAccessToken => true,
-            Self::ApiKey | Self::Headers | Self::AgentIdentity | Self::BedrockApiKey => false,
+            Self::ApiKey
+            | Self::Headers
+            | Self::AgentIdentity
+            | Self::BedrockApiKey
+            | Self::BedrockAccessKeys => false,
         }
     }
 
@@ -50,7 +58,7 @@ impl AuthMode {
             | Self::Headers
             | Self::AgentIdentity
             | Self::PersonalAccessToken => true,
-            Self::ApiKey | Self::BedrockApiKey => false,
+            Self::ApiKey | Self::BedrockApiKey | Self::BedrockAccessKeys => false,
         }
     }
 }
@@ -81,6 +89,8 @@ impl PlanType {
             "enterprise_cbp_usage_based" => Self::Known(KnownPlan::EnterpriseCbpUsageBased),
             "enterprise" | "hc" => Self::Known(KnownPlan::Enterprise),
             "education" | "edu" => Self::Known(KnownPlan::Edu),
+            "edu_plus" => Self::Known(KnownPlan::EduPlus),
+            "edu_pro" => Self::Known(KnownPlan::EduPro),
             _ => Self::Unknown(raw.to_string()),
         }
     }
@@ -109,6 +119,10 @@ pub enum KnownPlan {
     Enterprise,
     #[serde(alias = "education")]
     Edu,
+    #[serde(rename = "edu_plus")]
+    EduPlus,
+    #[serde(rename = "edu_pro")]
+    EduPro,
 }
 
 impl KnownPlan {
@@ -128,6 +142,8 @@ impl KnownPlan {
             Self::EnterpriseCbpUsageBased => "Enterprise CBP Usage Based",
             Self::Enterprise => "Enterprise",
             Self::Edu => "Edu",
+            Self::EduPlus => "Edu Plus",
+            Self::EduPro => "Edu Pro",
         }
     }
 
@@ -147,6 +163,8 @@ impl KnownPlan {
             Self::EnterpriseCbpUsageBased => "enterprise_cbp_usage_based",
             Self::Enterprise => "enterprise",
             Self::Edu => "edu",
+            Self::EduPlus => "edu_plus",
+            Self::EduPro => "edu_pro",
         }
     }
 
@@ -162,6 +180,8 @@ impl KnownPlan {
                 | Self::EnterpriseCbpUsageBased
                 | Self::Enterprise
                 | Self::Edu
+                | Self::EduPlus
+                | Self::EduPro
         )
     }
 }
@@ -212,5 +232,18 @@ mod tests {
                 .expect("enterprise cbp automation should deserialize"),
             PlanType::Known(KnownPlan::EnterpriseCbpAutomation)
         );
+        for (raw, known) in [
+            ("edu_plus", KnownPlan::EduPlus),
+            ("edu_pro", KnownPlan::EduPro),
+        ] {
+            let expected = PlanType::Known(known);
+            assert_eq!(PlanType::from_raw_value(raw), expected);
+            assert_eq!(
+                serde_json::from_value::<PlanType>(serde_json::json!(raw))
+                    .expect("plan should deserialize"),
+                expected
+            );
+            assert_eq!(known.raw_value(), raw);
+        }
     }
 }

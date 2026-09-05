@@ -610,6 +610,7 @@ impl AppServerAcpAgent {
                         ]),
                         archived: Some(false),
                         section_id: None,
+                        project_id: None,
                         cwd: None,
                         use_state_db_only: false,
                         search_term: None,

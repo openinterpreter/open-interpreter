@@ -1,4 +1,10 @@
 use super::*;
+use crate::history_cell::HistoryCell;
+use crate::legacy_core::config::ConfigBuilder;
+use crate::legacy_core::config::ConfigOverrides;
+use codex_app_server_client::AppServerClient;
+use codex_app_server_protocol::ThreadStartParams;
+use codex_app_server_protocol::ThreadStartResponse;
 use color_eyre::eyre::WrapErr;
 use pretty_assertions::assert_eq;
 use std::path::Path;
@@ -21,6 +27,132 @@ fn trusted_project_edit_targets_project_trust_level() {
             merge_strategy: MergeStrategy::Replace,
         }
     );
+}
+
+#[tokio::test]
+async fn remote_project_trust_guards_thread_start_and_preserves_repository_decisions() -> Result<()>
+{
+    let temp_dir = tempfile::tempdir()?;
+    let codex_home = temp_dir.path().join("codex-home");
+    let project_root = temp_dir
+        .path()
+        .join("project as a trusted project in sibling");
+    let project_cwd = project_root.join("nested");
+    std::fs::create_dir_all(&codex_home)?;
+    std::fs::create_dir_all(&project_cwd)?;
+    std::fs::create_dir(project_root.join(".git"))?;
+    std::fs::write(project_root.join(".git/HEAD"), "ref: refs/heads/main\n")?;
+    std::fs::create_dir(project_cwd.join(".codex"))?;
+    let undecided_config = format!(
+        "[{}]\n",
+        trusted_project_edit(&project_root)
+            .key_path
+            .trim_end_matches(".trust_level")
+    );
+    std::fs::write(codex_home.join("config.toml"), &undecided_config)?;
+    std::fs::write(
+        project_cwd.join(".codex/config.toml"),
+        "model_reasoning_effort = \"high\"\n",
+    )?;
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.clone())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(codex_home.clone()),
+            ..ConfigOverrides::default()
+        })
+        .build()
+        .await?;
+    let app_server =
+        AppServerClient::InProcess(crate::tests::start_test_embedded_app_server(config).await?);
+    let relative_cwd = pathdiff::diff_paths(&project_cwd, std::env::current_dir()?)
+        .ok_or_else(|| color_eyre::eyre::eyre!("failed to calculate relative project path"))?;
+
+    assert_eq!(
+        read_remote_project_trust(app_server.request_handle(), &relative_cwd).await?,
+        Some(RemoteProjectTrust {
+            cwd: project_cwd.clone(),
+            trust_target: PathBuf::from(project_trust_key(&project_root)),
+        })
+    );
+    assert_eq!(
+        std::fs::read_to_string(codex_home.join("config.toml"))?,
+        undecided_config
+    );
+
+    write_trusted_project(app_server.request_handle(), &project_root).await?;
+    let persisted_config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(codex_home.join("config.toml"))?)?;
+    assert_eq!(
+        persisted_config["projects"][project_trust_key(&project_root)]["trust_level"].as_str(),
+        Some("trusted")
+    );
+
+    let _: ThreadStartResponse = app_server
+        .request_typed(ClientRequest::ThreadStart {
+            request_id: RequestId::Integer(1),
+            params: ThreadStartParams {
+                cwd: Some(project_cwd.to_string_lossy().into_owned()),
+                ephemeral: Some(true),
+                ..ThreadStartParams::default()
+            },
+        })
+        .await?;
+    assert_eq!(
+        read_remote_project_trust(app_server.request_handle(), &project_cwd).await?,
+        None
+    );
+
+    let mut untrusted_project = trusted_project_edit(&project_root);
+    untrusted_project.value = serde_json::json!("untrusted");
+    write_config_batch(app_server.request_handle(), vec![untrusted_project]).await?;
+    assert_eq!(
+        read_remote_project_trust(app_server.request_handle(), &project_cwd).await?,
+        None
+    );
+
+    let response: JsonValue = app_server
+        .request_typed(ClientRequest::ConfigRead {
+            request_id: RequestId::String("untrusted-project-warning".to_string()),
+            params: ConfigReadParams {
+                include_layers: true,
+                cwd: Some(project_cwd.to_string_lossy().into_owned()),
+            },
+        })
+        .await?;
+    let reason = response["layers"]
+        .as_array()
+        .expect("config layers")
+        .iter()
+        .find(|layer| layer["name"]["type"] == "project")
+        .and_then(|layer| layer["disabledReason"].as_str())
+        .expect("explicitly untrusted project warning");
+    let warning = crate::history_cell::new_warning_event(
+        reason.replace(&project_trust_key(&project_root), "<PROJECT>"),
+    );
+    insta::assert_snapshot!(
+        warning
+            .display_lines(/*width*/ 80)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        @r"
+    ⚠ <PROJECT> is marked as untrusted in the effective configuration. To load
+      project-local config, hooks, and exec policies, update its trust setting. If
+      that setting is managed by your organization, contact your administrator.
+    "
+    );
+
+    std::fs::remove_file(project_cwd.join(".codex/config.toml"))?;
+    std::fs::remove_dir(project_cwd.join(".codex"))?;
+    let canonical_project_cwd = PathBuf::from(project_trust_key(&project_root)).join("nested");
+    let error = read_remote_project_trust(app_server.request_handle(), &canonical_project_cwd)
+        .await
+        .expect_err("an untrusted repository must not be overridden by its subdirectory");
+    assert!(error.to_string().contains("explicitly untrusted project"));
+
+    app_server.shutdown().await?;
+    Ok(())
 }
 
 #[test]

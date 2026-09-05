@@ -4,6 +4,14 @@ This package contains the implementation behind `scripts/build_codex_package.py`
 The top-level script is the stable executable entry point; these modules keep the
 package-building logic split by responsibility.
 
+Run the builder through `just`:
+
+```bash
+just assemble-codex-package --help
+just assemble-codex-package --variant codex-app-server
+just assemble-codex-package --target x86_64-unknown-linux-gnu
+```
+
 The builder creates a canonical Codex package directory:
 
 ```text
@@ -34,8 +42,9 @@ The `--variant` flag selects the package entrypoint. Supported variants are
 `codex`, `codex-app-server`, and `open-interpreter`. The `open-interpreter`
 variant packages the upstream multitool as `interpreter` with the `i` alias;
 the same entrypoint provides TUI, exec, app-server, and daemon subcommands. The
-`version` field in `codex-package.json` is read from `[workspace.package].version`
-in `codex-rs/Cargo.toml`.
+`--package-version` flag sets the version in
+`codex-package.json`; it defaults to `[workspace.package].version` in
+`codex-rs/Cargo.toml`.
 
 ## Source-built artifacts
 

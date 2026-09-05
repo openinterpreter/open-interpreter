@@ -116,20 +116,10 @@ def python_sdk_formatter_group(*, check: bool) -> FormatterGroup:
 
 
 def python_scripts_formatter_group(*, check: bool) -> FormatterGroup:
-    # The SDK and internal scripts intentionally use separate project roots so
-    # uv and Ruff retain each project's configuration context.
-    args = [
-        "uv",
-        "run",
-        "--frozen",
-        "--project",
-        "scripts",
-        "ruff",
-        "format",
-    ]
+    args = ["uv", "run", "--frozen", "--project", "scripts", "ruff", "format"]
     if check:
         args.append("--check")
-    args.append("scripts")
+    args.append(".")
     return FormatterGroup("Python scripts", (Command(tuple(args)),))
 
 

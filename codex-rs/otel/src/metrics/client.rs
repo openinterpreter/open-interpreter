@@ -152,7 +152,13 @@ impl MetricsClientInner {
         Ok(())
     }
 
-    fn histogram(&self, name: &str, value: i64, tags: &[(&str, &str)]) -> Result<()> {
+    fn histogram(
+        &self,
+        name: &str,
+        value: i64,
+        boundaries: Option<&[f64]>,
+        tags: &[(&str, &str)],
+    ) -> Result<()> {
         validate_metric_name(name)?;
         let attributes = self.attributes(tags)?;
 
@@ -164,9 +170,13 @@ impl MetricsClientInner {
             .histograms
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let histogram = histograms
-            .entry(name.to_string())
-            .or_insert_with(|| self.meter.f64_histogram(name.to_string()).build());
+        let histogram = histograms.entry(name.to_string()).or_insert_with(|| {
+            let builder = self.meter.f64_histogram(name.to_string());
+            match boundaries {
+                Some(boundaries) => builder.with_boundaries(boundaries.to_vec()).build(),
+                None => builder.build(),
+            }
+        });
         histogram.record(value as f64, &attributes);
         Ok(())
     }
@@ -401,7 +411,20 @@ impl MetricsClient {
 
     /// Send a single histogram sample.
     pub fn histogram(&self, name: &str, value: i64, tags: &[(&str, &str)]) -> Result<()> {
-        self.active_inner().histogram(name, value, tags)
+        self.active_inner()
+            .histogram(name, value, /*boundaries*/ None, tags)
+    }
+
+    /// Send a single histogram sample using explicit bucket boundaries.
+    pub fn histogram_with_boundaries(
+        &self,
+        name: &str,
+        value: i64,
+        boundaries: &[f64],
+        tags: &[(&str, &str)],
+    ) -> Result<()> {
+        self.active_inner()
+            .histogram(name, value, Some(boundaries), tags)
     }
 
     /// Send a single gauge measurement.

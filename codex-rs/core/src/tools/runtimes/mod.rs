@@ -10,7 +10,6 @@ use crate::exec_env::CODEX_THREAD_ID_ENV_VAR;
 use crate::sandboxing::SandboxPermissions;
 use crate::shell::Shell;
 use crate::shell::ShellType;
-use crate::tools::sandboxing::ToolError;
 use codex_apply_patch::CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS_ENV_VAR;
 use codex_core_plugins::PLUGIN_METRICS_OUTPUT_ENV_VAR;
 #[cfg(unix)]
@@ -25,46 +24,22 @@ use codex_network_proxy::PROXY_GIT_SSH_COMMAND_ENV_KEY;
 pub(crate) use codex_network_proxy::is_managed_proxy_env_var;
 pub(crate) use codex_network_proxy::strip_managed_proxy_env;
 use codex_protocol::config_types::WindowsSandboxLevel;
-use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::shell_environment::is_non_inheritable_env_var;
-use codex_sandboxing::SandboxCommand;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use codex_utils_path_uri::PathUri;
 use std::collections::HashMap;
-#[cfg(unix)]
 use std::path::Path;
 
 pub(crate) mod apply_patch;
-pub(crate) mod shell;
 pub(crate) mod unified_exec;
-
-/// Shared helper to construct sandbox transform inputs from a tokenized command line and native
-/// working directory. Validates that at least a program is present.
-pub(crate) fn build_sandbox_command(
-    command: &[String],
-    cwd: &AbsolutePathBuf,
-    env: &HashMap<String, String>,
-    additional_permissions: Option<AdditionalPermissionProfile>,
-) -> Result<SandboxCommand, ToolError> {
-    let (program, args) = command
-        .split_first()
-        .ok_or_else(|| ToolError::Rejected("command args are empty".to_string()))?;
-    let cwd = PathUri::from_abs_path(cwd);
-    Ok(SandboxCommand {
-        program: program.clone().into(),
-        args: args.to_vec(),
-        cwd,
-        env: env.clone(),
-        managed_network: None,
-        additional_permissions,
-    })
-}
+pub(crate) mod zsh_fork;
 
 pub(crate) fn exec_env_for_sandbox_permissions(
     env: &HashMap<String, String>,
     sandbox_permissions: SandboxPermissions,
 ) -> HashMap<String, String> {
     let mut env = env.clone();
+    // Escalated commands intentionally use the original, unbrokered environment. This branch is
+    // defensive cleanup for a caller that passes an environment already prepared by Codex.
     if sandbox_permissions.requires_escalated_permissions()
         && env.contains_key(PROXY_ACTIVE_ENV_KEY)
     {
@@ -157,17 +132,6 @@ pub(crate) fn apply_package_path_prepend(
 }
 
 #[cfg(unix)]
-pub(crate) fn prepend_zsh_fork_bin_to_path(
-    env: &mut HashMap<String, String>,
-    shell_zsh_path: &Path,
-) -> Option<String> {
-    let zsh_bin_dir = shell_zsh_path
-        .parent()
-        .map(|path| path.to_string_lossy().to_string())?;
-    prepend_path_entry(env, &zsh_bin_dir)
-}
-
-#[cfg(unix)]
 pub(crate) fn apply_zsh_fork_path_prepend(
     env: &mut HashMap<String, String>,
     runtime_path_prepends: &mut RuntimePathPrepends,
@@ -179,11 +143,34 @@ pub(crate) fn apply_zsh_fork_path_prepend(
     runtime_path_prepends.prepend(env, zsh_bin_dir);
 }
 
-pub(crate) fn disable_powershell_profile_for_elevated_windows_sandbox(
+pub(crate) fn prepare_powershell_command_for_elevated_windows_sandbox(
     command: &[String],
     shell_type: Option<&ShellType>,
     sandbox_requested: bool,
     windows_sandbox_level: WindowsSandboxLevel,
+    environment_is_remote: bool,
+) -> Vec<String> {
+    prepare_powershell_command_for_elevated_windows_sandbox_with_fallback(
+        command,
+        shell_type,
+        sandbox_requested,
+        windows_sandbox_level,
+        environment_is_remote,
+        |path| {
+            codex_shell_command::shell_detect::fallback_powershell_shell_for_elevated_windows_sandbox(
+                path,
+            )
+        },
+    )
+}
+
+fn prepare_powershell_command_for_elevated_windows_sandbox_with_fallback(
+    command: &[String],
+    shell_type: Option<&ShellType>,
+    sandbox_requested: bool,
+    windows_sandbox_level: WindowsSandboxLevel,
+    environment_is_remote: bool,
+    find_fallback: impl FnOnce(&Path) -> Option<codex_shell_command::shell_detect::DetectedShell>,
 ) -> Vec<String> {
     if shell_type != Some(&ShellType::PowerShell)
         || !sandbox_requested
@@ -193,17 +180,21 @@ pub(crate) fn disable_powershell_profile_for_elevated_windows_sandbox(
         return command.to_vec();
     }
 
+    let mut command = command.to_vec();
+    if !environment_is_remote && let Some(fallback) = find_fallback(Path::new(&command[0])) {
+        command[0] = fallback.shell_path.to_string_lossy().to_string();
+    }
+
     if command[1..]
         .iter()
         .any(|arg| arg.eq_ignore_ascii_case("-NoProfile"))
     {
-        return command.to_vec();
+        return command;
     }
 
     // The elevated Windows sandbox runs as a dedicated sandbox account while
     // HOME/USERPROFILE may still point at the real user profile. Loading
     // PowerShell profiles in that mixed context is not a valid login shell.
-    let mut command = command.to_vec();
     command.insert(1, "-NoProfile".to_string());
     command
 }
@@ -290,7 +281,7 @@ pub(crate) fn maybe_wrap_shell_lc_with_snapshot(
             PLUGIN_METRICS_OUTPUT_ENV_VAR,
         ],
     );
-    let (proxy_captures, proxy_exports) = build_proxy_env_exports();
+    let (proxy_captures, proxy_exports) = build_proxy_env_exports(env);
     let runtime_path_prepend_exports =
         runtime_path_prepends.shell_exports_after_snapshot(explicit_env_overrides);
     let override_captures = join_shell_blocks([override_captures, proxy_captures]);
@@ -329,10 +320,11 @@ fn build_override_exports(
     build_override_exports_for_keys("__CODEX_SNAPSHOT_OVERRIDE", &keys)
 }
 
-fn build_proxy_env_exports() -> (String, String) {
+fn build_proxy_env_exports(env: &HashMap<String, String>) -> (String, String) {
     let mut keys = PROXY_ENV_KEYS
         .iter()
         .copied()
+        .chain(codex_network_proxy::brokered_credential_env_keys(env))
         .chain(CUSTOM_CA_ENV_KEYS)
         .filter(|key| is_valid_shell_variable_name(key))
         .collect::<Vec<_>>();
@@ -429,7 +421,7 @@ fn shell_single_quote(input: &str) -> String {
 }
 
 #[cfg(test)]
-mod disable_powershell_profile_tests {
+mod prepare_powershell_command_tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
@@ -441,11 +433,12 @@ mod disable_powershell_profile_tests {
             "Write-Output ok".to_string(),
         ];
 
-        let rewritten = disable_powershell_profile_for_elevated_windows_sandbox(
+        let rewritten = prepare_powershell_command_for_elevated_windows_sandbox(
             &command,
             Some(&ShellType::PowerShell),
             /*sandbox_requested*/ true,
             WindowsSandboxLevel::Elevated,
+            /*environment_is_remote*/ false,
         );
 
         assert_eq!(
@@ -467,11 +460,12 @@ mod disable_powershell_profile_tests {
             "VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABvAGsA".to_string(),
         ];
 
-        let rewritten = disable_powershell_profile_for_elevated_windows_sandbox(
+        let rewritten = prepare_powershell_command_for_elevated_windows_sandbox(
             &command,
             Some(&ShellType::PowerShell),
             /*sandbox_requested*/ true,
             WindowsSandboxLevel::Elevated,
+            /*environment_is_remote*/ false,
         );
 
         assert_eq!(
@@ -494,11 +488,12 @@ mod disable_powershell_profile_tests {
             "Write-Output ok".to_string(),
         ];
 
-        let rewritten = disable_powershell_profile_for_elevated_windows_sandbox(
+        let rewritten = prepare_powershell_command_for_elevated_windows_sandbox(
             &command,
             Some(&ShellType::PowerShell),
             /*sandbox_requested*/ true,
             WindowsSandboxLevel::Elevated,
+            /*environment_is_remote*/ false,
         );
 
         assert_eq!(rewritten, command);
@@ -507,16 +502,18 @@ mod disable_powershell_profile_tests {
     #[test]
     fn leaves_legacy_restricted_token_backend_alone() {
         let command = vec![
-            "powershell.exe".to_string(),
+            r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.4.0_x64__8wekyb3d8bbwe\pwsh.exe"
+                .to_string(),
             "-Command".to_string(),
             "Write-Output ok".to_string(),
         ];
 
-        let rewritten = disable_powershell_profile_for_elevated_windows_sandbox(
+        let rewritten = prepare_powershell_command_for_elevated_windows_sandbox(
             &command,
             Some(&ShellType::PowerShell),
             /*sandbox_requested*/ true,
             WindowsSandboxLevel::RestrictedToken,
+            /*environment_is_remote*/ false,
         );
 
         assert_eq!(rewritten, command);
@@ -525,16 +522,18 @@ mod disable_powershell_profile_tests {
     #[test]
     fn leaves_unsandboxed_attempts_alone() {
         let command = vec![
-            "powershell.exe".to_string(),
+            r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.4.0_x64__8wekyb3d8bbwe\pwsh.exe"
+                .to_string(),
             "-Command".to_string(),
             "Write-Output ok".to_string(),
         ];
 
-        let rewritten = disable_powershell_profile_for_elevated_windows_sandbox(
+        let rewritten = prepare_powershell_command_for_elevated_windows_sandbox(
             &command,
             Some(&ShellType::PowerShell),
             /*sandbox_requested*/ false,
             WindowsSandboxLevel::Elevated,
+            /*environment_is_remote*/ false,
         );
 
         assert_eq!(rewritten, command);
@@ -548,14 +547,87 @@ mod disable_powershell_profile_tests {
             "echo ok".to_string(),
         ];
 
-        let rewritten = disable_powershell_profile_for_elevated_windows_sandbox(
+        let rewritten = prepare_powershell_command_for_elevated_windows_sandbox(
             &command,
             Some(&ShellType::Bash),
             /*sandbox_requested*/ true,
             WindowsSandboxLevel::Elevated,
+            /*environment_is_remote*/ false,
         );
 
         assert_eq!(rewritten, command);
+    }
+
+    #[test]
+    fn local_elevated_powershell_uses_discovered_fallback() {
+        let command = vec![
+            r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.4.0_x64__8wekyb3d8bbwe\pwsh.exe"
+                .to_string(),
+            "-Command".to_string(),
+            "Write-Output ok".to_string(),
+        ];
+        let fallback_path = std::path::PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
+
+        let rewritten = prepare_powershell_command_for_elevated_windows_sandbox_with_fallback(
+            &command,
+            Some(&ShellType::PowerShell),
+            /*sandbox_requested*/ true,
+            WindowsSandboxLevel::Elevated,
+            /*environment_is_remote*/ false,
+            |_| {
+                Some(codex_shell_command::shell_detect::DetectedShell {
+                    shell_type: ShellType::PowerShell,
+                    shell_path: fallback_path.clone(),
+                })
+            },
+        );
+
+        assert_eq!(
+            rewritten,
+            vec![
+                fallback_path.to_string_lossy().to_string(),
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Write-Output ok".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_elevated_powershell_keeps_remote_store_path_and_no_profile() {
+        let command = vec![
+            r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.4.0_x64__8wekyb3d8bbwe\pwsh.exe"
+                .to_string(),
+            "-Command".to_string(),
+            "Write-Output ok".to_string(),
+        ];
+
+        let mut discovery_called = false;
+        let rewritten = prepare_powershell_command_for_elevated_windows_sandbox_with_fallback(
+            &command,
+            Some(&ShellType::PowerShell),
+            /*sandbox_requested*/ true,
+            WindowsSandboxLevel::Elevated,
+            /*environment_is_remote*/ true,
+            |_| {
+                discovery_called = true;
+                Some(codex_shell_command::shell_detect::DetectedShell {
+                    shell_type: ShellType::PowerShell,
+                    shell_path: std::path::PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+                })
+            },
+        );
+
+        assert!(!discovery_called);
+        assert_eq!(
+            rewritten,
+            vec![
+                command[0].clone(),
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Write-Output ok".to_string(),
+            ]
+        );
     }
 }
 

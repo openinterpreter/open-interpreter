@@ -349,16 +349,21 @@ fn build_messages_for_session(
         match item {
             ResponseItem::FunctionCallOutput {
                 call_id, output, ..
-            } => pending_tool_results.push(PendingToolResult {
-                order: tool_order_by_call_id
-                    .get(call_id)
-                    .copied()
-                    .unwrap_or(usize::MAX),
-                call_id: call_id.clone(),
-                output: output.clone(),
-                tool_result_cache_control: trailing_tool_result_range
-                    .is_some_and(|(first_index, count)| count == 1 && index >= first_index),
-            }),
+            } => {
+                let Some(call_id) = call_id.as_ref() else {
+                    continue;
+                };
+                pending_tool_results.push(PendingToolResult {
+                    order: tool_order_by_call_id
+                        .get(call_id)
+                        .copied()
+                        .unwrap_or(usize::MAX),
+                    call_id: call_id.clone(),
+                    output: output.clone(),
+                    tool_result_cache_control: trailing_tool_result_range
+                        .is_some_and(|(first_index, count)| count == 1 && index >= first_index),
+                });
+            }
             ResponseItem::Message { role, content, .. } => {
                 flush_pending_tool_results(
                     &mut messages,

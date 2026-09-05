@@ -26,6 +26,8 @@ struct RemotePluginCatalogCacheKey {
     // Global catalogs predate scoped cache keys and must keep their existing filenames.
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<RemotePluginScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collection: Option<String>,
 }
 
 impl RemotePluginCatalogCacheKey {
@@ -33,6 +35,7 @@ impl RemotePluginCatalogCacheKey {
         config: &RemotePluginServiceConfig,
         auth: &CodexAuth,
         scope: RemotePluginScope,
+        collection: Option<&str>,
     ) -> Option<Self> {
         let cache_key = Self {
             chatgpt_base_url: config.chatgpt_base_url.clone(),
@@ -40,6 +43,7 @@ impl RemotePluginCatalogCacheKey {
             chatgpt_user_id: auth.get_chatgpt_user_id(),
             is_workspace_account: auth.is_workspace_account(),
             scope: (scope != RemotePluginScope::Global).then_some(scope),
+            collection: collection.map(str::to_owned),
         };
         // Preserve global catalog caching for existing header-auth clients, but never share
         // user or workspace catalogs when the auth mode cannot identify their owner.
@@ -79,8 +83,9 @@ pub(crate) fn load_cached_directory_plugins(
     config: &RemotePluginServiceConfig,
     auth: &CodexAuth,
     scope: RemotePluginScope,
+    collection: Option<&str>,
 ) -> Option<CachedDirectoryPlugins> {
-    let cache_key = RemotePluginCatalogCacheKey::new(config, auth, scope)?;
+    let cache_key = RemotePluginCatalogCacheKey::new(config, auth, scope, collection)?;
     let cache_path = cache_path(codex_home, &cache_key);
     let bytes = match std::fs::read(&cache_path) {
         Ok(bytes) => bytes,
@@ -125,9 +130,10 @@ pub(crate) fn write_cached_directory_plugins(
     config: &RemotePluginServiceConfig,
     auth: &CodexAuth,
     scope: RemotePluginScope,
+    collection: Option<&str>,
     plugins: &[RemotePluginDirectoryItem],
 ) {
-    let Some(cache_key) = RemotePluginCatalogCacheKey::new(config, auth, scope) else {
+    let Some(cache_key) = RemotePluginCatalogCacheKey::new(config, auth, scope, collection) else {
         return;
     };
     let cache_path = cache_path(codex_home, &cache_key);
@@ -146,8 +152,9 @@ pub(crate) fn remove_cached_directory_plugins(
     config: &RemotePluginServiceConfig,
     auth: &CodexAuth,
     scope: RemotePluginScope,
+    collection: Option<&str>,
 ) {
-    let Some(cache_key) = RemotePluginCatalogCacheKey::new(config, auth, scope) else {
+    let Some(cache_key) = RemotePluginCatalogCacheKey::new(config, auth, scope, collection) else {
         return;
     };
     let cache_path = cache_path(codex_home, &cache_key);

@@ -8,6 +8,7 @@ mod info;
 mod operations;
 mod platform;
 mod status;
+mod trust;
 
 /// Git configuration that rejects implicitly discovered bare repositories while
 /// preserving repositories selected explicitly through `GIT_DIR` or `--git-dir`.
@@ -26,6 +27,7 @@ pub use baseline::diff_since_latest_init;
 pub use baseline::ensure_git_baseline_repository;
 pub use baseline::reset_git_repository;
 pub use branch::merge_base_with_head;
+pub use codex_protocol::SanitizedGitUrl;
 pub use codex_protocol::protocol::GitSha;
 pub use errors::GitToolingError;
 pub use fsmonitor::FsmonitorOverride;
@@ -45,6 +47,6 @@ pub use info::get_head_commit_hash;
 pub use info::git_diff_to_remote;
 pub use info::local_git_branches;
 pub use info::recent_commits;
-pub use info::resolve_root_git_project_for_trust;
 pub use platform::create_symlink;
 pub use status::get_has_changes_in_repo;
+pub use trust::resolve_root_git_project_for_trust;

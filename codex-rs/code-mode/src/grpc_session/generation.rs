@@ -85,25 +85,31 @@ fn public_runtime_response(generation: u64, response: RuntimeResponse) -> Runtim
         RuntimeResponse::Yielded {
             cell_id,
             content_items,
+            code_mode_host_duration,
         } => RuntimeResponse::Yielded {
             cell_id: public_cell_id(generation, &cell_id),
             content_items,
+            code_mode_host_duration,
         },
         RuntimeResponse::Terminated {
             cell_id,
             content_items,
+            code_mode_host_duration,
         } => RuntimeResponse::Terminated {
             cell_id: public_cell_id(generation, &cell_id),
             content_items,
+            code_mode_host_duration,
         },
         RuntimeResponse::Result {
             cell_id,
             content_items,
             error_text,
+            code_mode_host_duration,
         } => RuntimeResponse::Result {
             cell_id: public_cell_id(generation, &cell_id),
             content_items,
             error_text,
+            code_mode_host_duration,
         },
     }
 }

@@ -49,10 +49,14 @@ class NotarizationConfiguration:
             "vault_name": "AZURE_KEYVAULT_NAME",
             "vault_key_name": "APPLE_NOTARIZATION_AKV_KEY_NAME",
         }
-        values = {field: os.environ.get(name, "").strip() for field, name in required.items()}
+        values = {
+            field: os.environ.get(name, "").strip() for field, name in required.items()
+        }
         missing = [name for field, name in required.items() if not values[field]]
         if missing:
-            raise NotarizationError("Missing notarization configuration: " + ", ".join(missing))
+            raise NotarizationError(
+                "Missing notarization configuration: " + ", ".join(missing)
+            )
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{2,23}", values["vault_name"]):
             raise NotarizationError("Invalid signing vault name")
         if not re.fullmatch(r"[A-Za-z0-9-]+", values["vault_key_name"]):
@@ -90,7 +94,9 @@ class NotarizationConfiguration:
         try:
             result = subprocess.run(command, check=True, capture_output=True, text=True)
         except (OSError, subprocess.CalledProcessError) as error:
-            raise NotarizationError("Notarization signing key could not be read") from error
+            raise NotarizationError(
+                "Notarization signing key could not be read"
+            ) from error
         try:
             metadata = json.loads(result.stdout)
             returned_key_id = metadata["id"]
@@ -99,10 +105,10 @@ class NotarizationConfiguration:
         except (json.JSONDecodeError, KeyError, TypeError) as error:
             raise NotarizationError("Notarization key metadata is invalid") from error
 
-        key_id_prefix = (
-            f"https://{values['vault_name']}.vault.azure.net/keys/{values['vault_key_name']}/"
-        )
-        if not isinstance(returned_key_id, str) or not returned_key_id.startswith(key_id_prefix):
+        key_id_prefix = f"https://{values['vault_name']}.vault.azure.net/keys/{values['vault_key_name']}/"
+        if not isinstance(returned_key_id, str) or not returned_key_id.startswith(
+            key_id_prefix
+        ):
             raise NotarizationError("Unexpected notarization signing key")
         returned_key_version = returned_key_id[len(key_id_prefix) :]
         if not re.fullmatch(r"[0-9a-fA-F]{32}", returned_key_version):
@@ -120,7 +126,9 @@ class NotarizationConfiguration:
             r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
             apple_issuer_id.strip(),
         ):
-            raise NotarizationError("Notarization apple-issuer-id tag must contain a valid UUID")
+            raise NotarizationError(
+                "Notarization apple-issuer-id tag must contain a valid UUID"
+            )
 
         values["issuer_id"] = apple_issuer_id.strip()
         values["apple_key_id"] = apple_key_id.strip()
@@ -147,12 +155,18 @@ def base64url_decode(value: str) -> bytes:
     """Decode a base64url value and reject malformed input."""
 
     try:
-        return base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+        return base64.b64decode(
+            value + "=" * (-len(value) % 4), altchars=b"-_", validate=True
+        )
     except (ValueError, UnicodeEncodeError) as error:
-        raise NotarizationError("Signing service returned an invalid signature") from error
+        raise NotarizationError(
+            "Signing service returned an invalid signature"
+        ) from error
 
 
-def create_apple_jwt(configuration: NotarizationConfiguration, *, issued_at: int) -> str:
+def create_apple_jwt(
+    configuration: NotarizationConfiguration, *, issued_at: int
+) -> str:
     """Create an authentication token for notarization requests."""
 
     header = {"alg": "ES256", "kid": configuration.apple_key_id, "typ": "JWT"}
@@ -164,8 +178,12 @@ def create_apple_jwt(configuration: NotarizationConfiguration, *, issued_at: int
         "aud": "appstoreconnect-v1",
         "scope": ["/notary/v2"],
     }
-    encoded_header = base64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
-    encoded_claims = base64url_encode(json.dumps(claims, separators=(",", ":")).encode("utf-8"))
+    encoded_header = base64url_encode(
+        json.dumps(header, separators=(",", ":")).encode("utf-8")
+    )
+    encoded_claims = base64url_encode(
+        json.dumps(claims, separators=(",", ":")).encode("utf-8")
+    )
     signing_input = f"{encoded_header}.{encoded_claims}"
     digest = hashlib.sha256(signing_input.encode("ascii")).digest()
     key_url = configuration.versioned_key_id
@@ -206,7 +224,9 @@ def create_apple_jwt(configuration: NotarizationConfiguration, *, issued_at: int
         returned_key_id = response["kid"]
         encoded_signature = response["value"]
     except (json.JSONDecodeError, KeyError, TypeError) as error:
-        raise NotarizationError("Signing service returned an invalid response") from error
+        raise NotarizationError(
+            "Signing service returned an invalid response"
+        ) from error
 
     # Reject signatures generated with a different key version.
     if returned_key_id != key_url:
@@ -220,7 +240,9 @@ def create_apple_jwt(configuration: NotarizationConfiguration, *, issued_at: int
     return f"{signing_input}.{base64url_encode(signature)}"
 
 
-def json_request(url: str, token: str, *, body: dict[str, Any] | None = None) -> dict[str, Any]:
+def json_request(
+    url: str, token: str, *, body: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Send an authenticated JSON request to Apple's notarization service."""
 
     data = None if body is None else json.dumps(body).encode("utf-8")
@@ -239,7 +261,9 @@ def json_request(url: str, token: str, *, body: dict[str, Any] | None = None) ->
             result = json.load(response)
     except urllib.error.HTTPError as error:
         detail = error.read(1024).decode("utf-8", errors="replace")
-        raise NotarizationError(f"Apple Notary API returned HTTP {error.code}: {detail}") from error
+        raise NotarizationError(
+            f"Apple Notary API returned HTTP {error.code}: {detail}"
+        ) from error
     except (OSError, json.JSONDecodeError) as error:
         raise NotarizationError("Apple Notary API request failed") from error
 
@@ -281,9 +305,12 @@ def upload_to_apple_s3(
         "object",
     )
     if any(
-        not isinstance(credentials.get(name), str) or not credentials[name] for name in required
+        not isinstance(credentials.get(name), str) or not credentials[name]
+        for name in required
     ):
-        raise NotarizationError("Apple returned incomplete temporary upload credentials")
+        raise NotarizationError(
+            "Apple returned incomplete temporary upload credentials"
+        )
 
     size = path.stat().st_size
     if not 0 < size <= MAX_SINGLE_UPLOAD_BYTES:
@@ -293,7 +320,9 @@ def upload_to_apple_s3(
     amz_date = now.strftime("%Y%m%dT%H%M%SZ")
     date_stamp = now.strftime("%Y%m%d")
     host = f"{credentials['bucket']}.s3.{AWS_REGION}.amazonaws.com"
-    object_path = "/" + urllib.parse.quote(credentials["object"].lstrip("/"), safe="/-_.~")
+    object_path = "/" + urllib.parse.quote(
+        credentials["object"].lstrip("/"), safe="/-_.~"
+    )
     headers = {
         "content-type": "application/octet-stream",
         "host": host,
@@ -319,7 +348,9 @@ def upload_to_apple_s3(
     signing_key = ("AWS4" + credentials["awsSecretAccessKey"]).encode("utf-8")
     for component in (date_stamp, AWS_REGION, "s3", "aws4_request"):
         signing_key = hmac_sha256(signing_key, component)
-    signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    signature = hmac.new(
+        signing_key, string_to_sign.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
     authorization = (
         "AWS4-HMAC-SHA256 "
         f"Credential={credentials['awsAccessKeyId']}/{credential_scope}, "
@@ -346,10 +377,14 @@ def upload_to_apple_s3(
                 f"Apple notarization payload upload failed with HTTP {error.code}"
             ) from error
         except OSError as error:
-            raise NotarizationError("Apple notarization payload upload failed") from error
+            raise NotarizationError(
+                "Apple notarization payload upload failed"
+            ) from error
 
 
-def write_developer_log(submission_id: str, token: str, destination: Path | None) -> None:
+def write_developer_log(
+    submission_id: str, token: str, destination: Path | None
+) -> None:
     """Write the submission's optional diagnostic report."""
 
     if destination is None:
@@ -358,9 +393,13 @@ def write_developer_log(submission_id: str, token: str, destination: Path | None
     try:
         log_url = response["data"]["attributes"]["developerLogUrl"]
     except (KeyError, TypeError) as error:
-        raise NotarizationError("Apple did not provide a notarization developer log") from error
+        raise NotarizationError(
+            "Apple did not provide a notarization developer log"
+        ) from error
     if not isinstance(log_url, str) or not log_url.startswith("https://"):
-        raise NotarizationError("Apple returned an invalid notarization developer log URL")
+        raise NotarizationError(
+            "Apple returned an invalid notarization developer log URL"
+        )
     try:
         # Do not forward unrelated authorization headers to the download URL.
         with urllib.request.urlopen(log_url, timeout=60) as response:
@@ -370,7 +409,9 @@ def write_developer_log(submission_id: str, token: str, destination: Path | None
             f"Apple notarization developer log download failed with HTTP {error.code}"
         ) from error
     except OSError as error:
-        raise NotarizationError("Apple notarization developer log download failed") from error
+        raise NotarizationError(
+            "Apple notarization developer log download failed"
+        ) from error
 
 
 def notarize(
@@ -395,11 +436,15 @@ def notarize(
         submission_id = response["data"]["id"]
         upload_credentials = response["data"]["attributes"]
     except (KeyError, TypeError) as error:
-        raise NotarizationError("Apple returned an invalid notarization submission") from error
+        raise NotarizationError(
+            "Apple returned an invalid notarization submission"
+        ) from error
     if not isinstance(submission_id, str) or not submission_id:
         raise NotarizationError("Apple did not return a notarization submission ID")
     if not isinstance(upload_credentials, dict):
-        raise NotarizationError("Apple returned invalid notarization upload credentials")
+        raise NotarizationError(
+            "Apple returned invalid notarization upload credentials"
+        )
 
     print(f"Uploading notarization submission {submission_id} for {path.name}")
     upload_to_apple_s3(path, file_digest, upload_credentials)
@@ -416,7 +461,9 @@ def notarize(
         try:
             status = result["data"]["attributes"]["status"]
         except (KeyError, TypeError) as error:
-            raise NotarizationError("Apple returned an invalid notarization status") from error
+            raise NotarizationError(
+                "Apple returned an invalid notarization status"
+            ) from error
 
         if status in {"Accepted", "Invalid", "Rejected"}:
             # Save diagnostics for both accepted and rejected submissions.
@@ -449,7 +496,9 @@ def main() -> int:
 
     try:
         if not arguments.file.is_file():
-            raise NotarizationError(f"Notarization payload does not exist: {arguments.file}")
+            raise NotarizationError(
+                f"Notarization payload does not exist: {arguments.file}"
+            )
         if arguments.max_wait_seconds < 0:
             raise NotarizationError("--max-wait-seconds must be non-negative")
         if arguments.report_log is not None:

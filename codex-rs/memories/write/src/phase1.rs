@@ -9,6 +9,7 @@ use codex_config::types::MemoriesConfig;
 use codex_core::Prompt;
 use codex_core::RolloutRecorder;
 use codex_core::config::Config;
+use codex_protocol::ResponseItemId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -292,7 +293,7 @@ mod job {
 
         let mut prompt = Prompt::default();
         prompt.input = vec![ResponseItem::Message {
-            id: None,
+            id: Some(ResponseItemId::new("msg")),
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
                 text: build_stage_one_input_message(
@@ -416,6 +417,8 @@ mod job {
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
                 | RolloutItem::TurnContext(_)
+                | RolloutItem::TokenUsageRecord(_)
+                | RolloutItem::RealtimeItem(_)
                 | RolloutItem::WorldState(_)
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::EventMsg(_) => None,
@@ -727,6 +730,8 @@ mod tests {
             RolloutItem::ResponseItem(skill_message.into()),
             RolloutItem::SecurityRiskScore(SecurityRiskScore {
                 scores: BTreeMap::from([("action_risk".to_string(), 0.92)]),
+                call_id: None,
+                action: None,
                 sampled_at: None,
             }),
             RolloutItem::ResponseItem(subagent_message.clone().into()),
@@ -758,7 +763,9 @@ mod tests {
             job::serialize_filtered_rollout_response_items(&[RolloutItem::ResponseItem(
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "call_123".to_string(),
+                    call_id: Some("call_123".to_string()),
+                    name: None,
+                    namespace: None,
                     output: codex_protocol::models::FunctionCallOutputPayload {
                         body: codex_protocol::models::FunctionCallOutputBody::Text(
                             r#"{"token":"sk-abcdefghijklmnopqrstuvwxyz123456"}"#.to_string(),

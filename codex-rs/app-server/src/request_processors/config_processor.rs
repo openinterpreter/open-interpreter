@@ -7,10 +7,17 @@ use crate::error_code::invalid_request;
 use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
 use codex_analytics::AnalyticsEventsClient;
+use codex_app_server_protocol::AllowDenyRequirement;
 use codex_app_server_protocol::AutoReviewRequirements;
+use codex_app_server_protocol::BrowserUseAccessApprovalLifetime;
+use codex_app_server_protocol::BrowserUseOriginPolicy;
 use codex_app_server_protocol::BrowserUseRequirements;
+use codex_app_server_protocol::CliAuthCredentialsStoreMode;
 use codex_app_server_protocol::ClientResponsePayload;
+use codex_app_server_protocol::ComputerUseMacosRequirements;
 use codex_app_server_protocol::ComputerUseRequirements;
+use codex_app_server_protocol::ComputerUseWindowsExeRequirement;
+use codex_app_server_protocol::ComputerUseWindowsRequirements;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigReadParams;
 use codex_app_server_protocol::ConfigReadResponse;
@@ -24,6 +31,7 @@ use codex_app_server_protocol::ConfiguredHookMatcherGroup;
 use codex_app_server_protocol::ExperimentalFeatureEnablementSetParams;
 use codex_app_server_protocol::ExperimentalFeatureEnablementSetResponse;
 use codex_app_server_protocol::FeedbackRequirements;
+use codex_app_server_protocol::InAppBrowserRequirements;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::ManagedHooksRequirements;
 use codex_app_server_protocol::ModelProviderCapabilitiesReadResponse;
@@ -42,6 +50,7 @@ use codex_config::MatcherGroup as CoreMatcherGroup;
 use codex_config::ResidencyRequirement as CoreResidencyRequirement;
 use codex_config::SandboxModeRequirement as CoreSandboxModeRequirement;
 use codex_core::ThreadManager;
+use codex_features::Feature;
 use codex_features::canonical_feature_for_key;
 use codex_features::feature_for_key;
 use codex_model_provider::create_model_provider;
@@ -50,8 +59,12 @@ use codex_protocol::config_types::WebSearchMode;
 use serde_json::json;
 use std::path::PathBuf;
 
+const BACKGROUND_PAGINATED_ROLLOUT_MIGRATION_FEATURE: &str =
+    "background_paginated_rollout_migration";
+
 const SUPPORTED_EXPERIMENTAL_FEATURE_ENABLEMENT: &[&str] = &[
     "auth_elicitation",
+    BACKGROUND_PAGINATED_ROLLOUT_MIGRATION_FEATURE,
     "mcp_2026_07_28",
     "memories",
     "mentions_v2",
@@ -279,6 +292,18 @@ impl ConfigRequestProcessor {
             return Ok(ExperimentalFeatureEnablementSetResponse { enablement });
         }
 
+        // Most runtime features are read later from config. Background migration is a one-shot
+        // process-scoped task, so start it when runtime enablement first changes it to on.
+        let feature = Feature::BackgroundPaginatedRolloutMigration;
+        let should_start_background_rollout_migration = enablement
+            .get(BACKGROUND_PAGINATED_ROLLOUT_MIGRATION_FEATURE)
+            .is_some_and(|enabled| *enabled)
+            && !self
+                .load_latest_config(/*fallback_cwd*/ None)
+                .await?
+                .features
+                .enabled(feature);
+
         self.config_manager
             .extend_runtime_feature_enablement(
                 enablement
@@ -287,7 +312,10 @@ impl ConfigRequestProcessor {
             )
             .map_err(|_| internal_error("failed to update feature enablement"))?;
 
-        self.load_latest_config(/*fallback_cwd*/ None).await?;
+        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+        if should_start_background_rollout_migration && config.features.enabled(feature) {
+            self.thread_manager.start_background_rollout_migration();
+        }
 
         Ok(ExperimentalFeatureEnablementSetResponse { enablement })
     }
@@ -352,6 +380,24 @@ fn map_requirements_toml_to_api(requirements: ConfigRequirementsToml) -> ConfigR
         .and_then(|windows| windows.sandbox_private_desktop);
 
     ConfigRequirements {
+        cli_auth_credentials_store: requirements.cli_auth_credentials_store.map(
+            |mode| match mode {
+                codex_config::types::AuthCredentialsStoreMode::File => {
+                    CliAuthCredentialsStoreMode::File
+                }
+                codex_config::types::AuthCredentialsStoreMode::Keyring => {
+                    CliAuthCredentialsStoreMode::Keyring
+                }
+                codex_config::types::AuthCredentialsStoreMode::Auto => {
+                    CliAuthCredentialsStoreMode::Auto
+                }
+                codex_config::types::AuthCredentialsStoreMode::Ephemeral => {
+                    CliAuthCredentialsStoreMode::Ephemeral
+                }
+            },
+        ),
+        chatgpt_base_url: requirements.chatgpt_base_url,
+        additional_developer_instructions: requirements.additional_developer_instructions,
         allowed_approval_policies: requirements.allowed_approval_policies.map(|policies| {
             policies
                 .into_iter()
@@ -400,6 +446,7 @@ fn map_requirements_toml_to_api(requirements: ConfigRequirementsToml) -> ConfigR
             normalized
         }),
         allow_managed_hooks_only: requirements.allow_managed_hooks_only,
+        allow_browser_and_computer_use: requirements.allow_browser_and_computer_use,
         allow_appshots: requirements.allow_appshots,
         allow_remote_control: requirements.allow_remote_control,
         computer_use: requirements
@@ -408,6 +455,12 @@ fn map_requirements_toml_to_api(requirements: ConfigRequirementsToml) -> ConfigR
         browser_use: requirements
             .browser_use
             .map(map_browser_use_requirements_to_api),
+        in_app_browser: requirements.in_app_browser.map(|in_app_browser| {
+            InAppBrowserRequirements {
+                allow_external_browser_settings_import: in_app_browser
+                    .allow_external_browser_settings_import,
+            }
+        }),
         feature_requirements: requirements
             .feature_requirements
             .map(|requirements| requirements.entries),
@@ -446,6 +499,44 @@ fn map_computer_use_requirements_to_api(
 ) -> ComputerUseRequirements {
     ComputerUseRequirements {
         allow_locked_computer_use: computer_use.allow_locked_computer_use,
+        allow_persistent_approval: computer_use.allow_persistent_approval,
+        default_app_access: computer_use
+            .default_app_access
+            .map(map_allow_deny_requirement_to_api),
+        macos: computer_use
+            .macos
+            .map(|macos| ComputerUseMacosRequirements {
+                bundle_ids: macos.bundle_ids.map(|bundle_ids| {
+                    bundle_ids
+                        .into_iter()
+                        .map(|(bundle_id, requirement)| {
+                            (bundle_id, map_allow_deny_requirement_to_api(requirement))
+                        })
+                        .collect()
+                }),
+            }),
+        windows: computer_use
+            .windows
+            .map(|windows| ComputerUseWindowsRequirements {
+                aumids: windows.aumids.map(|aumids| {
+                    aumids
+                        .into_iter()
+                        .map(|(aumid, requirement)| {
+                            (aumid, map_allow_deny_requirement_to_api(requirement))
+                        })
+                        .collect()
+                }),
+                exes: windows.exes.map(|exes| {
+                    exes.into_iter()
+                        .map(|exe| ComputerUseWindowsExeRequirement {
+                            publisher_name: exe.publisher_name,
+                            product_name: exe.product_name,
+                            binary_name: exe.binary_name,
+                            access: map_allow_deny_requirement_to_api(exe.access),
+                        })
+                        .collect()
+                }),
+            }),
     }
 }
 
@@ -453,7 +544,58 @@ fn map_browser_use_requirements_to_api(
     browser_use: codex_config::BrowserUseRequirementsToml,
 ) -> BrowserUseRequirements {
     BrowserUseRequirements {
+        allow_history_access: browser_use.allow_history_access,
         disable_auto_review: browser_use.disable_auto_review,
+        allow_global_persistent_approval: browser_use.allow_global_persistent_approval,
+        default_origin_policy: browser_use
+            .default_origin_policy
+            .map(map_browser_use_origin_policy_to_api),
+        origins: browser_use.origins.map(|origins| {
+            origins
+                .into_iter()
+                .map(|(pattern, policy)| (pattern, map_browser_use_origin_policy_to_api(policy)))
+                .collect()
+        }),
+    }
+}
+
+fn map_browser_use_origin_policy_to_api(
+    policy: codex_config::BrowserUseOriginPolicyToml,
+) -> BrowserUseOriginPolicy {
+    BrowserUseOriginPolicy {
+        access: policy.access.map(map_allow_deny_requirement_to_api),
+        downloads: policy.downloads.map(map_allow_deny_requirement_to_api),
+        uploads: policy.uploads.map(map_allow_deny_requirement_to_api),
+        full_cdp_access: policy
+            .full_cdp_access
+            .map(map_allow_deny_requirement_to_api),
+        auto_review: policy.auto_review.map(map_allow_deny_requirement_to_api),
+        persistent_approval: policy.persistent_approval,
+        access_approval_lifetime: policy
+            .access_approval_lifetime
+            .map(map_browser_use_access_approval_lifetime_to_api),
+    }
+}
+
+fn map_allow_deny_requirement_to_api(
+    requirement: codex_config::AllowDenyRequirementToml,
+) -> AllowDenyRequirement {
+    match requirement {
+        codex_config::AllowDenyRequirementToml::Allow => AllowDenyRequirement::Allow,
+        codex_config::AllowDenyRequirementToml::Deny => AllowDenyRequirement::Deny,
+    }
+}
+
+fn map_browser_use_access_approval_lifetime_to_api(
+    lifetime: codex_config::BrowserUseAccessApprovalLifetimeToml,
+) -> BrowserUseAccessApprovalLifetime {
+    match lifetime {
+        codex_config::BrowserUseAccessApprovalLifetimeToml::Turn => {
+            BrowserUseAccessApprovalLifetime::Turn
+        }
+        codex_config::BrowserUseAccessApprovalLifetimeToml::Thread => {
+            BrowserUseAccessApprovalLifetime::Thread
+        }
     }
 }
 
@@ -475,6 +617,7 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         subagent_start,
         subagent_stop,
         stop,
+        interrupt,
     } = hooks;
 
     ManagedHooksRequirements {
@@ -491,6 +634,7 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         subagent_start: map_hook_matcher_groups_to_api(subagent_start),
         subagent_stop: map_hook_matcher_groups_to_api(subagent_stop),
         stop: map_hook_matcher_groups_to_api(stop),
+        interrupt: map_hook_matcher_groups_to_api(interrupt),
     }
 }
 
@@ -653,11 +797,26 @@ fn config_write_error(code: ConfigWriteErrorCode, message: impl Into<String>) ->
 #[cfg(test)]
 mod tests {
     use super::map_requirements_toml_to_api;
+    use codex_app_server_protocol::AllowDenyRequirement;
     use codex_app_server_protocol::AutoReviewRequirements;
+    use codex_app_server_protocol::BrowserUseAccessApprovalLifetime;
+    use codex_app_server_protocol::BrowserUseOriginPolicy;
+    use codex_app_server_protocol::BrowserUseRequirements;
+    use codex_app_server_protocol::ComputerUseMacosRequirements;
+    use codex_app_server_protocol::ComputerUseRequirements;
+    use codex_app_server_protocol::ComputerUseWindowsExeRequirement;
+    use codex_app_server_protocol::ComputerUseWindowsRequirements;
     use codex_app_server_protocol::FeedbackRequirements;
     use codex_app_server_protocol::WindowsSandboxSetupMode;
+    use codex_config::AllowDenyRequirementToml;
     use codex_config::AutoReviewRequirementsToml;
+    use codex_config::BrowserUseAccessApprovalLifetimeToml;
+    use codex_config::BrowserUseOriginPolicyToml;
+    use codex_config::BrowserUseRequirementsToml;
+    use codex_config::ComputerUseMacosRequirementsToml;
     use codex_config::ComputerUseRequirementsToml;
+    use codex_config::ComputerUseWindowsExeRequirementToml;
+    use codex_config::ComputerUseWindowsRequirementsToml;
     use codex_config::ConfigRequirementsToml;
     use codex_config::ModelsRequirementsToml;
     use codex_config::NewThreadModelDefaultsToml;
@@ -760,19 +919,118 @@ mod tests {
     }
 
     #[test]
-    fn requirements_api_includes_computer_use_requirements() {
+    fn requirements_api_includes_browser_and_computer_use_requirements() {
         let mapped = map_requirements_toml_to_api(ConfigRequirementsToml {
+            allow_browser_and_computer_use: Some(false),
+            browser_use: Some(BrowserUseRequirementsToml {
+                allow_history_access: Some(false),
+                disable_auto_review: Some(true),
+                allow_global_persistent_approval: Some(false),
+                default_origin_policy: Some(BrowserUseOriginPolicyToml {
+                    access: Some(AllowDenyRequirementToml::Deny),
+                    downloads: Some(AllowDenyRequirementToml::Allow),
+                    uploads: Some(AllowDenyRequirementToml::Deny),
+                    full_cdp_access: Some(AllowDenyRequirementToml::Allow),
+                    auto_review: Some(AllowDenyRequirementToml::Deny),
+                    persistent_approval: Some(false),
+                    access_approval_lifetime: Some(BrowserUseAccessApprovalLifetimeToml::Turn),
+                }),
+                origins: Some(BTreeMap::from([(
+                    "https://example.com".to_string(),
+                    BrowserUseOriginPolicyToml {
+                        access: Some(AllowDenyRequirementToml::Allow),
+                        downloads: Some(AllowDenyRequirementToml::Deny),
+                        uploads: Some(AllowDenyRequirementToml::Allow),
+                        full_cdp_access: Some(AllowDenyRequirementToml::Deny),
+                        auto_review: Some(AllowDenyRequirementToml::Deny),
+                        persistent_approval: Some(true),
+                        access_approval_lifetime: Some(
+                            BrowserUseAccessApprovalLifetimeToml::Thread,
+                        ),
+                    },
+                )])),
+            }),
             computer_use: Some(ComputerUseRequirementsToml {
                 allow_locked_computer_use: Some(false),
+                allow_persistent_approval: Some(false),
+                default_app_access: Some(AllowDenyRequirementToml::Deny),
+                macos: Some(ComputerUseMacosRequirementsToml {
+                    bundle_ids: Some(BTreeMap::from([(
+                        "com.apple.Safari".to_string(),
+                        AllowDenyRequirementToml::Allow,
+                    )])),
+                }),
+                windows: Some(ComputerUseWindowsRequirementsToml {
+                    aumids: Some(BTreeMap::from([(
+                        "Microsoft.Paint_8wekyb3d8bbwe!App".to_string(),
+                        AllowDenyRequirementToml::Allow,
+                    )])),
+                    exes: Some(vec![ComputerUseWindowsExeRequirementToml {
+                        publisher_name: "CN=Google LLC".to_string(),
+                        product_name: "Google Chrome".to_string(),
+                        binary_name: Some("chrome.exe".to_string()),
+                        access: AllowDenyRequirementToml::Deny,
+                    }]),
+                }),
             }),
             ..ConfigRequirementsToml::default()
         });
 
+        assert_eq!(mapped.allow_browser_and_computer_use, Some(false));
         assert_eq!(
-            mapped
-                .computer_use
-                .and_then(|requirements| requirements.allow_locked_computer_use),
-            Some(false)
+            mapped.browser_use,
+            Some(BrowserUseRequirements {
+                allow_history_access: Some(false),
+                disable_auto_review: Some(true),
+                allow_global_persistent_approval: Some(false),
+                default_origin_policy: Some(BrowserUseOriginPolicy {
+                    access: Some(AllowDenyRequirement::Deny),
+                    downloads: Some(AllowDenyRequirement::Allow),
+                    uploads: Some(AllowDenyRequirement::Deny),
+                    full_cdp_access: Some(AllowDenyRequirement::Allow),
+                    auto_review: Some(AllowDenyRequirement::Deny),
+                    persistent_approval: Some(false),
+                    access_approval_lifetime: Some(BrowserUseAccessApprovalLifetime::Turn),
+                }),
+                origins: Some(BTreeMap::from([(
+                    "https://example.com".to_string(),
+                    BrowserUseOriginPolicy {
+                        access: Some(AllowDenyRequirement::Allow),
+                        downloads: Some(AllowDenyRequirement::Deny),
+                        uploads: Some(AllowDenyRequirement::Allow),
+                        full_cdp_access: Some(AllowDenyRequirement::Deny),
+                        auto_review: Some(AllowDenyRequirement::Deny),
+                        persistent_approval: Some(true),
+                        access_approval_lifetime: Some(BrowserUseAccessApprovalLifetime::Thread),
+                    },
+                )])),
+            })
+        );
+        assert_eq!(
+            mapped.computer_use,
+            Some(ComputerUseRequirements {
+                allow_locked_computer_use: Some(false),
+                allow_persistent_approval: Some(false),
+                default_app_access: Some(AllowDenyRequirement::Deny),
+                macos: Some(ComputerUseMacosRequirements {
+                    bundle_ids: Some(BTreeMap::from([(
+                        "com.apple.Safari".to_string(),
+                        AllowDenyRequirement::Allow,
+                    )])),
+                }),
+                windows: Some(ComputerUseWindowsRequirements {
+                    aumids: Some(BTreeMap::from([(
+                        "Microsoft.Paint_8wekyb3d8bbwe!App".to_string(),
+                        AllowDenyRequirement::Allow,
+                    )])),
+                    exes: Some(vec![ComputerUseWindowsExeRequirement {
+                        publisher_name: "CN=Google LLC".to_string(),
+                        product_name: "Google Chrome".to_string(),
+                        binary_name: Some("chrome.exe".to_string()),
+                        access: AllowDenyRequirement::Deny,
+                    }]),
+                }),
+            })
         );
     }
 

@@ -32,7 +32,11 @@ pub(super) async fn read_thread(
     params: ReadThreadParams,
 ) -> ThreadStoreResult<StoredThread> {
     let thread_id = params.thread_id;
-    if let Some(metadata) = read_sqlite_metadata(store, thread_id).await
+    let sqlite_metadata = read_sqlite_metadata(store, thread_id).await;
+    let persisted_model_settings = sqlite_metadata
+        .as_ref()
+        .map(|metadata| (metadata.model.clone(), metadata.reasoning_effort.clone()));
+    if let Some(metadata) = sqlite_metadata
         && (params.include_archived
             || (metadata.archived_at.is_none()
                 && !rollout_path_is_archived(
@@ -65,6 +69,9 @@ pub(super) async fn read_thread(
             if thread.name.is_some() {
                 rollout_thread.name = thread.name;
             }
+            rollout_thread.project_id = thread.project_id;
+            rollout_thread.model = thread.model;
+            rollout_thread.reasoning_effort = thread.reasoning_effort;
             rollout_thread.git_info = thread.git_info;
             rollout_thread.permission_profile = permission_profile_from_metadata_value(
                 &metadata_sandbox_policy,
@@ -90,6 +97,10 @@ pub(super) async fn read_thread(
             })?;
 
     let mut thread = read_thread_from_rollout_path(store, path).await?;
+    if let Some((model, reasoning_effort)) = persisted_model_settings {
+        thread.model = model;
+        thread.reasoning_effort = reasoning_effort;
+    }
     if !params.include_archived && thread.archived_at.is_some() {
         return Err(ThreadStoreError::InvalidRequest {
             message: format!("thread {} is archived", thread.thread_id),
@@ -139,6 +150,9 @@ pub(super) async fn read_thread_by_rollout_path(
             thread.section = metadata.section;
             thread.section_position = metadata.section_position;
             thread.section_entered_at = metadata.section_entered_at;
+            thread.project_id = metadata.project_id;
+            thread.model = metadata.model;
+            thread.reasoning_effort = metadata.reasoning_effort;
             if !metadata.cwd.as_os_str().is_empty()
                 && resolve_requested_rollout_path(store, metadata.rollout_path.clone())
                     .await
@@ -380,6 +394,7 @@ pub(super) fn stored_thread_from_state_metadata(
         section: metadata.section,
         section_position: metadata.section_position,
         section_entered_at: metadata.section_entered_at,
+        project_id: metadata.project_id,
         cwd: metadata.cwd,
         cli_version: metadata.cli_version,
         source: parse_session_source(&metadata.source),
@@ -478,6 +493,7 @@ fn stored_thread_from_meta_line(
         section: None,
         section_position: None,
         section_entered_at: None,
+        project_id: None,
         cwd: meta_line.meta.cwd,
         cli_version: meta_line.meta.cli_version,
         source: meta_line.meta.source,
@@ -525,6 +541,7 @@ mod tests {
     use codex_protocol::ThreadId;
     use codex_protocol::items::TurnItem;
     use codex_protocol::items::UserMessageItem;
+    use codex_protocol::openai_models::ReasoningEffort;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::ItemCompletedEvent;
     use codex_protocol::protocol::SandboxPolicy;
@@ -1262,6 +1279,8 @@ mod tests {
         builder.model_provider = Some("stale-sqlite-provider".to_string());
         let mut metadata = builder.build(config.default_model_provider_id.as_str());
         metadata.first_user_message = Some("stale sqlite preview".to_string());
+        metadata.model = Some("persisted-model".to_string());
+        metadata.reasoning_effort = Some(ReasoningEffort::High);
         runtime
             .upsert_thread(&metadata)
             .await
@@ -1280,6 +1299,10 @@ mod tests {
         assert_eq!(thread.rollout_path, Some(rollout_path));
         assert_eq!(thread.preview, "Hello from user");
         assert_eq!(thread.model_provider, config.default_model_provider_id);
+        assert_eq!(
+            (thread.model.as_deref(), thread.reasoning_effort),
+            (Some("persisted-model"), Some(ReasoningEffort::High))
+        );
         let history = thread.history.expect("history should load");
         assert_eq!(history.thread_id, thread_id);
         assert_eq!(history.items.len(), 2);

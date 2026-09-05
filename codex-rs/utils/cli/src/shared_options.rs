@@ -22,6 +22,10 @@ pub struct SharedCliOptions {
     #[arg(long, short = 'm')]
     pub model: Option<String>,
 
+    /// Use the selected provider's OpenAI-compatible Chat Completions API.
+    #[arg(long = "chat-completions", default_value_t = false)]
+    pub chat_completions: bool,
+
     /// Use open-source provider.
     #[arg(long = "oss", default_value_t = false)]
     pub oss: bool,
@@ -95,6 +99,7 @@ impl SharedCliOptions {
         let Self {
             images,
             model,
+            chat_completions,
             oss,
             oss_provider,
             config_profile_v2,
@@ -108,6 +113,7 @@ impl SharedCliOptions {
         let Self {
             images: root_images,
             model: root_model,
+            chat_completions: root_chat_completions,
             oss: root_oss,
             oss_provider: root_oss_provider,
             config_profile_v2: root_config_profile_v2,
@@ -121,6 +127,9 @@ impl SharedCliOptions {
 
         if model.is_none() {
             model.clone_from(root_model);
+        }
+        if *root_chat_completions {
+            *chat_completions = true;
         }
         if *root_oss {
             *oss = true;
@@ -162,6 +171,7 @@ impl SharedCliOptions {
         let Self {
             images,
             model,
+            chat_completions,
             oss,
             oss_provider,
             config_profile_v2,
@@ -175,6 +185,9 @@ impl SharedCliOptions {
 
         if let Some(model) = model {
             self.model = Some(model);
+        }
+        if chat_completions {
+            self.chat_completions = true;
         }
         if oss {
             self.oss = true;
@@ -203,5 +216,36 @@ impl SharedCliOptions {
         if !add_dir.is_empty() {
             self.add_dir.extend(add_dir);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SharedCliOptions;
+
+    #[test]
+    fn root_chat_completions_is_inherited_by_exec_options() {
+        let root = SharedCliOptions {
+            chat_completions: true,
+            ..Default::default()
+        };
+        let mut exec = SharedCliOptions::default();
+
+        exec.inherit_exec_root_options(&root);
+
+        assert!(exec.chat_completions);
+    }
+
+    #[test]
+    fn subcommand_chat_completions_enables_the_combined_options() {
+        let mut combined = SharedCliOptions::default();
+        let subcommand = SharedCliOptions {
+            chat_completions: true,
+            ..Default::default()
+        };
+
+        combined.apply_subcommand_overrides(subcommand);
+
+        assert!(combined.chat_completions);
     }
 }

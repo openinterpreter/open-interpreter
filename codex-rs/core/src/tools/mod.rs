@@ -1,6 +1,7 @@
 mod approvals;
 pub(crate) mod code_mode;
 pub(crate) mod context;
+mod control_tool_analytics;
 pub(crate) mod events;
 mod executed_tool_calls;
 pub(crate) mod handlers;
@@ -24,6 +25,7 @@ use crate::session::turn_context::TurnContext;
 pub(crate) use approvals::ApprovalContext;
 use codex_features::Feature;
 use codex_protocol::exec_output::ExecToolCallOutput;
+use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ToolMode;
 use codex_tools::ToolName;
 use codex_utils_output_truncation::TruncationPolicy;
@@ -31,12 +33,6 @@ use codex_utils_output_truncation::formatted_truncate_text;
 use codex_utils_output_truncation::truncate_text;
 pub(crate) use executed_tool_calls::ExecutedToolCallRecorder;
 pub use router::ToolRouter;
-
-// Telemetry preview limits: keep log events smaller than model budgets.
-pub(crate) const TELEMETRY_PREVIEW_MAX_BYTES: usize = 2 * 1024; // 2 KiB
-pub(crate) const TELEMETRY_PREVIEW_MAX_LINES: usize = 64; // lines
-pub(crate) const TELEMETRY_PREVIEW_TRUNCATION_NOTICE: &str =
-    "[... telemetry preview truncated ...]";
 
 /// Legacy boundaries such as hook payloads, telemetry tags, and Responses tool
 /// names still require a single flattened string. Keep comparisons and sorting
@@ -69,8 +65,8 @@ pub(crate) fn tool_user_shell_type(
     }
 }
 
-pub(crate) fn requested_tool_mode(turn_context: &TurnContext) -> ToolMode {
-    turn_context.model_info.tool_mode.unwrap_or_else(|| {
+pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
+    model_info.tool_mode.unwrap_or_else(|| {
         if turn_context.config.features.enabled(Feature::CodeModeOnly) {
             ToolMode::CodeModeOnly
         } else if turn_context.config.features.enabled(Feature::CodeMode) {
@@ -81,8 +77,8 @@ pub(crate) fn requested_tool_mode(turn_context: &TurnContext) -> ToolMode {
     })
 }
 
-pub(crate) fn effective_tool_mode(turn_context: &TurnContext) -> ToolMode {
-    let requested_tool_mode = requested_tool_mode(turn_context);
+pub(crate) fn effective_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
+    let requested_tool_mode = requested_tool_mode(turn_context, model_info);
     if !turn_context.code_mode_available
         && requested_tool_mode == ToolMode::CodeMode
         && !turn_context.config.code_mode.disable_in_process_fallback

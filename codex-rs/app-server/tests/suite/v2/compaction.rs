@@ -15,9 +15,13 @@ use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::RawResponseCompletedNotification;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ResponseUsageMetadata;
 use codex_app_server_protocol::ThreadCompactStartParams;
 use codex_app_server_protocol::ThreadCompactStartResponse;
+use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TokenUsageBreakdown;
@@ -244,23 +248,41 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
+    let seed = responses::sse(vec![
+        responses::ev_assistant_message("seed", "FIRST_REPLY"),
+        responses::ev_completed_with_tokens("seed", /*total_tokens*/ 120),
+    ]);
+    let mut completed = responses::ev_completed_with_tokens("r1", /*total_tokens*/ 200);
+    completed["response"]["usage_metadata"] = serde_json::json!({ "amount": "0.125" });
+    completed["response"]["usage"]["extra"] = serde_json::json!({ "label": "example" });
+    let expected_metadata = completed["response"]["usage"].clone();
     let sse = responses::sse(vec![
         responses::ev_assistant_message("m1", "MANUAL_COMPACT_SUMMARY"),
-        responses::ev_completed_with_tokens("r1", /*total_tokens*/ 200),
+        completed,
     ]);
-    responses::mount_sse_sequence(&server, vec![sse]).await;
+    let followup = responses::sse(vec![
+        responses::ev_assistant_message("followup", "FINAL_REPLY"),
+        responses::ev_completed_with_tokens("followup", /*total_tokens*/ 120),
+    ]);
+    let _responses = responses::mount_sse_sequence(&server, vec![seed, sse, followup]).await;
 
     let codex_home = TempDir::new()?;
-    compaction_config(&server.uri(), AUTO_COMPACT_LIMIT).write(codex_home.path())?;
+    let initial_cwd = TempDir::new()?;
+    let updated_cwd = TempDir::new()?;
+    compaction_config(&server.uri(), /*auto_compact_limit*/ 1_000_000).write(codex_home.path())?;
 
+    // Top-level cwd restoration uses host-native paths, not a foreign executor's paths.
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .without_auto_env()
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
 
     let thread_req = mcp
-        .send_thread_start_request_with_auto_env(ThreadStartParams {
+        .send_thread_start_request(ThreadStartParams {
             model: Some("mock-model".to_string()),
+            cwd: Some(initial_cwd.path().to_string_lossy().into_owned()),
+            history_mode: Some(ThreadHistoryMode::Paginated),
             experimental_raw_events: true,
             ..Default::default()
         })
@@ -268,6 +290,21 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
     let ThreadStartResponse { thread, .. } =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(thread_req)).await??;
     let thread_id = thread.id;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread_id.clone(),
+            cwd: Some(updated_cwd.path().to_path_buf()),
+            input: vec![V2UserInput::Text {
+                text: "seed history".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??;
+    mcp.clear_message_buffer();
+
     let compact_id = mcp
         .send_thread_compact_start_request(ThreadCompactStartParams {
             thread_id: thread_id.clone(),
@@ -283,6 +320,7 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
     )
     .await??;
     let completed = wait_for_context_compaction_completed(&mut mcp).await?;
+    wait_for_turn_completed(&mut mcp, &started.turn_id).await?;
 
     let ThreadItem::ContextCompaction { id: started_id } = started.item else {
         unreachable!("started item should be context compaction");
@@ -297,9 +335,13 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
     assert_eq!(
         raw_completed,
         RawResponseCompletedNotification {
-            thread_id,
+            thread_id: thread_id.clone(),
             turn_id: started.turn_id,
             response_id: "r1".to_string(),
+            usage_metadata: Some(ResponseUsageMetadata {
+                amount: Some("0.125".to_string()),
+                metadata: Some(expected_metadata),
+            }),
             usage: Some(TokenUsageBreakdown {
                 total_tokens: 200,
                 input_tokens: 200,
@@ -310,6 +352,27 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
             }),
         }
     );
+
+    // A completed turn after compaction permits bounded replay. Neither this turn nor
+    // resume resends settings, so restoring the updated cwd depends on the checkpoint.
+    send_turn_and_wait(&mut mcp, &thread_id, "continue").await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.shutdown_gracefully()).await??;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id,
+            exclude_turns: true,
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse { cwd, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
+    assert_eq!(cwd.as_path(), updated_cwd.path());
 
     Ok(())
 }

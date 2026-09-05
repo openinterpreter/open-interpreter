@@ -16,6 +16,10 @@ use codex_exec_server::WalkEntry;
 use codex_exec_server::WalkEntryKind;
 use codex_exec_server::WalkOptions;
 use codex_exec_server::WalkOutcome;
+use codex_exec_server::WriteFileOptions;
+use codex_file_system::MAX_WALK_DEPTH;
+use codex_file_system::MAX_WALK_DIRECTORIES;
+use codex_file_system::MAX_WALK_ENTRIES;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
@@ -31,6 +35,8 @@ use test_case::test_case;
 use super::support::FileSystemImplementation;
 use super::support::absolute_path;
 use super::support::create_file_system_context;
+#[cfg(windows)]
+use super::support::is_unsupported_restricted_token_host;
 use super::support::read_only_sandbox;
 use super::support::workspace_write_sandbox;
 
@@ -78,6 +84,7 @@ async fn file_system_get_metadata_reports_files_and_directories(
     let file_metadata = file_system
         .get_metadata(
             &PathUri::from_host_native_path(&file_path)?,
+            Default::default(),
             /*sandbox*/ None,
         )
         .await
@@ -98,6 +105,7 @@ async fn file_system_get_metadata_reports_files_and_directories(
     let directory_metadata = file_system
         .get_metadata(
             &PathUri::from_host_native_path(&directory_path)?,
+            Default::default(),
             /*sandbox*/ None,
         )
         .await
@@ -118,51 +126,92 @@ async fn file_system_get_metadata_reports_files_and_directories(
     Ok(())
 }
 
-#[test_case(FileSystemImplementation::Local ; "local")]
-#[test_case(FileSystemImplementation::Remote ; "remote")]
+#[test_case(FileSystemImplementation::Local, true, false ; "local_follow")]
+#[test_case(FileSystemImplementation::Local, false, false ; "local_no_follow")]
+#[test_case(FileSystemImplementation::Remote, true, false ; "remote_follow")]
+#[test_case(FileSystemImplementation::Remote, false, false ; "remote_no_follow")]
+#[cfg_attr(any(target_os = "linux", windows), test_case(FileSystemImplementation::Local, false, true ; "local_sandboxed_no_follow"))]
+#[cfg_attr(any(target_os = "linux", windows), test_case(FileSystemImplementation::Remote, false, true ; "remote_sandboxed_no_follow"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn file_system_create_directory_creates_nested_directories(
     implementation: FileSystemImplementation,
+    follow_symlinks: bool,
+    sandboxed: bool,
 ) -> Result<()> {
     let context = create_file_system_context(implementation).await?;
     let file_system = context.file_system;
 
     let tmp = TempDir::new()?;
-    let nested_dir = tmp.path().join("source").join("nested");
+    let root = tmp.path().canonicalize()?;
+    let nested_dir = root.join("source").join("nested");
+    let sandbox = sandboxed.then(|| workspace_write_sandbox(root));
 
-    file_system
+    let result = file_system
         .create_directory(
             &PathUri::from_host_native_path(&nested_dir)?,
-            CreateDirectoryOptions { recursive: true },
-            /*sandbox*/ None,
+            CreateDirectoryOptions {
+                recursive: true,
+                follow_symlinks,
+            },
+            sandbox.as_ref(),
         )
-        .await
-        .with_context(|| format!("mode={implementation}"))?;
+        .await;
+    #[cfg(windows)]
+    if is_unsupported_restricted_token_host(&result) {
+        return Ok(());
+    }
+    result.with_context(|| format!("mode={implementation}, sandboxed={sandboxed}"))?;
     assert!(nested_dir.is_dir());
 
     Ok(())
 }
 
-#[test_case(FileSystemImplementation::Local ; "local")]
-#[test_case(FileSystemImplementation::Remote ; "remote")]
+#[test_case(FileSystemImplementation::Local, true, false ; "local_follow")]
+#[test_case(FileSystemImplementation::Local, false, false ; "local_no_follow")]
+#[test_case(FileSystemImplementation::Remote, true, false ; "remote_follow")]
+#[test_case(FileSystemImplementation::Remote, false, false ; "remote_no_follow")]
+#[cfg_attr(any(target_os = "linux", windows), test_case(FileSystemImplementation::Local, false, true ; "local_sandboxed_no_follow"))]
+#[cfg_attr(any(target_os = "linux", windows), test_case(FileSystemImplementation::Remote, false, true ; "remote_sandboxed_no_follow"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn file_system_write_file_writes_bytes(
     implementation: FileSystemImplementation,
+    follow_symlinks: bool,
+    sandboxed: bool,
 ) -> Result<()> {
     let context = create_file_system_context(implementation).await?;
     let file_system = context.file_system;
 
     let tmp = TempDir::new()?;
-    let file_path = tmp.path().join("note.txt");
-    file_system
+    let root = tmp.path().canonicalize()?;
+    let file_path = root.join("note.txt");
+    let sandbox = sandboxed.then(|| workspace_write_sandbox(root.clone()));
+    let result = file_system
         .write_file(
             &PathUri::from_host_native_path(&file_path)?,
             b"hello from trait".to_vec(),
-            /*sandbox*/ None,
+            WriteFileOptions { follow_symlinks },
+            sandbox.as_ref(),
+        )
+        .await;
+    #[cfg(windows)]
+    if is_unsupported_restricted_token_host(&result) {
+        return Ok(());
+    }
+    result.with_context(|| format!("mode={implementation}, sandboxed={sandboxed}"))?;
+    assert_eq!(std::fs::read(file_path)?, b"hello from trait");
+
+    let file_path = root.join("existing.txt");
+    std::fs::write(&file_path, b"before")?;
+    file_system
+        .write_file(
+            &PathUri::from_host_native_path(&file_path)?,
+            b"after".to_vec(),
+            WriteFileOptions { follow_symlinks },
+            sandbox.as_ref(),
         )
         .await
-        .with_context(|| format!("mode={implementation}"))?;
-    assert_eq!(std::fs::read(file_path)?, b"hello from trait");
+        .with_context(|| format!("mode={implementation}, sandboxed={sandboxed}"))?;
+    assert_eq!(std::fs::read(file_path)?, b"after");
 
     Ok(())
 }
@@ -206,6 +255,7 @@ async fn file_system_read_file_returns_bytes(
     let contents = file_system
         .read_file(
             &PathUri::from_host_native_path(&file_path)?,
+            Default::default(),
             /*sandbox*/ None,
         )
         .await
@@ -274,6 +324,7 @@ async fn file_system_read_file_text_returns_string(
     let contents = file_system
         .read_file_text(
             &PathUri::from_host_native_path(&file_path)?,
+            Default::default(),
             /*sandbox*/ None,
         )
         .await
@@ -525,6 +576,89 @@ async fn file_system_walk_returns_a_bounded_tree(
 #[test_case(FileSystemImplementation::Local ; "local")]
 #[test_case(FileSystemImplementation::Remote ; "remote")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_system_walk_handles_invalid_roots_and_limits(
+    implementation: FileSystemImplementation,
+) -> Result<()> {
+    let context = create_file_system_context(implementation).await?;
+    let file_system = context.file_system;
+    let tmp = TempDir::new()?;
+    let file_path = tmp.path().join("file.txt");
+    std::fs::write(&file_path, "contents")?;
+    let missing = PathUri::from_host_native_path(tmp.path().join("missing"))?;
+    let options = WalkOptions {
+        max_depth: 8,
+        max_directories: 100,
+        max_entries: 100,
+        follow_directory_symlinks: false,
+        prune_hidden_directories: false,
+    };
+
+    let outcome = file_system
+        .walk(
+            &PathUri::from_host_native_path(file_path)?,
+            options,
+            /*sandbox*/ None,
+        )
+        .await
+        .with_context(|| format!("mode={implementation}"))?;
+    assert_eq!(outcome, WalkOutcome::default());
+
+    let error = file_system
+        .walk(&missing, options, /*sandbox*/ None)
+        .await
+        .expect_err("a missing root must fail");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+
+    let zero_limit_message = "filesystem walk limits must be greater than zero";
+    let excessive_limit_message = format!(
+        "filesystem walk limits exceed maximums: depth={MAX_WALK_DEPTH}, directories={MAX_WALK_DIRECTORIES}, entries={MAX_WALK_ENTRIES}"
+    );
+    for (max_depth, max_directories, max_entries, message) in [
+        (8, 0, 100, zero_limit_message),
+        (8, 100, 0, zero_limit_message),
+        (
+            MAX_WALK_DEPTH + 1,
+            100,
+            100,
+            excessive_limit_message.as_str(),
+        ),
+        (
+            8,
+            MAX_WALK_DIRECTORIES + 1,
+            100,
+            excessive_limit_message.as_str(),
+        ),
+        (
+            8,
+            100,
+            MAX_WALK_ENTRIES + 1,
+            excessive_limit_message.as_str(),
+        ),
+    ] {
+        let options = WalkOptions {
+            max_depth,
+            max_directories,
+            max_entries,
+            ..options
+        };
+        // Invalid limits take precedence over the missing root.
+        let error = file_system
+            .walk(&missing, options, /*sandbox*/ None)
+            .await
+            .expect_err("invalid walk limits must fail");
+        assert_eq!(
+            (error.kind(), error.to_string()),
+            (std::io::ErrorKind::InvalidInput, message.to_owned()),
+            "mode={implementation}, options={options:?}",
+        );
+    }
+
+    Ok(())
+}
+
+#[test_case(FileSystemImplementation::Local ; "local")]
+#[test_case(FileSystemImplementation::Remote ; "remote")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn file_system_walk_honors_read_sandbox(
     implementation: FileSystemImplementation,
 ) -> Result<()> {
@@ -586,11 +720,63 @@ async fn file_system_remove_removes_directory(
             RemoveOptions {
                 recursive: true,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
         .await
         .with_context(|| format!("mode={implementation}"))?;
+    assert!(!directory_path.exists());
+
+    Ok(())
+}
+
+#[test_case(FileSystemImplementation::Local, false ; "local")]
+#[test_case(FileSystemImplementation::Remote, false ; "remote")]
+#[cfg_attr(any(target_os = "linux", windows), test_case(FileSystemImplementation::Local, true ; "local_sandboxed"))]
+#[cfg_attr(any(target_os = "linux", windows), test_case(FileSystemImplementation::Remote, true ; "remote_sandboxed"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_system_remove_no_follow_removes_file_and_empty_directory(
+    implementation: FileSystemImplementation,
+    sandboxed: bool,
+) -> Result<()> {
+    let context = create_file_system_context(implementation).await?;
+    let file_system = context.file_system;
+    let tmp = TempDir::new()?;
+    let root = tmp.path().canonicalize()?;
+    let sandbox = sandboxed.then(|| workspace_write_sandbox(root.clone()));
+    let options = RemoveOptions {
+        recursive: false,
+        force: false,
+        follow_symlinks: false,
+    };
+
+    let file_path = root.join("remove-me.txt");
+    std::fs::write(&file_path, b"remove")?;
+    let result = file_system
+        .remove(
+            &PathUri::from_host_native_path(&file_path)?,
+            options,
+            sandbox.as_ref(),
+        )
+        .await;
+    #[cfg(windows)]
+    if is_unsupported_restricted_token_host(&result) {
+        return Ok(());
+    }
+    result.with_context(|| format!("mode={implementation}, sandboxed={sandboxed}"))?;
+    assert!(!file_path.exists());
+
+    let directory_path = root.join("remove-me");
+    std::fs::create_dir(&directory_path)?;
+    file_system
+        .remove(
+            &PathUri::from_host_native_path(&directory_path)?,
+            options,
+            sandbox.as_ref(),
+        )
+        .await
+        .with_context(|| format!("mode={implementation}, sandboxed={sandboxed}"))?;
     assert!(!directory_path.exists());
 
     Ok(())
@@ -612,6 +798,7 @@ async fn file_system_write_file_reports_missing_parent(
         .write_file(
             &PathUri::from_host_native_path(&missing_parent_path)?,
             b"hello from trait".to_vec(),
+            Default::default(),
             /*sandbox*/ None,
         )
         .await
@@ -677,7 +864,11 @@ async fn file_system_sandboxed_metadata_and_read_allow_readable_root(
     let sandbox = read_only_sandbox(allowed_dir);
 
     let metadata = file_system
-        .get_metadata(&PathUri::from_host_native_path(&file_path)?, Some(&sandbox))
+        .get_metadata(
+            &PathUri::from_host_native_path(&file_path)?,
+            Default::default(),
+            Some(&sandbox),
+        )
         .await
         .with_context(|| format!("mode={implementation}"))?;
     assert_eq!(
@@ -693,7 +884,11 @@ async fn file_system_sandboxed_metadata_and_read_allow_readable_root(
     );
 
     let contents = file_system
-        .read_file(&PathUri::from_host_native_path(&file_path)?, Some(&sandbox))
+        .read_file(
+            &PathUri::from_host_native_path(&file_path)?,
+            Default::default(),
+            Some(&sandbox),
+        )
         .await
         .with_context(|| format!("mode={implementation}"))?;
     assert_eq!(contents, b"sandboxed hello");
@@ -743,6 +938,7 @@ async fn sandboxed_file_operations_cannot_read_helper_siblings() -> Result<()> {
     let allowed_contents = file_system
         .read_file(
             &PathUri::from_host_native_path(&allowed_file)?,
+            Default::default(),
             Some(&sandbox),
         )
         .await?;
@@ -766,7 +962,10 @@ async fn sandboxed_file_operations_cannot_read_helper_siblings() -> Result<()> {
     for path in [sibling, escaping_link] {
         let path = PathUri::from_host_native_path(path)?;
         assert!(
-            file_system.read_file(&path, Some(&sandbox)).await.is_err(),
+            file_system
+                .read_file(&path, Default::default(), Some(&sandbox))
+                .await
+                .is_err(),
             "sandboxed read unexpectedly accessed helper sibling {path}"
         );
         assert!(
@@ -901,6 +1100,7 @@ async fn file_system_sandboxed_write_allows_additional_write_root(
         .write_file(
             &PathUri::from_host_native_path(&file_path)?,
             b"created".to_vec(),
+            Default::default(),
             Some(&sandbox),
         )
         .await

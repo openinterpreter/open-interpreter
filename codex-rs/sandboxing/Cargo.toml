@@ -12,6 +12,10 @@ doctest = false
 [lints]
 workspace = true
 
+# This direct dependency pins MXC's transitive ETW dependency for Windows GNU linking.
+[package.metadata.cargo-shear]
+ignored = ["tracelogging"]
+
 [dependencies]
 anyhow = { workspace = true }
 codex-network-proxy = { workspace = true }
@@ -24,15 +28,20 @@ dunce = { workspace = true }
 libc = { workspace = true }
 serde_json = { workspace = true }
 regex-lite = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
 tracing = { workspace = true, features = ["log"] }
 url = { workspace = true }
 which = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
+appcontainer_common = { workspace = true }
+codex-otel = { workspace = true }
 codex-utils-home-dir = { workspace = true }
+# 1.2.4 imports OneCore_apiset, which the GNU Windows toolchain does not ship.
+tracelogging = "=1.2.3"
 
 [dev-dependencies]
 anyhow = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }

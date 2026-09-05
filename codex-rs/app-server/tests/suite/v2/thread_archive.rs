@@ -1,8 +1,10 @@
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
+use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_rollout;
 use app_test_support::create_mock_responses_server_repeating_assistant;
+use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::RequestId;
@@ -10,23 +12,29 @@ use codex_app_server_protocol::ThreadArchiveParams;
 use codex_app_server_protocol::ThreadArchiveResponse;
 use codex_app_server_protocol::ThreadArchivedNotification;
 use codex_app_server_protocol::ThreadHistoryMode;
+use codex_app_server_protocol::ThreadLoadedListParams;
+use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ThreadUnarchiveParams;
 use codex_app_server_protocol::ThreadUnarchiveResponse;
+use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
 use codex_core::ARCHIVED_SESSIONS_SUBDIR;
 use codex_core::find_archived_thread_path_by_id_str;
 use codex_core::find_thread_path_by_id_str;
+use codex_features::Feature;
 use codex_protocol::ThreadId;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_state::StateRuntime;
 use codex_utils_absolute_path::test_support::PathExt;
+use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -38,6 +46,12 @@ use super::analytics::mount_analytics_capture;
 use super::analytics::wait_for_matching_analytics_event;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn body_contains(request: &wiremock::Request, text: &str) -> bool {
+    String::from_utf8(request.body.clone())
+        .ok()
+        .is_some_and(|body| body.contains(text))
+}
 
 #[tokio::test]
 async fn thread_archive_rejects_owned_unmaterialized_paginated_descendant() -> Result<()> {
@@ -109,20 +123,197 @@ async fn thread_archive_rejects_owned_unmaterialized_paginated_descendant() -> R
 }
 
 #[tokio::test]
-async fn thread_archive_requires_materialized_rollout() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
+async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
+    const RESUME_PROMPT: &str = "resume the child";
+    const RESUME_CALL_ID: &str = "resume-call-1";
+
+    let server = responses::start_mock_server().await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri())
+        .enable_feature(Feature::Collab)
+        .write(codex_home.path())?;
+    let parent_id = create_fake_paginated_rollout(
+        codex_home.path(),
+        "2025-01-01T00-00-00",
+        "2025-01-01T00:00:00Z",
+        "parent",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let child_id = create_fake_paginated_rollout(
+        codex_home.path(),
+        "2025-01-01T00-01-00",
+        "2025-01-01T00:01:00Z",
+        "child",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let parent_thread_id = ThreadId::from_string(&parent_id)?;
+    let child_thread_id = ThreadId::from_string(&child_id)?;
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".into(),
+    )
+    .await?;
+    state_db
+        .upsert_thread_spawn_edge(
+            parent_thread_id,
+            child_thread_id,
+            DirectionalThreadSpawnEdgeStatus::Closed,
+        )
+        .await?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
 
+    let _: ThreadArchiveResponse = mcp
+        .request(|request_id| ClientRequest::ThreadArchive {
+            request_id,
+            params: ThreadArchiveParams {
+                thread_id: parent_id.clone(),
+            },
+        })
+        .await?;
+    for _ in 0..2 {
+        let _: ThreadArchivedNotification = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_notification("thread/archived"),
+        )
+        .await??;
+    }
+
+    let _: ThreadUnarchiveResponse = mcp
+        .request(|request_id| ClientRequest::ThreadUnarchive {
+            request_id,
+            params: ThreadUnarchiveParams {
+                thread_id: parent_id.clone(),
+            },
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("thread/unarchived"),
+    )
+    .await??;
+    let _: ThreadResumeResponse = mcp
+        .request(|request_id| ClientRequest::ThreadResume {
+            request_id,
+            params: ThreadResumeParams {
+                thread_id: parent_id.clone(),
+                model: Some("gpt-5.4".to_string()),
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let resume_args = serde_json::to_string(&json!({ "id": child_thread_id }))?;
+    let _parent_resume = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, RESUME_PROMPT) && !body_contains(request, RESUME_CALL_ID)
+        },
+        responses::sse(vec![
+            responses::ev_response_created("resp-parent-resume"),
+            responses::ev_function_call_with_namespace(
+                RESUME_CALL_ID,
+                "multi_agent_v1",
+                "resume_agent",
+                &resume_args,
+            ),
+            responses::ev_completed("resp-parent-resume"),
+        ]),
+    )
+    .await;
+    let _parent_resume_follow_up = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, RESUME_CALL_ID),
+        responses::sse(vec![
+            responses::ev_response_created("resp-parent-resume-follow-up"),
+            responses::ev_assistant_message("msg-parent-resume", "parent done"),
+            responses::ev_completed("resp-parent-resume-follow-up"),
+        ]),
+    )
+    .await;
+
+    let _: TurnStartResponse = mcp
+        .request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
+                thread_id: parent_id.clone(),
+                input: vec![UserInput::Text {
+                    text: RESUME_PROMPT.to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        })
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let completed: TurnCompletedNotification =
+                mcp.read_notification("turn/completed").await?;
+            if completed.thread_id == parent_id {
+                return Ok::<(), anyhow::Error>(());
+            }
+        }
+    })
+    .await??;
+
+    let ThreadLoadedListResponse { data, .. } = mcp
+        .request(|request_id| ClientRequest::ThreadLoadedList {
+            request_id,
+            params: ThreadLoadedListParams::default(),
+        })
+        .await?;
+    assert!(data.contains(&child_id));
+
+    let _: ThreadArchiveResponse = mcp
+        .request(|request_id| ClientRequest::ThreadArchive {
+            request_id,
+            params: ThreadArchiveParams {
+                thread_id: parent_id,
+            },
+        })
+        .await?;
+    let ThreadLoadedListResponse { data, .. } = mcp
+        .request(|request_id| ClientRequest::ThreadLoadedList {
+            request_id,
+            params: ThreadLoadedListParams::default(),
+        })
+        .await?;
+    assert_eq!(data, Vec::<String>::new());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_archive_requires_materialized_rollout() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .with_root_config(&format!(r#"chatgpt_base_url = "{}""#, server.uri()))
+        .write(codex_home.path())?;
+    mount_analytics_capture(&server, codex_home.path()).await?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    mcp.initialize_with_client_info(ClientInfo {
+        name: "codex_work_desktop".to_string(),
+        title: None,
+        version: "0.1.0".to_string(),
+    })
+    .await?;
+
     // Start a thread.
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
             model: Some("mock-model".to_string()),
+            thread_source: Some(ThreadSource::User),
+            service_name: Some("codex_work_desktop".to_string()),
             ..Default::default()
         })
         .await?;
@@ -208,6 +399,40 @@ async fn thread_archive_requires_materialized_rollout() -> Result<()> {
     )
     .await??;
     assert_eq!(archived_notification.thread_id, thread.id);
+
+    let event = wait_for_matching_analytics_event(&server, DEFAULT_READ_TIMEOUT, |event| {
+        event["event_type"] == "codex_thread_archive_event"
+            && event["event_params"]["thread_id"] == thread.id
+    })
+    .await?;
+    let occurred_at_ms = event["event_params"]["occurred_at_ms"]
+        .as_u64()
+        .expect("thread archive analytics must include its producer timestamp");
+    assert_eq!(
+        event,
+        json!({
+            "event_type": "codex_thread_archive_event",
+            "event_params": {
+                "thread_id": thread.id,
+                "action": "archived",
+                "occurred_at_ms": occurred_at_ms,
+                "app_server_client": {
+                    "product_client_id": "codex_work_desktop",
+                    "client_name": "codex_work_desktop",
+                    "client_version": "0.1.0",
+                    "rpc_transport": "stdio",
+                    "experimental_api_enabled": true,
+                },
+                "runtime": {
+                    "codex_rs_version": env!("CARGO_PKG_VERSION"),
+                    "runtime_os": std::env::consts::OS,
+                    "runtime_os_version": event["event_params"]["runtime"]["runtime_os_version"],
+                    "runtime_arch": std::env::consts::ARCH,
+                },
+                "thread_source": "user",
+            },
+        })
+    );
 
     // Verify file moved.
     let archived_directory = codex_home.path().join(ARCHIVED_SESSIONS_SUBDIR);

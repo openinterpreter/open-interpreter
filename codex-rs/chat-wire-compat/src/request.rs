@@ -271,11 +271,11 @@ pub(crate) fn convert_request(
                     &mut pending_assistant_content,
                     &mut pending_tool_calls,
                 );
-                push_tool_output(
+                push_function_call_output(
                     &mut messages,
                     &mut deferred_messages,
                     &mut pending_tool_call_ids,
-                    call_id,
+                    call_id.as_deref(),
                     tool_output_text(output),
                 );
             }
@@ -402,6 +402,32 @@ fn push_tool_output(
     pending_tool_call_ids.retain(|pending_call_id| pending_call_id != call_id);
     if pending_tool_call_ids.is_empty() {
         messages.append(deferred_messages);
+    }
+}
+
+fn push_function_call_output(
+    messages: &mut Vec<ChatMessage>,
+    deferred_messages: &mut Vec<ChatMessage>,
+    pending_tool_call_ids: &mut Vec<String>,
+    call_id: Option<&str>,
+    output: String,
+) {
+    if let Some(call_id) = call_id {
+        push_tool_output(
+            messages,
+            deferred_messages,
+            pending_tool_call_ids,
+            call_id,
+            output,
+        );
+    } else {
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: Some(json!(output)),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
     }
 }
 
@@ -897,6 +923,30 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
+    fn missing_function_call_id_is_preserved_as_user_context() {
+        let mut messages = Vec::new();
+        let mut deferred_messages = Vec::new();
+        let mut pending_tool_call_ids = vec!["call-1".to_string()];
+
+        push_function_call_output(
+            &mut messages,
+            &mut deferred_messages,
+            &mut pending_tool_call_ids,
+            None,
+            "untracked external context".to_string(),
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(
+            messages[0].content,
+            Some(json!("untracked external context"))
+        );
+        assert_eq!(messages[0].tool_call_id, None);
+        assert_eq!(pending_tool_call_ids, vec!["call-1"]);
+    }
+
+    #[test]
     fn convert_request_maps_messages_and_tools() {
         let request = ResponsesApiRequest {
             model: "gpt-5.2-codex".to_string(),
@@ -926,6 +976,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             client_metadata: None,
+            access_programs: None,
             text: None,
         };
 
@@ -967,6 +1018,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             client_metadata: None,
+            access_programs: None,
             text: None,
         };
 
@@ -1012,7 +1064,9 @@ mod tests {
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "call-1".to_string(),
+                    call_id: Some("call-1".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text("file.txt".to_string()),
                     internal_chat_message_metadata_passthrough: None,
                 },
@@ -1033,6 +1087,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             client_metadata: None,
+            access_programs: None,
             text: None,
         };
 
@@ -1094,6 +1149,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             client_metadata: None,
+            access_programs: None,
             text: None,
         };
 
@@ -1236,6 +1292,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             client_metadata: None,
+            access_programs: None,
             text: None,
         };
 
@@ -1306,19 +1363,25 @@ mod tests {
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "call-1".to_string(),
+                    call_id: Some("call-1".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text("legacy".to_string()),
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "call-2".to_string(),
+                    call_id: Some("call-2".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text("data".to_string()),
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "call-3".to_string(),
+                    call_id: Some("call-3".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text("config".to_string()),
                     internal_chat_message_metadata_passthrough: None,
                 },
@@ -1339,6 +1402,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             client_metadata: None,
+            access_programs: None,
             text: None,
         };
 
@@ -1409,13 +1473,17 @@ mod tests {
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "call-1".to_string(),
+                    call_id: Some("call-1".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text("file.txt".to_string()),
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::FunctionCallOutput {
                     id: None,
-                    call_id: "call-2".to_string(),
+                    call_id: Some("call-2".to_string()),
+                    name: None,
+                    namespace: None,
                     output: FunctionCallOutputPayload::from_text(".git".to_string()),
                     internal_chat_message_metadata_passthrough: None,
                 },
@@ -1436,6 +1504,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             client_metadata: None,
+            access_programs: None,
             text: None,
         };
 
@@ -1495,6 +1564,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             client_metadata: None,
+            access_programs: None,
             text: None,
         };
 
@@ -1548,6 +1618,7 @@ mod tests {
             service_tier: None,
             prompt_cache_key: None,
             client_metadata: None,
+            access_programs: None,
             text: Some(TextControls {
                 verbosity: None,
                 format: Some(TextFormat {

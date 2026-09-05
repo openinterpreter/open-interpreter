@@ -44,6 +44,41 @@ pub fn normalize_base_url(input: &str) -> String {
     base_url
 }
 
+/// Validate the destination before loading saved ChatGPT credentials, including in mock mode:
+/// environment discovery still makes authenticated HTTP requests when the task backend is mocked.
+pub(crate) fn validate_chatgpt_base_url(input: &str) -> anyhow::Result<String> {
+    let invalid_url = || {
+        anyhow::anyhow!(
+            "CODEX_CLOUD_TASKS_BASE_URL must use a trusted HTTPS origin on port 443, without user information, a query, or a fragment; custom backends cannot use saved ChatGPT credentials"
+        )
+    };
+    let uri = input.parse::<http::Uri>().map_err(|_| invalid_url())?;
+    let authority = uri
+        .authority()
+        .ok_or_else(invalid_url)?
+        .as_str()
+        .to_ascii_lowercase();
+    if uri.scheme_str() != Some("https")
+        || !matches!(
+            authority.as_str(),
+            "chatgpt.com"
+                | "chatgpt.com:443"
+                | "chat.openai.com"
+                | "chat.openai.com:443"
+                | "chatgpt-staging.com"
+                | "chatgpt-staging.com:443"
+        )
+        || uri.query().is_some()
+        || input.contains('#')
+    {
+        return Err(invalid_url());
+    }
+    Ok(normalize_base_url(&format!(
+        "https://{authority}{}",
+        uri.path()
+    )))
+}
+
 pub async fn load_auth_manager(
     chatgpt_base_url: Option<String>,
 ) -> (Option<Arc<AuthManager>>, HttpClientFactory) {

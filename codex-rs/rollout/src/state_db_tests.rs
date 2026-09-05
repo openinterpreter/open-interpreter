@@ -84,6 +84,7 @@ async fn list_threads_db_rejects_mismatched_sqlite_config_without_cleanup() -> a
         /*relation_filter*/ None,
         /*archived*/ false,
         /*section*/ None,
+        /*project_id*/ None,
         /*search_term*/ None,
     )
     .await;
@@ -327,6 +328,7 @@ fn write_rollout_with_user_message(
                     session_id: thread_id.into(),
                     id: thread_id,
                     forked_from_id: None,
+                    forked_from_ordinal_exclusive: None,
                     parent_thread_id: None,
                     timestamp: "2026-06-01T14:26:25Z".to_string(),
                     cwd: home.to_path_buf(),

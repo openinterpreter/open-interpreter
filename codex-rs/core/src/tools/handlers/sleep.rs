@@ -73,7 +73,10 @@ impl ToolExecutor<ToolInvocation> for SleepHandler {
         ToolExposure::DirectModelOnly
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move {
             let ToolInvocation {
                 session,
@@ -153,4 +156,8 @@ impl ToolExecutor<ToolInvocation> for SleepHandler {
     }
 }
 
-impl CoreToolRuntime for SleepHandler {}
+impl CoreToolRuntime for SleepHandler {
+    fn is_builtin_control_tool(&self) -> bool {
+        true
+    }
+}

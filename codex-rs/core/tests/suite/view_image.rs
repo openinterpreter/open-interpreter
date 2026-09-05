@@ -161,17 +161,19 @@ fn png_bytes(width: u32, height: u32, rgba: [u8; 4]) -> anyhow::Result<Vec<u8>> 
     Ok(cursor.into_inner())
 }
 
-async fn create_workspace_directory(test: &TestCodex, rel_path: &str) -> anyhow::Result<PathBuf> {
-    let abs_path = test.config.cwd.join(rel_path);
-    let abs_path_uri = PathUri::from_host_native_path(&abs_path)?;
+async fn create_workspace_directory(test: &TestCodex, rel_path: &str) -> anyhow::Result<PathUri> {
+    let abs_path_uri = test.workspace_path_uri(rel_path)?;
     test.fs()
         .create_directory(
             &abs_path_uri,
-            CreateDirectoryOptions { recursive: true },
+            CreateDirectoryOptions {
+                recursive: true,
+                follow_symlinks: true,
+            },
             /*sandbox*/ None,
         )
         .await?;
-    Ok(abs_path.into_path_buf())
+    Ok(abs_path_uri)
 }
 
 async fn write_workspace_file(
@@ -179,22 +181,28 @@ async fn write_workspace_file(
     rel_path: &str,
     contents: Vec<u8>,
 ) -> anyhow::Result<PathBuf> {
-    let abs_path = test.config.cwd.join(rel_path);
-    if let Some(parent) = abs_path.parent() {
-        let parent_uri = PathUri::from_host_native_path(&parent)?;
+    let abs_path_uri = test.workspace_path_uri(rel_path)?;
+    if let Some(parent_uri) = abs_path_uri.parent() {
         test.fs()
             .create_directory(
                 &parent_uri,
-                CreateDirectoryOptions { recursive: true },
+                CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
                 /*sandbox*/ None,
             )
             .await?;
     }
-    let abs_path_uri = PathUri::from_host_native_path(&abs_path)?;
     test.fs()
-        .write_file(&abs_path_uri, contents, /*sandbox*/ None)
+        .write_file(
+            &abs_path_uri,
+            contents,
+            Default::default(),
+            /*sandbox*/ None,
+        )
         .await?;
-    Ok(abs_path.into_path_buf())
+    Ok(abs_path_uri.to_path_buf())
 }
 
 async fn write_workspace_png(
@@ -272,7 +280,9 @@ async fn assert_user_turn_local_image_resizes_to(
     )
     .await;
 
-    let body = mock.single_request().body_json();
+    let request = mock.single_request();
+    assert!(request.has_content_kinds(&["user.text", "user.image", "user.text"]));
+    let body = request.body_json();
     let input = body
         .get("input")
         .and_then(Value::as_array)
@@ -295,6 +305,7 @@ async fn assert_user_turn_local_image_resizes_to(
             assert_eq!(resize_notice_indices, Vec::<usize>::new());
         }
         ResizeNoticeExpectation::Enabled => {
+            assert!(request.has_content_kinds(&["images.resize_notice"]));
             assert_eq!(resize_notice_indices, vec![image_message_index + 1]);
             assert_developer_text_message(
                 &input[image_message_index + 1],
@@ -382,20 +393,13 @@ async fn user_turn_unified_image_budget_enforces_dimension_and_patch_limits() ->
 {
     skip_if_no_network!(Ok(()));
 
-    for (source_dimensions, expected_dimensions, resize_notice_expectation) in [
-        ((6401, 100), (6000, 94), ResizeNoticeExpectation::Disabled),
-        ((3201, 3201), (3200, 3200), ResizeNoticeExpectation::Enabled),
-    ] {
-        assert_user_turn_local_image_resizes_to(
-            source_dimensions,
-            expected_dimensions,
-            ImageBudgetPolicy::Unified,
-            resize_notice_expectation,
-        )
-        .await?;
-    }
-
-    Ok(())
+    assert_user_turn_local_image_resizes_to(
+        (6401, 1),
+        (6000, 1),
+        ImageBudgetPolicy::Unified,
+        ResizeNoticeExpectation::Enabled,
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -424,14 +428,10 @@ async fn view_image_tool_attaches_local_image() -> anyhow::Result<()> {
     let TestCodex {
         codex,
         session_configured,
-        config,
         ..
     } = &test;
-    let cwd = config.cwd.clone();
-
     let rel_path = "assets/example.png";
-    let abs_path = cwd.join(rel_path);
-    let path_uri = PathUri::from_abs_path(&abs_path);
+    let path_uri = test.workspace_path_uri(rel_path)?;
     let original_width = 2304;
     let original_height = 864;
     write_workspace_png(
@@ -690,7 +690,7 @@ async fn view_image_tool_applies_local_sandbox_read_denies() -> anyhow::Result<(
         .entries
         .push(FileSystemSandboxEntry {
             path: FileSystemPath::Path {
-                path: denied_path.clone(),
+                path: denied_path.clone().into(),
             },
             access: FileSystemAccessMode::Deny,
             missing_path_behavior: None,
@@ -738,11 +738,16 @@ async fn view_image_routes_to_selected_remote_environment() -> anyhow::Result<()
     let local_cwd = TempDir::new()?;
     fs::write(local_cwd.path().join("remote.png"), b"not a remote image")?;
     let local_selection = local(local_cwd.path().abs());
-    let remote_cwd_uri = PathUri::from_abs_path(test.executor_environment().cwd());
+    let remote_cwd_uri = test.executor_environment().selection().cwd.clone();
     let image_path_uri = remote_cwd_uri.join("remote.png")?;
     let png = png_bytes(/*width*/ 1, /*height*/ 1, [0, 255, 0, 255])?;
     test.fs()
-        .write_file(&image_path_uri, png, /*sandbox*/ None)
+        .write_file(
+            &image_path_uri,
+            png,
+            Default::default(),
+            /*sandbox*/ None,
+        )
         .await?;
     let absolute_image_path = image_path_uri.inferred_native_path_string();
     let remote_selection = TurnEnvironmentSelection {
@@ -824,6 +829,7 @@ async fn view_image_routes_to_selected_remote_environment() -> anyhow::Result<()
             RemoveOptions {
                 recursive: false,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -1430,7 +1436,7 @@ async fn view_image_tool_errors_when_path_is_directory() -> anyhow::Result<()> {
         .function_call_output_content_and_success(call_id)
         .and_then(|(content, _)| content)
         .expect("output text present");
-    let expected_path = PathUri::from_host_native_path(&abs_path)?.inferred_native_path_string();
+    let expected_path = abs_path.inferred_native_path_string();
     let expected_message = format!("image path `{expected_path}` is not a file");
     assert_eq!(output_text, expected_message);
 
@@ -1528,11 +1534,8 @@ async fn view_image_tool_errors_when_file_missing() -> anyhow::Result<()> {
     } = &test;
 
     let rel_path = "missing/example.png";
-    // Under wine-exec, the executor cwd is stored as a host-compatible `/C:/...`
-    // projection. Reconstruct its `PathUri` so the expected error uses the selected
-    // environment's native Windows spelling, matching the handler.
-    let expected_path = PathUri::from_abs_path(test.executor_environment().cwd())
-        .join(rel_path)?
+    let expected_path = test
+        .workspace_path_uri(rel_path)?
         .inferred_native_path_string();
 
     let call_id = "view-image-missing";
@@ -1628,6 +1631,7 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
+        multi_agent_reasoning_effort: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),

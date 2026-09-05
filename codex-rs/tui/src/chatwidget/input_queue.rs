@@ -42,6 +42,9 @@ pub(super) struct InputQueueState {
     /// fresh user turn instead of restoring them into the composer.
     pub(super) submit_pending_steers_after_interrupt: bool,
     pub(super) suppress_queue_autosend: bool,
+    /// Hold submissions while a usage failure or backend-directed model fallback is resolved.
+    pub(super) rate_limit_recovery_pending: bool,
+    pub(super) recovered_queue: bool,
 }
 
 impl InputQueueState {
@@ -50,6 +53,7 @@ impl InputQueueState {
     }
 
     pub(super) fn clear(&mut self) {
+        self.recovered_queue = false;
         self.queued_user_messages.clear();
         self.queued_user_message_history_records.clear();
         self.user_turn_pending_start = false;
@@ -57,6 +61,7 @@ impl InputQueueState {
         self.rejected_steer_history_records.clear();
         self.pending_steers.clear();
         self.submit_pending_steers_after_interrupt = false;
+        self.rate_limit_recovery_pending = false;
     }
 
     pub(super) fn preview(&self) -> PendingInputPreview {

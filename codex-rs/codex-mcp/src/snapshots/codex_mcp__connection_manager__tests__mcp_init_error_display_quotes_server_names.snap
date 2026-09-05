@@ -1,0 +1,19 @@
+---
+source: codex-mcp/src/connection_manager_tests.rs
+expression: "displays.join(\"\\n\\n\")"
+---
+MCP client for `npm:@scope/package.name` timed out after 30 seconds. Add or adjust `startup_timeout_sec` in your config.toml:
+[mcp_servers."npm:@scope/package.name"]
+startup_timeout_sec = XX
+
+GitHub MCP does not support OAuth. Log in by adding a personal access token (https://github.com/settings/personal-access-tokens) to your environment and config.toml:
+[mcp_servers."npm:@scope/package.name"]
+bearer_token_env_var = CODEX_GITHUB_PERSONAL_ACCESS_TOKEN
+
+MCP client for `server.name` timed out after 30 seconds. Add or adjust `startup_timeout_sec` in your config.toml:
+[mcp_servers."server.name"]
+startup_timeout_sec = XX
+
+GitHub MCP does not support OAuth. Log in by adding a personal access token (https://github.com/settings/personal-access-tokens) to your environment and config.toml:
+[mcp_servers."server.name"]
+bearer_token_env_var = CODEX_GITHUB_PERSONAL_ACCESS_TOKEN

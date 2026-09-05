@@ -20,7 +20,9 @@ pub struct ThreadStateAuditRow {
 pub async fn read_thread_state_audit_rows(
     sqlite: &SqliteConfig,
 ) -> Result<Vec<ThreadStateAuditRow>> {
-    let pool = sqlite.open_read_only_pool(&sqlite.state_db_path()).await?;
+    let pool = sqlite
+        .open_read_only_pool(&sqlite.state_db_path(), /*busy_timeout*/ None)
+        .await?;
     let rows = sqlx::query(
         r#"
 SELECT id, rollout_path, archived, source, model_provider

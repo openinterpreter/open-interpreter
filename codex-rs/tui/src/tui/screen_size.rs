@@ -22,7 +22,7 @@ impl Tui {
     pub(crate) fn screen_size_for_event(&mut self, event: &TuiEvent) -> io::Result<Size> {
         if matches!(event, TuiEvent::Resize(_)) {
             self.schedule_screen_size_recheck(TRANSCRIPT_REFLOW_DEBOUNCE);
-        } else if matches!(event, TuiEvent::Draw)
+        } else if matches!(event, TuiEvent::Draw | TuiEvent::FocusGained)
             && let Some(deadline) = self.screen_size.pending_recheck_at
         {
             let now = Instant::now();
@@ -44,11 +44,16 @@ impl Tui {
                 self.screen_size.deferred_size = None;
                 self.terminal.size()?
             }
-            TuiEvent::Draw => self.screen_size.deferred_size.take().unwrap_or(cached),
-            TuiEvent::Key(_) | TuiEvent::Paste(_) => cached,
+            TuiEvent::Draw | TuiEvent::FocusGained => {
+                self.screen_size.deferred_size.take().unwrap_or(cached)
+            }
+            TuiEvent::Key(_) | TuiEvent::Paste(_) | TuiEvent::FocusLost => cached,
         };
-        self.screen_size.pending_draw_size =
-            (!matches!(event, TuiEvent::Key(_) | TuiEvent::Paste(_))).then_some(size);
+        self.screen_size.pending_draw_size = (!matches!(
+            event,
+            TuiEvent::Key(_) | TuiEvent::Paste(_) | TuiEvent::FocusLost
+        ))
+        .then_some(size);
         Ok(size)
     }
 

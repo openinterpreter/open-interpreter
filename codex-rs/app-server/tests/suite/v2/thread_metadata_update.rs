@@ -9,6 +9,7 @@ use codex_app_server_protocol::GitInfo;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadMetadataGitInfoUpdateParams;
@@ -30,7 +31,9 @@ use codex_app_server_protocol::ThreadStatus;
 use codex_core::ARCHIVED_SESSIONS_SUBDIR;
 use codex_features::Feature;
 use codex_git_utils::GitSha;
+use codex_protocol::SanitizedGitUrl;
 use codex_protocol::ThreadId;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::GitInfo as RolloutGitInfo;
 use codex_rollout::state_db::reconcile_rollout;
 use codex_state::PINNED_THREAD_SECTION_ID;
@@ -39,6 +42,7 @@ use codex_state::StateRuntime;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
+use serde_json::json;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -47,6 +51,94 @@ use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
+
+#[tokio::test]
+async fn thread_section_move_pins_before_first_turn() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let start_id = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let started: ThreadStartResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
+    let thread_id = started.thread.id;
+    assert_eq!(started.thread.preview, "");
+
+    let move_id = mcp
+        .send_thread_section_move_request(ThreadSectionMoveParams {
+            thread_id: thread_id.clone(),
+            section_id: Some(PINNED_THREAD_SECTION_ID.to_string()),
+            before_thread_id: None,
+        })
+        .await?;
+    let _: ThreadSectionMoveResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(move_id)).await??;
+
+    let list_params = ThreadListParams {
+        cursor: None,
+        limit: Some(100),
+        sort_key: None,
+        sort_direction: None,
+        model_providers: None,
+        source_kinds: None,
+        archived: None,
+        section_id: Some(Some(PINNED_THREAD_SECTION_ID.to_string())),
+        project_id: None,
+        cwd: None,
+        use_state_db_only: true,
+        search_term: None,
+        parent_thread_id: None,
+        ancestor_thread_id: None,
+    };
+    for sort_key in [ThreadSortKey::SectionPosition, ThreadSortKey::RecencyAt] {
+        let list_id = mcp
+            .send_thread_list_request(ThreadListParams {
+                sort_key: Some(sort_key),
+                ..list_params.clone()
+            })
+            .await?;
+        let listed: ThreadListResponse =
+            timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(list_id)).await??;
+        assert_eq!(
+            listed
+                .data
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![thread_id.as_str()]
+        );
+    }
+
+    let move_id = mcp
+        .send_thread_section_move_request(ThreadSectionMoveParams {
+            thread_id,
+            section_id: None,
+            before_thread_id: None,
+        })
+        .await?;
+    let _: ThreadSectionMoveResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(move_id)).await??;
+    let list_id = mcp
+        .send_thread_list_request(ThreadListParams {
+            section_id: None,
+            ..list_params
+        })
+        .await?;
+    let listed: ThreadListResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(list_id)).await??;
+    assert_eq!(listed.data, vec![]);
+    Ok(())
+}
 
 #[tokio::test]
 async fn thread_section_move_pins_and_unpins_with_filtered_recency_pagination() -> Result<()> {
@@ -177,6 +269,7 @@ async fn thread_section_move_pins_and_unpins_with_filtered_recency_pagination() 
         source_kinds: None,
         archived: None,
         section_id: Some(Some(PINNED_THREAD_SECTION_ID.to_string())),
+        project_id: None,
         cwd: None,
         use_state_db_only: false,
         search_term: None,
@@ -367,6 +460,7 @@ async fn thread_sections_preserve_server_owned_manual_order_across_moves_and_res
         source_kinds: None,
         archived: None,
         section_id: Some(Some(PINNED_THREAD_SECTION_ID.to_string())),
+        project_id: None,
         cwd: None,
         use_state_db_only: false,
         search_term: None,
@@ -490,6 +584,7 @@ async fn thread_metadata_update_patches_git_branch_and_returns_updated_thread() 
     let update_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
             thread_id: thread.id.clone(),
+            project_id: None,
             git_info: Some(ThreadMetadataGitInfoUpdateParams {
                 sha: None,
                 branch: Some(Some("feature/sidebar-pr".to_string())),
@@ -560,6 +655,90 @@ async fn thread_metadata_update_patches_git_branch_and_returns_updated_thread() 
     Ok(())
 }
 
+/// Client-provided Git credentials must not reach API responses, SQLite, or rollout files.
+#[tokio::test]
+async fn thread_metadata_update_sanitizes_git_origin_before_persisting() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    let state_db = init_state_db(codex_home.path()).await?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let start_id = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            history_mode: Some(ThreadHistoryMode::Legacy),
+            ..Default::default()
+        })
+        .await?;
+    let start_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(start_id)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(start_resp)?;
+
+    let update_id = mcp
+        .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
+            thread_id: thread.id.clone(),
+            project_id: None,
+            git_info: Some(ThreadMetadataGitInfoUpdateParams {
+                sha: None,
+                branch: None,
+                origin_url: Some(Some(
+                    "https://alice:synthetic-git-secret@example.invalid/org/repo.git".to_string(),
+                )),
+            }),
+        })
+        .await?;
+    let update_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(update_id)),
+    )
+    .await??;
+    let ThreadMetadataUpdateResponse { thread: updated } =
+        to_response::<ThreadMetadataUpdateResponse>(update_resp)?;
+    let expected_git_info = Some(GitInfo {
+        sha: None,
+        branch: None,
+        origin_url: Some("https://example.invalid/org/repo.git".to_string()),
+    });
+    assert_eq!(updated.git_info, expected_git_info);
+
+    let persisted = state_db
+        .get_thread(ThreadId::from_string(&thread.id)?)
+        .await?
+        .expect("updated thread must be persisted");
+    assert_eq!(
+        persisted.git_origin_url.as_deref(),
+        Some("https://example.invalid/org/repo.git")
+    );
+    let rollout = fs::read_to_string(persisted.rollout_path)?;
+    assert!(!rollout.contains("synthetic-git-secret"));
+    assert!(rollout.contains("https://example.invalid/org/repo.git"));
+
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: thread.id,
+            include_turns: false,
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let ThreadReadResponse { thread: read, .. } = to_response::<ThreadReadResponse>(read_resp)?;
+    assert_eq!(read.git_info, expected_git_info);
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn thread_metadata_update_rejects_empty_git_info_patch() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
@@ -588,6 +767,7 @@ async fn thread_metadata_update_rejects_empty_git_info_patch() -> Result<()> {
     let update_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
             thread_id: thread.id,
+            project_id: None,
             git_info: Some(ThreadMetadataGitInfoUpdateParams {
                 sha: None,
                 branch: None,
@@ -638,6 +818,7 @@ async fn thread_metadata_update_rejects_ephemeral_thread() -> Result<()> {
     let update_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
             thread_id: thread.id.clone(),
+            project_id: None,
             git_info: Some(ThreadMetadataGitInfoUpdateParams {
                 sha: None,
                 branch: Some(Some("feature/ephemeral".to_string())),
@@ -712,6 +893,7 @@ async fn thread_metadata_update_repairs_missing_sqlite_row_for_stored_thread() -
     let update_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
             thread_id: thread_id.clone(),
+            project_id: None,
             git_info: Some(ThreadMetadataGitInfoUpdateParams {
                 sha: None,
                 branch: Some(Some("feature/stored-thread".to_string())),
@@ -781,6 +963,8 @@ async fn thread_metadata_update_repairs_loaded_thread_without_resetting_summary(
     let resume_id = mcp
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: thread_id.clone(),
+            model: Some("gpt-5.2".to_string()),
+            config: Some([("model_reasoning_effort".to_string(), json!("high"))].into()),
             ..Default::default()
         })
         .await?;
@@ -796,6 +980,7 @@ async fn thread_metadata_update_repairs_loaded_thread_without_resetting_summary(
     let update_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
             thread_id: thread_id.clone(),
+            project_id: None,
             git_info: Some(ThreadMetadataGitInfoUpdateParams {
                 sha: None,
                 branch: Some(Some("feature/loaded-thread".to_string())),
@@ -814,6 +999,10 @@ async fn thread_metadata_update_repairs_loaded_thread_without_resetting_summary(
     assert_eq!(updated.id, thread_id);
     assert_eq!(updated.preview, preview);
     assert_eq!(updated.created_at, 1736152200);
+    assert_eq!(
+        (updated.model.as_deref(), updated.reasoning_effort),
+        (Some("gpt-5.2"), Some(ReasoningEffort::High))
+    );
     assert_eq!(
         updated.git_info,
         Some(GitInfo {
@@ -863,6 +1052,7 @@ async fn thread_metadata_update_repairs_missing_sqlite_row_for_archived_thread()
     let update_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
             thread_id: thread_id.clone(),
+            project_id: None,
             git_info: Some(ThreadMetadataGitInfoUpdateParams {
                 sha: None,
                 branch: Some(Some("feature/archived-thread".to_string())),
@@ -908,7 +1098,10 @@ async fn thread_metadata_update_can_clear_stored_git_fields() -> Result<()> {
         Some(RolloutGitInfo {
             commit_hash: Some(GitSha::new("abc123")),
             branch: Some("feature/sidebar-pr".to_string()),
-            repository_url: Some("git@example.com:openai/codex.git".to_string()),
+            repository_url: Some(
+                SanitizedGitUrl::try_from("git@example.com:openai/codex.git")
+                    .expect("repository URL should be valid"),
+            ),
         }),
     )?;
     let _state_db = init_state_db(codex_home.path()).await?;
@@ -923,6 +1116,7 @@ async fn thread_metadata_update_can_clear_stored_git_fields() -> Result<()> {
     let update_id = mcp
         .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
             thread_id: thread_id.clone(),
+            project_id: None,
             git_info: Some(ThreadMetadataGitInfoUpdateParams {
                 sha: Some(None),
                 branch: Some(None),

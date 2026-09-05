@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::MCP_APP_UI_EXTENSION_ID;
+use codex_protocol::mcp::OPENAI_ELICITATION_EXTENSION_ID;
 use codex_protocol::mcp::OPENAI_FORM_EXTENSION_ID;
 use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
 use serde_json::Map;
@@ -23,12 +24,19 @@ pub fn client_mcp_extensions(
             matches!(
                 id.as_str(),
                 OPENAI_FORM_EXTENSION_ID
+                    | OPENAI_ELICITATION_EXTENSION_ID
                     | OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID
                     | MCP_APP_UI_EXTENSION_ID
             )
         })
         .map(|(id, value)| (id.clone(), value.clone()))
         .collect::<HashMap<_, _>>();
+    if let Some(settings) = selected
+        .get_mut(OPENAI_ELICITATION_EXTENSION_ID)
+        .and_then(Value::as_object_mut)
+    {
+        settings.retain(|key, _| key == "form");
+    }
     if legacy_openai_form_elicitation {
         selected
             .entry(OPENAI_FORM_EXTENSION_ID.to_string())

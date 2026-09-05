@@ -1,3 +1,4 @@
+use codex_git_utils::SanitizedGitUrl;
 use codex_git_utils::collect_git_info;
 use codex_login::CODEX_ACCESS_TOKEN_ENV_VAR;
 use codex_login::CODEX_API_KEY_ENV_VAR;
@@ -769,6 +770,7 @@ async fn integration_git_info_unit_test() {
         .unwrap()
         .trim()
         .to_string();
+    let expected_remote_url = SanitizedGitUrl::try_from(expected_remote_url.as_str()).unwrap();
     assert_eq!(
         repo_url, &expected_remote_url,
         "Repository URL should match git remote get-url output"
@@ -785,7 +787,13 @@ async fn integration_git_info_unit_test() {
 
     assert_eq!(git_info.commit_hash, deserialized.commit_hash);
     assert_eq!(git_info.branch, deserialized.branch);
-    assert_eq!(git_info.repository_url, deserialized.repository_url);
+    assert_eq!(
+        git_info
+            .repository_url
+            .as_ref()
+            .map(SanitizedGitUrl::as_str),
+        deserialized.repository_url.as_deref()
+    );
 
     println!("✅ Git info serialization test passed!");
 }

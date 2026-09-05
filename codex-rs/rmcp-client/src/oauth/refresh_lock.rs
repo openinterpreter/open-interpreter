@@ -25,12 +25,12 @@ const REFRESH_LOCK_RETRY_SLEEP: Duration = Duration::from_millis(/*millis*/ 50);
 // WouldBlock contention from a contender that merely started late and observed persisted tokens.
 const LOCK_CONTENTION_EVENT_TARGET: &str = "codex_rmcp_client::oauth::refresh_lock::contention";
 
-pub(super) struct RefreshCredentialLock {
+pub(crate) struct RefreshCredentialLock {
     _file: File,
 }
 
 impl RefreshCredentialLock {
-    pub(super) async fn acquire_for_server(server_name: &str, url: &str) -> Result<Self> {
+    pub(crate) async fn acquire_for_server(server_name: &str, url: &str) -> Result<Self> {
         let store_key = super::compute_store_key(server_name, url)?;
         let codex_home = find_codex_home()?;
         Self::acquire_in(&codex_home, &store_key, REFRESH_LOCK_ACQUIRE_TIMEOUT)

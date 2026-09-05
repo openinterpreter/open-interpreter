@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use codex_code_mode_protocol::CellId;
 use codex_code_mode_protocol::CodeModeNestedToolCall;
@@ -171,6 +172,7 @@ async fn reconnected_execution_maps_started_and_initial_response_ids() {
     let claimed = Arc::new(AtomicBool::new(false));
     let initial_response_claimed = Arc::clone(&claimed);
     let response = RuntimeResponse::Result {
+        code_mode_host_duration: None,
         cell_id: wire_id.clone(),
         content_items: vec![FunctionCallOutputContentItem::InputText {
             text: "result".to_string(),
@@ -192,6 +194,7 @@ async fn reconnected_execution_maps_started_and_initial_response_ids() {
     assert_eq!(
         started.initial_response().await,
         Ok(RuntimeResponse::Result {
+            code_mode_host_duration: None,
             cell_id: public_id,
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "result".to_string(),
@@ -205,10 +208,12 @@ async fn reconnected_execution_maps_started_and_initial_response_ids() {
 fn reconnected_wait_maps_live_and_missing_outcomes() {
     let public_id = CellId::new("g2:42".to_string());
     let yielded = RuntimeResponse::Yielded {
+        code_mode_host_duration: None,
         cell_id: CellId::new("42".to_string()),
         content_items: Vec::new(),
     };
     let terminated = RuntimeResponse::Terminated {
+        code_mode_host_duration: None,
         cell_id: CellId::new("42".to_string()),
         content_items: Vec::new(),
     };
@@ -216,6 +221,7 @@ fn reconnected_wait_maps_live_and_missing_outcomes() {
     assert_eq!(
         public_wait_outcome(/*generation*/ 2, WaitOutcome::LiveCell(yielded)),
         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
+            code_mode_host_duration: None,
             cell_id: public_id.clone(),
             content_items: Vec::new(),
         })
@@ -223,8 +229,40 @@ fn reconnected_wait_maps_live_and_missing_outcomes() {
     assert_eq!(
         public_wait_outcome(/*generation*/ 2, WaitOutcome::MissingCell(terminated)),
         WaitOutcome::MissingCell(RuntimeResponse::Terminated {
+            code_mode_host_duration: None,
             cell_id: public_id,
             content_items: Vec::new(),
         })
+    );
+}
+
+/// Replacing a host generation changes public cell IDs without losing the
+/// operation's original duration on either the exec or wait path.
+#[tokio::test]
+async fn cell_id_remapping_preserves_code_mode_host_duration() {
+    let cell_id = CellId::new("42".to_string());
+    let code_mode_host_duration = Some(Duration::from_nanos(/*nanos*/ 1_234_567));
+    let response = RuntimeResponse::Yielded {
+        cell_id: cell_id.clone(),
+        content_items: Vec::new(),
+        code_mode_host_duration,
+    };
+    let initial = response.clone();
+    let started = StartedCell::from_future(cell_id, async move { Ok(initial) });
+    let expected = RuntimeResponse::Yielded {
+        cell_id: CellId::new("g2:42".to_string()),
+        content_items: Vec::new(),
+        code_mode_host_duration,
+    };
+    assert_eq!(
+        public_started_cell(/*generation*/ 2, started)
+            .initial_response()
+            .await
+            .as_ref(),
+        Ok(&expected),
+    );
+    assert_eq!(
+        public_wait_outcome(/*generation*/ 2, WaitOutcome::LiveCell(response)),
+        WaitOutcome::LiveCell(expected),
     );
 }

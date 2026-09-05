@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::num::NonZeroUsize;
 
 use codex_protocol::protocol::SkillScope;
 use codex_utils_string::approx_token_count;
@@ -14,6 +15,7 @@ use crate::fragments::AvailableSkillsInstructions;
 use crate::host_aliases::shared_host_alias_roots;
 
 const DEFAULT_SKILL_METADATA_CHAR_BUDGET: usize = 8_000;
+const MAX_CONFIGURED_SKILL_METADATA_TOKEN_BUDGET: usize = 10_000;
 const MAX_SKILL_PROMPT_BYTES: usize = 8_000;
 const SKILL_METADATA_CONTEXT_WINDOW_PERCENT: usize = 2;
 const MAX_CATALOG_SKILL_DESCRIPTION_CHARS: usize = 1_024;
@@ -122,7 +124,18 @@ impl SkillRenderReport {
     }
 }
 
-pub(crate) fn skill_metadata_budget(context_window: Option<i64>) -> SkillMetadataBudget {
+pub(crate) fn skill_metadata_budget(
+    context_window: Option<i64>,
+    max_context_tokens: Option<NonZeroUsize>,
+) -> SkillMetadataBudget {
+    if let Some(max_context_tokens) = max_context_tokens {
+        return SkillMetadataBudget::Tokens(
+            max_context_tokens
+                .get()
+                .min(MAX_CONFIGURED_SKILL_METADATA_TOKEN_BUDGET),
+        );
+    }
+
     context_window
         .and_then(|window| usize::try_from(window).ok())
         .filter(|window| *window > 0)
@@ -502,22 +515,18 @@ pub(crate) fn render_available_skills(
         SkillPromptKind::Unaliased,
         policy,
     );
-    let selected =
-        if absolute.report.omitted_count == 0 && absolute.report.truncated_description_chars == 0 {
-            absolute
-        } else if let Some(aliased) =
-            build_aliased_catalog(&entries, policy, budget, include_skills_usage_instructions)
-            && aliased_render_is_better(
-                &aliased,
-                &absolute,
-                budget,
-                include_skills_usage_instructions,
-            )
-        {
-            aliased
-        } else {
-            absolute
-        };
+    let selected = if let Some(aliased) =
+        build_aliased_catalog(&entries, policy, budget, include_skills_usage_instructions)
+        && aliased_render_is_better(
+            &aliased,
+            &absolute,
+            budget,
+            include_skills_usage_instructions,
+        ) {
+        aliased
+    } else {
+        absolute
+    };
 
     Some(AvailableSkillsRender {
         prompt_kind: selected.prompt_kind,
@@ -594,53 +603,51 @@ pub(crate) fn render_combined_available_skills(
     );
 
     let mut selected = absolute;
-    if !combined_catalog_fully_rendered(&selected) {
-        let host_only_aliases = build_aliased_combined_catalog(
-            CatalogLines::unaliased(&executor_entries, extension_policy),
-            CatalogLines::unaliased(&orchestrator_entries, extension_policy),
-            CatalogLines::aliased(&host_entries, host_policy),
-            budget,
-            include_skills_usage_instructions,
-        );
-        let executor_only_aliases = build_aliased_combined_catalog(
-            CatalogLines::aliased(&executor_entries, extension_policy),
-            CatalogLines::unaliased(&orchestrator_entries, extension_policy),
-            CatalogLines::unaliased(&host_entries, host_policy),
-            budget,
-            include_skills_usage_instructions,
-        );
-        let orchestrator_only_aliases = build_aliased_combined_catalog(
-            CatalogLines::unaliased(&executor_entries, extension_policy),
-            CatalogLines::aliased(&orchestrator_entries, extension_policy),
-            CatalogLines::unaliased(&host_entries, host_policy),
-            budget,
-            include_skills_usage_instructions,
-        );
-        let all_source_aliases = build_aliased_combined_catalog(
-            CatalogLines::aliased(&executor_entries, extension_policy),
-            CatalogLines::aliased(&orchestrator_entries, extension_policy),
-            CatalogLines::aliased(&host_entries, host_policy),
-            budget,
-            include_skills_usage_instructions,
-        );
+    let host_only_aliases = build_aliased_combined_catalog(
+        CatalogLines::unaliased(&executor_entries, extension_policy),
+        CatalogLines::unaliased(&orchestrator_entries, extension_policy),
+        CatalogLines::aliased(&host_entries, host_policy),
+        budget,
+        include_skills_usage_instructions,
+    );
+    let executor_only_aliases = build_aliased_combined_catalog(
+        CatalogLines::aliased(&executor_entries, extension_policy),
+        CatalogLines::unaliased(&orchestrator_entries, extension_policy),
+        CatalogLines::unaliased(&host_entries, host_policy),
+        budget,
+        include_skills_usage_instructions,
+    );
+    let orchestrator_only_aliases = build_aliased_combined_catalog(
+        CatalogLines::unaliased(&executor_entries, extension_policy),
+        CatalogLines::aliased(&orchestrator_entries, extension_policy),
+        CatalogLines::unaliased(&host_entries, host_policy),
+        budget,
+        include_skills_usage_instructions,
+    );
+    let all_source_aliases = build_aliased_combined_catalog(
+        CatalogLines::aliased(&executor_entries, extension_policy),
+        CatalogLines::aliased(&orchestrator_entries, extension_policy),
+        CatalogLines::aliased(&host_entries, host_policy),
+        budget,
+        include_skills_usage_instructions,
+    );
 
-        for candidate in [
-            host_only_aliases,
-            executor_only_aliases,
-            orchestrator_only_aliases,
-            all_source_aliases,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if combined_render_is_better(
-                &candidate,
-                &selected,
-                budget,
-                include_skills_usage_instructions,
-            ) {
-                selected = candidate;
-            }
+    for candidate in [
+        host_only_aliases,
+        executor_only_aliases,
+        orchestrator_only_aliases,
+        all_source_aliases,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if combined_render_is_better(
+            &candidate,
+            &selected,
+            budget,
+            include_skills_usage_instructions,
+        ) {
+            selected = candidate;
         }
     }
 
@@ -827,14 +834,6 @@ fn build_aliased_combined_catalog(
         host,
         adjusted_budget,
     ))
-}
-
-fn combined_catalog_fully_rendered(rendered: &CombinedAvailableSkillsRender) -> bool {
-    [&rendered.executor, &rendered.orchestrator, &rendered.host]
-        .into_iter()
-        .all(|catalog| {
-            catalog.report.omitted_count == 0 && catalog.report.truncated_description_chars == 0
-        })
 }
 
 fn combined_render_is_better(

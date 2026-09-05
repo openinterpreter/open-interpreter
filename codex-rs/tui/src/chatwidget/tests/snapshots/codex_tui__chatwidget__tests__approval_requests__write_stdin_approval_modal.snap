@@ -1,0 +1,30 @@
+---
+source: tui/src/chatwidget/tests/approval_requests.rs
+assertion_line: 123
+expression: "format!(\"{buf:?}\")"
+---
+Buffer {
+    area: Rect { x: 0, y: 0, width: 80, height: 10 },
+    content: [
+        "                                                                                ",
+        "                                                                                ",
+        "  Would you like to send input to terminal 42?                                  ",
+        "                                                                                ",
+        "  Input: "confirm\n"                                                            ",
+        "                                                                                ",
+        "› 1. Yes, proceed (y)                                                           ",
+        "  2. No, and tell Codex what to do differently (esc)                            ",
+        "                                                                                ",
+        "  Press enter to confirm or esc to cancel                                       ",
+    ],
+    styles: [
+        x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 2, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 46, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 0, y: 6, fg: Cyan, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 21, y: 6, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 48, y: 7, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+        x: 51, y: 7, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 2, y: 9, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+    ]
+}

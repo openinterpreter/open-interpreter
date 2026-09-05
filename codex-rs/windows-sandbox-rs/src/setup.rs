@@ -457,6 +457,12 @@ fn gather_full_read_roots_for_permissions(
             .into_iter()
             .map(|root| root.root),
     );
+    roots.extend(
+        permissions
+            .readable_roots_for_cwd(command_cwd)
+            .into_iter()
+            .filter(|root| root.parent().is_some() || !command_cwd.starts_with(root)),
+    );
     canonical_existing(&roots)
 }
 
@@ -466,7 +472,7 @@ pub(crate) fn gather_read_roots(
     env_map: &HashMap<String, String>,
     codex_home: &Path,
 ) -> Vec<PathBuf> {
-    if permissions.has_full_disk_read_access() {
+    if permissions.has_symbolic_root_read_access(command_cwd) {
         return gather_full_read_roots_for_permissions(
             command_cwd,
             permissions,
@@ -776,6 +782,7 @@ fn run_setup_exe(
     use windows_sys::Win32::System::Threading::GetExitCodeProcess;
     use windows_sys::Win32::System::Threading::INFINITE;
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    use windows_sys::Win32::UI::Shell::SEE_MASK_NOASYNC;
     use windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
     use windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW;
     use windows_sys::Win32::UI::Shell::ShellExecuteExW;
@@ -839,7 +846,9 @@ fn run_setup_exe(
     let verb_w = crate::winutil::to_wide("runas");
     let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     sei.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
-    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    // Sandbox setup runs on a Tokio worker without a Windows message loop.
+    // ShellExecuteEx requires synchronous activation on such threads.
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
     sei.lpVerb = verb_w.as_ptr();
     sei.lpFile = exe_w.as_ptr();
     sei.lpParameters = params_w.as_ptr();
@@ -950,6 +959,24 @@ pub fn run_elevated_provisioning_setup(
     real_user: &str,
     settings: crate::WindowsSandboxProvisioningSettings,
 ) -> Result<()> {
+    if !codex_home.is_absolute()
+        || !matches!(
+            codex_home.components().next(),
+            Some(std::path::Component::Prefix(prefix))
+                if matches!(
+                    prefix.kind(),
+                    std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
+                )
+        )
+    {
+        return Err(failure(
+            SetupErrorCode::OrchestratorSandboxDirCreateFailed,
+            format!(
+                "sandbox provisioning CODEX_HOME must be an absolute local disk path: {}",
+                codex_home.display()
+            ),
+        ));
+    }
     let sbx_dir = sandbox_dir(codex_home);
     std::fs::create_dir_all(&sbx_dir).map_err(|err| {
         failure(
@@ -988,7 +1015,7 @@ pub fn run_elevated_provisioning_setup(
     run_setup_exe(&payload, /*needs_elevation*/ false, codex_home)
 }
 
-fn build_payload_roots(
+pub(crate) fn build_payload_roots(
     request: &SandboxSetupRequest<'_>,
     overrides: &SetupRootOverrides,
 ) -> (Vec<PathBuf>, Vec<PathBuf>) {
@@ -1025,11 +1052,29 @@ fn build_payload_roots(
     read_roots = filter_user_profile_root_exclusions(read_roots);
     read_roots = filter_ssh_config_dependency_roots(read_roots);
     let write_root_set: HashSet<PathBuf> = write_roots.iter().cloned().collect();
-    read_roots.retain(|root| !write_root_set.contains(root));
+    let deny_read_keys: Vec<String> = overrides
+        .deny_read_paths
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|path| canonical_path_key(path))
+        .collect();
+    read_roots.retain(|root| {
+        if write_root_set.contains(root) {
+            return false;
+        }
+        if deny_read_keys.is_empty() {
+            return true;
+        }
+        let root_key = canonical_path_key(root);
+        !deny_read_keys
+            .iter()
+            .any(|denied| Path::new(&root_key).starts_with(denied))
+    });
     (read_roots, write_roots)
 }
 
-fn build_payload_deny_write_paths(
+pub(crate) fn build_payload_deny_write_paths(
     request: &SandboxSetupRequest<'_>,
     explicit_deny_write_paths: Option<Vec<PathBuf>>,
 ) -> Vec<PathBuf> {

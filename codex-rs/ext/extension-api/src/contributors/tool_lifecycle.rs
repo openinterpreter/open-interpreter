@@ -2,28 +2,21 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use codex_config::McpServerConfig;
+use codex_mcp::McpServerSource;
+use codex_mcp::PreparedMcpCall;
+use codex_mcp::ResolvedMcpServer;
+use codex_protocol::mcp::CallToolResult;
+use codex_tools::ToolCallSource;
 use codex_tools::ToolName;
 use codex_tools::ToolPayload;
+use codex_utils_path_uri::PathUri;
 
 use crate::ConversationHistorySnapshot;
 use crate::ExtensionData;
 
 /// Future returned by one tool-lifecycle callback.
 pub type ToolLifecycleFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
-
-/// Host-visible source for a model tool call.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ToolCallSource {
-    /// The model invoked the tool directly.
-    Direct,
-    /// Code mode invoked the tool while executing a runtime cell.
-    CodeMode {
-        /// Runtime cell that issued the nested tool request.
-        cell_id: String,
-        /// Code-mode's per-cell tool invocation id.
-        runtime_tool_call_id: String,
-    },
-}
 
 /// Extension-facing outcome for a finished tool call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,6 +39,80 @@ pub enum ToolCallOutcome {
     Aborted,
 }
 
+/// Provenance captured from the immutable MCP call selected for one tool invocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum McpToolSource {
+    /// A connector routed through the host-owned Codex Apps MCP server.
+    Connector,
+    /// An MCP server whose frozen registration matches the active Codex configuration.
+    Config,
+    /// An MCP server registered by a locally loaded plugin.
+    Plugin {
+        /// Identifier of the plugin that owns this MCP server.
+        id: String,
+        /// Host-local plugin root captured with the exact server registration.
+        root: PathUri,
+    },
+    /// An executor-selected plugin whose root has not been attested by the host.
+    SelectedPlugin,
+    /// A compatibility or extension registration without user-owned provenance.
+    Other,
+}
+
+/// Read-only metadata and provenance captured from the MCP call that will execute.
+#[derive(Clone, Debug)]
+pub struct McpToolContext {
+    tool: crate::McpToolInfo,
+    source: McpToolSource,
+}
+
+impl McpToolContext {
+    /// Snapshots a prepared call without exposing its executable client to extensions.
+    ///
+    /// Configured servers retain their provenance only when their captured connection
+    /// still matches the host configuration for the current tool invocation.
+    pub fn from_prepared_call(
+        call: &PreparedMcpCall,
+        configured_server: Option<&McpServerConfig>,
+    ) -> Self {
+        let tool = call.tool_info().clone();
+        let registration = call.config().mcp_server_catalog.server(call.server_name());
+        let source = if tool.connector_id.is_some() && call.is_host_owned_apps() {
+            McpToolSource::Connector
+        } else if call.is_selected_plugin_server() {
+            McpToolSource::SelectedPlugin
+        } else if let Some(McpServerSource::Plugin(plugin)) =
+            registration.map(ResolvedMcpServer::source)
+            && Some(plugin.plugin_id()) == call.plugin_id()
+            && let Some(root) = plugin.host_root()
+        {
+            McpToolSource::Plugin {
+                id: plugin.plugin_id().to_owned(),
+                root: root.clone(),
+            }
+        } else if registration.is_some_and(|server| {
+            matches!(server.source(), McpServerSource::Config)
+                && configured_server.is_some_and(|configured| server.config() == configured)
+        }) {
+            McpToolSource::Config
+        } else {
+            McpToolSource::Other
+        };
+
+        Self { tool, source }
+    }
+
+    /// Returns frozen metadata for the exact model-visible MCP tool being executed.
+    pub fn tool_info(&self) -> &crate::McpToolInfo {
+        &self.tool
+    }
+
+    /// Returns the registration source captured with the executable call.
+    pub fn source(&self) -> &McpToolSource {
+        &self.source
+    }
+}
+
 /// Input supplied when the host starts executing one tool call.
 pub struct ToolStartInput<'a> {
     /// Store scoped to the host session runtime.
@@ -56,10 +123,14 @@ pub struct ToolStartInput<'a> {
     pub turn_store: &'a ExtensionData,
     /// Current turn submission id.
     pub turn_id: &'a str,
+    /// Trusted causal root of the owning turn, absent when unknown or ambiguous.
+    pub root_turn_id: Option<&'a str>,
     /// Model-visible tool call id.
     pub call_id: &'a str,
     /// Tool name as routed by the host.
     pub tool_name: &'a ToolName,
+    /// Read-only metadata and provenance from the exact MCP call that will execute.
+    pub mcp_tool: Option<&'a McpToolContext>,
     /// Finalized tool arguments, including any pre-tool-use hook rewrites.
     ///
     /// Payloads can contain sensitive plaintext and must not be logged.
@@ -68,6 +139,28 @@ pub struct ToolStartInput<'a> {
     pub conversation_history: Arc<dyn ConversationHistorySnapshot>,
     /// Source that issued the tool call.
     pub source: ToolCallSource,
+}
+
+/// Input supplied after an MCP server responds, before the host reports completion.
+pub struct McpToolResultInput<'a> {
+    /// Store scoped to the host session runtime.
+    pub session_store: &'a ExtensionData,
+    /// Store scoped to this thread runtime.
+    pub thread_store: &'a ExtensionData,
+    /// Store scoped to this turn runtime.
+    pub turn_store: &'a ExtensionData,
+    /// Current turn submission id.
+    pub turn_id: &'a str,
+    /// Host tool call id, also used in the MCP completion notification.
+    pub call_id: &'a str,
+    /// Read-only metadata and provenance from the exact MCP call that executed.
+    pub mcp_tool: &'a McpToolContext,
+    /// Tool arguments after host-side rewriting, including file uploads.
+    pub arguments: &'a serde_json::Value,
+    /// Server response, including `_meta`. Changes feed the normal client and model output paths.
+    ///
+    /// Arguments and results can contain sensitive plaintext and must not be logged.
+    pub result: &'a mut CallToolResult,
 }
 
 /// Input supplied when the host finishes executing one tool call.

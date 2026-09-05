@@ -606,6 +606,7 @@ c2ln",
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     std::fs::create_dir_all(codex_home).expect("codex home should be created");
     std::fs::write(
@@ -755,6 +756,29 @@ async fn get_model_info_tracks_fallback_usage() {
         .await;
     assert!(unknown.used_fallback_model_metadata);
     assert_eq!(unknown.slug, "model-that-does-not-exist");
+}
+
+#[tokio::test]
+async fn get_model_info_applies_long_context_override_to_bundled_gpt_5_6_models() {
+    let codex_home = tempdir().expect("temp dir");
+    let manager = openai_manager_for_tests(
+        codex_home.path().to_path_buf(),
+        TestModelsEndpoint::new(Vec::new()),
+    );
+    let config = ModelsManagerConfig {
+        model_context_window: Some(1_000_000),
+        ..Default::default()
+    };
+
+    for slug in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+        let model_info = manager.get_model_info(slug, &config).await;
+        let mut expected = manager
+            .get_model_info(slug, &ModelsManagerConfig::default())
+            .await;
+        expected.context_window = Some(872_000);
+
+        assert_eq!(model_info, expected);
+    }
 }
 
 #[tokio::test]

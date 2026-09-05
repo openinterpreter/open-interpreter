@@ -59,6 +59,9 @@ pub(super) fn server_notification_thread_target(
         ServerNotification::ThreadNameUpdated(notification) => {
             Some(notification.thread_id.as_str())
         }
+        ServerNotification::ThreadProjectUpdated(notification) => {
+            Some(notification.thread_id.as_str())
+        }
         ServerNotification::ThreadTokenUsageUpdated(notification) => {
             Some(notification.thread_id.as_str())
         }
@@ -85,6 +88,9 @@ pub(super) fn server_notification_thread_target(
             Some(notification.thread_id.as_str())
         }
         ServerNotification::ItemGuardianApprovalReviewCompleted(notification) => {
+            Some(notification.thread_id.as_str())
+        }
+        ServerNotification::StrictReviewRequired(notification) => {
             Some(notification.thread_id.as_str())
         }
         ServerNotification::ItemCompleted(notification) => Some(notification.thread_id.as_str()),
@@ -142,6 +148,15 @@ pub(super) fn server_notification_thread_target(
         ServerNotification::ThreadRealtimeItemAdded(notification) => {
             Some(notification.thread_id.as_str())
         }
+        ServerNotification::ThreadRealtimeItemStarted(notification) => {
+            Some(notification.thread_id.as_str())
+        }
+        ServerNotification::ThreadRealtimeItemTranscriptDelta(notification) => {
+            Some(notification.thread_id.as_str())
+        }
+        ServerNotification::ThreadRealtimeItemCompleted(notification) => {
+            Some(notification.thread_id.as_str())
+        }
         ServerNotification::ThreadRealtimeTranscriptDelta(notification) => {
             Some(notification.thread_id.as_str())
         }
@@ -160,6 +175,10 @@ pub(super) fn server_notification_thread_target(
         ServerNotification::ThreadRealtimeClosed(notification) => {
             Some(notification.thread_id.as_str())
         }
+        ServerNotification::AuthRecoveryStarted(notification)
+        | ServerNotification::AuthRecoveryCompleted(notification) => {
+            Some(notification.thread_id.as_str())
+        }
         ServerNotification::Warning(notification) => notification.thread_id.as_deref(),
         ServerNotification::GuardianWarning(notification) => Some(notification.thread_id.as_str()),
         ServerNotification::McpServerStatusUpdated(notification) => {
@@ -168,7 +187,8 @@ pub(super) fn server_notification_thread_target(
                 None => return ServerNotificationThreadTarget::AppScoped,
             }
         }
-        ServerNotification::SkillsChanged(_)
+        ServerNotification::ProjectChanged(_)
+        | ServerNotification::SkillsChanged(_)
         | ServerNotification::McpServerOauthLoginCompleted(_)
         | ServerNotification::AccountUpdated(_)
         | ServerNotification::AccountRateLimitsUpdated(_)
@@ -185,6 +205,7 @@ pub(super) fn server_notification_thread_target(
         | ServerNotification::CommandExecOutputDelta(_)
         | ServerNotification::ProcessOutputDelta(_)
         | ServerNotification::ProcessExited(_)
+        | ServerNotification::McpServerEventStream(_)
         | ServerNotification::FsChanged(_)
         | ServerNotification::WindowsWorldWritableWarning(_)
         | ServerNotification::WindowsSandboxSetupCompleted(_)

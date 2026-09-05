@@ -3,14 +3,24 @@ source: tui/src/chatwidget/tests/status_and_layout.rs
 expression: "format!(\"{running_snapshot}\\n\\n{completed_snapshot}\")"
 ---
 running
-live hooks:
-• Running PreToolUse hook: checking command
+activity:
+"                                                                                "
+"• Checking command                                                              "
+"                                                                                "
+"                                                                                "
+"› Ask Codex to do anything                                                      "
+"                                                                                "
+"  gpt-5.6-sol default · /tmp/project                                            "
 history:
 <empty>
 
 completed
-live hooks:
-<empty>
+activity:
+"                                                                                "
+"                                                                                "
+"› Ask Codex to do anything                                                      "
+"                                                                                "
+"  gpt-5.6-sol default · /tmp/project                                            "
 history:
-• PreToolUse hook (blocked)
-  feedback: command blocked by policy
+• Blocked by hook
+  └ command blocked by policy

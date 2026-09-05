@@ -14,6 +14,8 @@ pub enum UpdateAction {
     NpmGlobalLatest,
     /// Update via `bun install -g @openai/codex@latest`.
     BunGlobalLatest,
+    /// Update via `vp install -g @openai/codex@latest`.
+    VitePlusGlobalLatest,
     /// Update via `pnpm add -g @openai/codex@latest`.
     PnpmGlobalLatest,
     /// Update via `brew upgrade codex`.
@@ -42,6 +44,7 @@ impl UpdateAction {
             // installing OpenAI's Codex.
             InstallMethod::Npm => is_codex.then_some(UpdateAction::NpmGlobalLatest),
             InstallMethod::Bun => is_codex.then_some(UpdateAction::BunGlobalLatest),
+            InstallMethod::VitePlus => is_codex.then_some(UpdateAction::VitePlusGlobalLatest),
             InstallMethod::Pnpm => is_codex.then_some(UpdateAction::PnpmGlobalLatest),
             InstallMethod::Brew => is_codex.then_some(UpdateAction::BrewUpgrade),
             InstallMethod::Standalone { platform, .. } => Some(match platform {
@@ -64,6 +67,7 @@ impl UpdateAction {
         match self {
             UpdateAction::NpmGlobalLatest => ("npm", &["install", "-g", "@openai/codex"]),
             UpdateAction::BunGlobalLatest => ("bun", &["install", "-g", "@openai/codex"]),
+            UpdateAction::VitePlusGlobalLatest => ("vp", &["install", "-g", "@openai/codex"]),
             UpdateAction::PnpmGlobalLatest => ("pnpm", &["add", "-g", "@openai/codex"]),
             UpdateAction::BrewUpgrade => ("brew", &["upgrade", "--cask", "codex"]),
             UpdateAction::StandaloneUnix => ("sh", source.standalone_unix_update_args()),

@@ -33,7 +33,7 @@ impl HttpClient {
         http_client_factory: codex_http_client::HttpClientFactory,
     ) -> Self {
         let base_url = base_url.into();
-        let backend = backend::Client::new(base_url.clone(), http_client_factory);
+        let backend = backend::Client::new_without_redirects(base_url.clone(), http_client_factory);
         Self { base_url, backend }
     }
 

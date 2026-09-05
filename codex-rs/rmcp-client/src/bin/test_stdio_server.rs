@@ -79,6 +79,28 @@ impl TestToolServer {
             Arc::new(sandbox_meta_schema),
         );
         sandbox_meta_tool.annotations = Some(ToolAnnotations::new().read_only(true));
+        let entitlement_tools = std::env::var("MCP_TEST_DAYBREAK_READ_ONLY")
+            .ok()
+            .into_iter()
+            .flat_map(|read_only| {
+                ["get_codex_security_daybreak_access", "get_daybreak_access"].map(|name| {
+                    let mut tool = sandbox_meta_tool.clone();
+                    tool.name = Cow::Borrowed(name);
+                    tool.description =
+                        Some(Cow::Borrowed("Return requested account access metadata."));
+                    tool.annotations = Some(ToolAnnotations::new().read_only(read_only == "true"));
+                    if name == "get_codex_security_daybreak_access" {
+                        let mut meta = MetaObject::new();
+                        meta.insert(
+                            "openai/requestedEntitlements".to_string(),
+                            json!(["cyber_trusted_access"]),
+                        );
+                        tool.meta = Some(meta);
+                    }
+                    tool
+                })
+            })
+            .collect::<Vec<_>>();
 
         #[expect(clippy::expect_used)]
         let thread_hint_schema: JsonObject = serde_json::from_value(json!({
@@ -124,6 +146,7 @@ impl TestToolServer {
             Self::image_scenario_tool(),
             sandbox_meta_tool,
         ];
+        tools.extend(entitlement_tools);
         if std::env::var_os("MCP_TEST_ENABLE_NODE_REPL_JS").is_some() {
             #[expect(clippy::expect_used)]
             let schema: JsonObject = serde_json::from_value(json!({
@@ -662,9 +685,9 @@ impl ServerHandler for TestToolServer {
                     .supports_openai_form_elicitation
                     .load(Ordering::Relaxed),
             }))),
-            "sandbox_meta" => Ok(Self::structured_result(serde_json::Value::Object(
-                context.meta.0.0,
-            ))),
+            "sandbox_meta" | "get_codex_security_daybreak_access" | "get_daybreak_access" => Ok(
+                Self::structured_result(serde_json::Value::Object(context.meta.0.0)),
+            ),
             "cwd" => {
                 let cwd = std::env::current_dir()
                     .map(|path| path.to_string_lossy().into_owned())
@@ -1020,8 +1043,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = TestToolServer::new();
     let running = service.serve(stdio()).await?;
 
-    // Wait for the client to finish interacting with the server.
-    running.waiting().await?;
+    // A test can close an initialized transport without killing an arbitrary PID.
+    let exit_file = std::env::var_os("MCP_TEST_EXIT_FILE");
+    tokio::select! {
+        result = running.waiting() => { result?; }
+        _ = async {
+            let Some(exit_file) = exit_file else {
+                return std::future::pending::<()>().await;
+            };
+            while !std::path::Path::new(&exit_file).exists() {
+                sleep(Duration::from_millis(/*millis*/ 20)).await;
+            }
+        } => std::process::exit(0),
+    }
     // Drain background tasks to ensure clean shutdown.
     task::yield_now().await;
     Ok(())

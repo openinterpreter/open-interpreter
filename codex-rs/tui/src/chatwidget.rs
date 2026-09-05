@@ -58,7 +58,7 @@ use crate::git_action_directives::parse_assistant_markdown;
 use crate::legacy_core::config::Config;
 use crate::legacy_core::config::PermissionProfileSnapshot;
 use crate::mention_codec::LinkedMention;
-use crate::mention_codec::encode_history_mentions;
+use crate::mention_codec::encode_history_mentions_at_elements;
 use crate::model_catalog::ModelCatalog;
 use crate::multi_agents;
 use crate::multi_agents::AgentMetadata;
@@ -171,7 +171,6 @@ use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
-use ratatui::text::Text;
 use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
@@ -333,6 +332,7 @@ use crate::status_indicator_widget::StatusDetailsCapitalization;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 mod command_lifecycle;
+mod connector_mentions;
 mod connectors;
 mod constructor;
 pub(crate) use self::connectors::ConnectorScopeGeneration;
@@ -353,6 +353,7 @@ mod goal_menu;
 mod ide_context;
 use self::ide_context::IdeContextState;
 mod input_queue;
+mod reconnect;
 use self::input_queue::InputQueueState;
 mod input_flow;
 mod input_restore;
@@ -362,6 +363,7 @@ use self::interrupts::InterruptManager;
 mod keymap_picker;
 mod mcp_startup;
 use self::mcp_startup::McpStartupStatus;
+mod misalignment_policy;
 mod pets;
 mod session_flow;
 mod session_header;
@@ -382,13 +384,16 @@ use self::plugins::PluginListFetchState;
 use self::plugins::PluginsCacheState;
 mod plan_implementation;
 use self::plan_implementation::PLAN_IMPLEMENTATION_TITLE;
+mod model_popup_state;
 mod model_popups;
 mod notifications;
 use self::notifications::Notification;
 mod permission_popups;
+mod permission_shortcuts;
 mod permissions_menu;
 pub(crate) use self::permissions_menu::auto_review_available;
 pub(crate) use self::permissions_menu::cyber_model_approval_reviewer;
+mod backend_banners;
 mod protocol;
 mod protocol_requests;
 mod rate_limits;
@@ -398,6 +403,7 @@ use self::rate_limits::RateLimitWarningState;
 use self::rate_limits::app_server_rate_limit_error_kind;
 pub(crate) use self::rate_limits::fallback_limit_label;
 use self::rate_limits::is_app_server_cyber_policy_error;
+mod recap;
 mod reset_credits;
 pub(crate) use self::rate_limits::limit_label_for_window;
 mod reasoning_shortcuts;
@@ -437,6 +443,7 @@ mod turn_runtime;
 use self::turn_lifecycle::TurnLifecycleState;
 mod usage;
 mod user_messages;
+mod working_directory;
 use self::user_messages::PendingSteer;
 use self::user_messages::PendingSteerCompareKey;
 use self::user_messages::QueueDrain;
@@ -560,6 +567,8 @@ pub(crate) struct ChatWidget {
     has_chatgpt_account: bool,
     has_codex_backend_auth: bool,
     model_catalog: Arc<ModelCatalog>,
+    model_popup_request_id: Option<uuid::Uuid>,
+    model_popup_model_ids: Vec<String>,
     session_telemetry: SessionTelemetry,
     session_header: SessionHeader,
     initial_user_message: Option<UserMessage>,
@@ -586,9 +595,11 @@ pub(crate) struct ChatWidget {
     codex_rate_limit_reached_type: Option<RateLimitReachedType>,
     codex_spend_control_reached: Option<bool>,
     rate_limit_warnings: RateLimitWarningState,
+    backend_banner_state: backend_banners::BackendBannerState,
+    backend_banner_notice_model: Option<String>,
     warning_display_state: WarningDisplayState,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
-    add_credits_nudge_email_in_flight: Option<AddCreditsNudgeCreditType>,
+    add_credits_nudge_email_in_flight: Option<rate_limits::PendingCreditsNudge>,
     adaptive_chunking: AdaptiveChunkingPolicy,
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
@@ -662,15 +673,12 @@ pub(crate) struct ChatWidget {
     #[cfg(test)]
     pet_image_support_override: Option<crate::pets::PetImageSupport>,
     thread_id: Option<ThreadId>,
-    /// Nudge dismissals that should survive draft edits within the current thread scope.
-    ///
-    /// The nudge is only a discovery aid, so once a user dismisses it or enters Plan mode we keep it
-    /// hidden for that thread instead of resurfacing it on every matching draft.
-    dismissed_plan_mode_nudge_scopes: HashSet<PlanModeNudgeScope>,
     thread_name: Option<String>,
+    pending_automatic_thread_names: HashSet<String>,
     thread_rename_block_message: Option<String>,
     active_side_conversation: bool,
     blocks_direct_input: bool,
+    misalignment_policy_violation: bool,
     normal_placeholder_text: String,
     side_placeholder_text: String,
     forked_from: Option<ThreadId>,
@@ -691,6 +699,7 @@ pub(crate) struct ChatWidget {
     safety_buffering_prompt: Option<UserMessage>,
     /// Main chat-surface bindings resolved from `tui.keymap.chat`.
     chat_keymap: ChatKeymap,
+    permission_shortcut_pending: bool,
     /// Keybinding to show for popping the most-recently queued message back
     /// into the composer. This may differ from the first configured binding
     /// when the default set includes a terminal-specific fallback.
@@ -738,6 +747,8 @@ pub(crate) struct ChatWidget {
     terminal_title_setup_original_items: Option<Option<Vec<String>>>,
     // Baseline instant used to animate spinner-prefixed title statuses.
     terminal_title_animation_origin: Instant,
+    // The foreground loop refreshes the title at this deadline without drawing a frame.
+    pub(crate) terminal_title_next_refresh: Option<Instant>,
     // Cached project-root display name keyed by cwd for status/title rendering.
     status_line_project_root_name_cache: Option<CachedProjectRootName>,
     // Cached git branch name for the status line (None if unknown).
@@ -828,29 +839,10 @@ enum SessionConfiguredDisplay {
     SideConversation,
 }
 
-/// Scope used to keep Plan-mode nudge dismissal local to one conversation context.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum PlanModeNudgeScope {
-    /// Drafts entered before the server has assigned a thread id.
-    NewThread,
-    /// Drafts associated with one configured thread.
-    Thread(ThreadId),
-}
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum TurnAbortReason {
     Interrupted,
     BudgetLimited,
-}
-
-/// Returns whether `text` contains the standalone word `plan`.
-///
-/// This intentionally mirrors the App suggestion heuristic instead of trying to infer broader
-/// planning intent from substrings such as `planning`. Slash and shell drafts still match here so
-/// callers can keep lexical matching separate from presentation policy.
-fn contains_plan_keyword(text: &str) -> bool {
-    text.split(|ch: char| !ch.is_alphanumeric() && ch != '_')
-        .any(|word| word.eq_ignore_ascii_case("plan"))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -883,6 +875,7 @@ fn exec_approval_request_from_params(
         .and_then(|cwd| cwd.to_inferred_abs_path())
         .unwrap_or_else(|| fallback_cwd.clone());
     ExecApprovalRequestEvent {
+        kind: params.kind,
         call_id: params.item_id,
         command: params
             .command
@@ -984,13 +977,6 @@ impl ChatWidget {
         }
     }
 
-    /// Record or update the raw markdown for the current agent turn.
-    fn record_agent_markdown(&mut self, message: &str) {
-        if !message.is_empty() {
-            self.transcript.record_agent_markdown(message.to_string());
-        }
-    }
-
     pub(crate) fn open_feedback_note(
         &mut self,
         category: crate::app_event::FeedbackCategory,
@@ -1027,7 +1013,19 @@ impl ChatWidget {
     pub(crate) fn dismiss_app_server_request(&mut self, request: &ResolvedAppServerRequest) {
         // A remotely resolved request must not remain user-actionable. It may be
         // materialized in the bottom pane or still deferred behind active streaming.
-        let removed_deferred = self.interrupts.remove_resolved_prompt(request);
+        let request_thread_id = match request {
+            ResolvedAppServerRequest::ExecApproval { thread_id, .. }
+            | ResolvedAppServerRequest::FileChangeApproval { thread_id, .. }
+            | ResolvedAppServerRequest::PermissionsApproval { thread_id, .. } => {
+                Some(thread_id.as_str())
+            }
+            ResolvedAppServerRequest::UserInput { .. }
+            | ResolvedAppServerRequest::McpElicitation { .. } => None,
+        };
+        let removed_deferred = request_thread_id.is_none_or(|request_thread_id| {
+            self.thread_id
+                .is_some_and(|thread_id| thread_id.to_string() == request_thread_id)
+        }) && self.interrupts.remove_resolved_prompt(request);
         let removed_visible = self.bottom_pane.dismiss_app_server_request(request);
         if removed_deferred || removed_visible {
             self.request_redraw();
@@ -1212,7 +1210,6 @@ impl ChatWidget {
         if let Some(pet) = self.ambient_pet.as_ref() {
             pet.schedule_next_frame();
         }
-        self.refresh_plan_mode_nudge();
         self.refresh_goal_status_indicator_for_time_tick();
         if self.terminal_title_shows_action_required() != self.last_terminal_title_requires_action {
             self.refresh_terminal_title();
@@ -1231,6 +1228,18 @@ impl ChatWidget {
             self.transcript.needs_final_message_separator = true;
             self.app_event_tx.send(AppEvent::InsertHistoryCell(active));
             self.request_pending_usage_output_insertion();
+        }
+    }
+
+    fn flush_completed_command_activity(&mut self) {
+        if self
+            .transcript
+            .active_cell
+            .as_ref()
+            .and_then(|cell| cell.as_any().downcast_ref::<ExecCell>())
+            .is_some_and(|cell| !cell.is_active())
+        {
+            self.flush_active_cell();
         }
     }
 
@@ -1263,6 +1272,15 @@ impl ChatWidget {
                 self.flush_active_cell();
             }
             self.transcript.needs_final_message_separator = true;
+        } else if !keep_placeholder_header_active
+            && self
+                .transcript
+                .active_cell
+                .as_ref()
+                .is_some_and(|active_cell| active_cell.as_any().is::<ExecCell>())
+            && !cell.transcript_lines(history_width).is_empty()
+        {
+            self.flush_completed_command_activity();
         }
         self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
     }
@@ -1766,6 +1784,9 @@ impl ChatWidget {
         T: Into<AppCommand>,
     {
         let op: AppCommand = op.into();
+        if self.rejects_misalignment_policy_op(&op) {
+            return false;
+        }
         if self.blocks_direct_input
             && matches!(
                 &op,
@@ -1883,7 +1904,7 @@ impl ChatWidget {
     /// Returns a cache key describing the current in-flight cells for the transcript overlay.
     ///
     /// `Ctrl+T` renders committed transcript cells plus a render-only live tail derived from the
-    /// current active, hook, and asynchronous usage cells, and the overlay caches that tail; this
+    /// current active and asynchronous usage cells, and the overlay caches that tail; this
     /// key is what it uses to decide whether it must recompute. When there are no live cells, this
     /// returns `None` so the overlay can drop the tail entirely.
     ///
@@ -1892,14 +1913,9 @@ impl ChatWidget {
     /// the main viewport updates.
     pub(crate) fn active_cell_transcript_key(&self) -> Option<ActiveCellTranscriptKey> {
         let cell = self.transcript.active_cell.as_ref();
-        let hook_cell = self.active_hook_cell.as_ref();
         let token_activity_cell = self.pending_token_activity_output();
         let rate_limit_reset_hint = self.pending_rate_limit_reset_hint();
-        if cell.is_none()
-            && hook_cell.is_none()
-            && token_activity_cell.is_none()
-            && rate_limit_reset_hint.is_none()
-        {
+        if cell.is_none() && token_activity_cell.is_none() && rate_limit_reset_hint.is_none() {
             return None;
         }
         Some(ActiveCellTranscriptKey {
@@ -1907,11 +1923,7 @@ impl ChatWidget {
             is_stream_continuation: cell
                 .map(|cell| cell.is_stream_continuation())
                 .unwrap_or(false),
-            animation_tick: cell
-                .and_then(|cell| cell.transcript_animation_tick())
-                .or_else(|| {
-                    hook_cell.and_then(super::history_cell::HistoryCell::transcript_animation_tick)
-                }),
+            animation_tick: cell.and_then(|cell| cell.transcript_animation_tick()),
         })
     }
 
@@ -1928,14 +1940,6 @@ impl ChatWidget {
         let mut lines = Vec::new();
         if let Some(cell) = self.transcript.active_cell.as_ref() {
             lines.extend(cell.transcript_hyperlink_lines(width));
-        }
-        if let Some(hook_cell) = self.active_hook_cell.as_ref() {
-            // Compute hook lines first so hidden hooks do not add a separator.
-            let hook_lines = hook_cell.transcript_hyperlink_lines(width);
-            if !hook_lines.is_empty() && !lines.is_empty() {
-                lines.push(HyperlinkLine::from(""));
-            }
-            lines.extend(hook_lines);
         }
         if let Some(token_activity_cell) = self.pending_token_activity_output() {
             let token_activity_lines = token_activity_cell.transcript_hyperlink_lines(width);

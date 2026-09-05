@@ -1,0 +1,22 @@
+---
+source: tui/src/chatwidget/tests/status_and_layout.rs
+expression: "format!(\"80 columns:\\n{}\\n120 columns:\\n{}\", hook_status_frame(&chat, 80),\nhook_status_frame(&chat, 120),)"
+---
+80 columns:
+"                                                                                "
+"• Working (0s • esc to interrupt) · 1 background terminal running · /ps to view…"
+"  └ checking command policy                                                     "
+"                                                                                "
+"                                                                                "
+"› Ask Codex to do anything                                                      "
+"                                                                                "
+"  gpt-5.6-sol default · /tmp/project                                            "
+120 columns:
+"                                                                                                                        "
+"• Working (0s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close                        "
+"  └ checking command policy                                                                                             "
+"                                                                                                                        "
+"                                                                                                                        "
+"› Ask Codex to do anything                                                                                              "
+"                                                                                                                        "
+"  gpt-5.6-sol default · /tmp/project                                                                                    "

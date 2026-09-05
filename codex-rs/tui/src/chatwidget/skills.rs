@@ -8,38 +8,29 @@ use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::SkillsToggleItem;
 use crate::bottom_pane::SkillsToggleView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
+use crate::mention_codec::is_common_env_var;
+use crate::mention_codec::is_mention_name_char;
+use crate::mention_codec::parse_linked_tool_mention;
 use crate::skills_helpers::skill_description;
 use crate::skills_helpers::skill_display_name;
 use codex_app_server_protocol::SkillMetadata;
 use codex_app_server_protocol::SkillsListEntry;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_connectors::AppInfo;
-use codex_features::Feature;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_plugins::mention_syntax::TOOL_MENTION_SIGIL;
 
 impl ChatWidget {
     pub(crate) fn open_skills_list(&mut self) {
-        if self.config.features.enabled(Feature::MentionsV2) {
-            self.insert_str("@");
-        } else {
-            self.insert_str("$");
-        }
+        self.insert_str("$");
     }
 
     pub(crate) fn open_skills_menu(&mut self) {
-        let list_shortcut = if self.config.features.enabled(Feature::MentionsV2) {
-            '@'
-        } else {
-            '$'
-        };
         let items = vec![
             SelectionItem {
                 name: "List skills".to_string(),
-                description: Some(format!(
-                    "Tip: press {list_shortcut} to open this list directly."
-                )),
+                description: Some("Tip: press $ to open this list directly.".to_string()),
                 actions: vec![Box::new(|tx| {
                     tx.send(AppEvent::OpenSkillsList);
                 })],
@@ -309,8 +300,7 @@ fn extract_tool_mentions_from_text_with_sigil(text: &str, sigil: char) -> ToolMe
     while index < text_bytes.len() {
         let byte = text_bytes[index];
         if byte == b'['
-            && let Some((name, path, end_index)) =
-                parse_linked_tool_mention(text, text_bytes, index, sigil)
+            && let Some((name, path, end_index)) = parse_linked_tool_mention(text, index, sigil)
         {
             if !is_common_env_var(name) {
                 if is_skill_path(path) {
@@ -357,85 +347,6 @@ fn extract_tool_mentions_from_text_with_sigil(text: &str, sigil: char) -> ToolMe
         names,
         linked_paths,
     }
-}
-
-fn parse_linked_tool_mention<'a>(
-    text: &'a str,
-    text_bytes: &[u8],
-    start: usize,
-    sigil: char,
-) -> Option<(&'a str, &'a str, usize)> {
-    let sigil_index = start + 1;
-    if text_bytes.get(sigil_index) != Some(&(sigil as u8)) {
-        return None;
-    }
-
-    let name_start = sigil_index + 1;
-    let first_name_byte = text_bytes.get(name_start)?;
-    if !is_mention_name_char(*first_name_byte) {
-        return None;
-    }
-
-    let mut name_end = name_start + 1;
-    while let Some(next_byte) = text_bytes.get(name_end)
-        && is_mention_name_char(*next_byte)
-    {
-        name_end += 1;
-    }
-
-    if text_bytes.get(name_end) != Some(&b']') {
-        return None;
-    }
-
-    let mut path_start = name_end + 1;
-    while let Some(next_byte) = text_bytes.get(path_start)
-        && next_byte.is_ascii_whitespace()
-    {
-        path_start += 1;
-    }
-    if text_bytes.get(path_start) != Some(&b'(') {
-        return None;
-    }
-
-    let mut path_end = path_start + 1;
-    while let Some(next_byte) = text_bytes.get(path_end)
-        && *next_byte != b')'
-    {
-        path_end += 1;
-    }
-    if text_bytes.get(path_end) != Some(&b')') {
-        return None;
-    }
-
-    let path = text[path_start + 1..path_end].trim();
-    if path.is_empty() {
-        return None;
-    }
-
-    let name = &text[name_start..name_end];
-    Some((name, path, path_end + 1))
-}
-
-fn is_common_env_var(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
-    matches!(
-        upper.as_str(),
-        "PATH"
-            | "HOME"
-            | "USER"
-            | "SHELL"
-            | "PWD"
-            | "TMPDIR"
-            | "TEMP"
-            | "TMP"
-            | "LANG"
-            | "TERM"
-            | "XDG_CONFIG_HOME"
-    )
-}
-
-fn is_mention_name_char(byte: u8) -> bool {
-    matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-')
 }
 
 fn is_skill_path(path: &str) -> bool {

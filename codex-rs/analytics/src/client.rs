@@ -33,24 +33,41 @@ use crate::facts::TurnCodexErrorFact;
 use crate::facts::TurnProfileFact;
 use crate::facts::TurnResolvedConfigFact;
 use crate::facts::TurnTokenUsageFact;
+use crate::guardian_v2::GuardianV2Event;
 use crate::now_unix_millis;
 use crate::reducer::AnalyticsReducer;
 use crate::reducer::MAX_PLUGIN_MEASUREMENTS_PER_BATCH;
+use crate::reducer::tracked_tool_item_id;
 use crate::reducer::valid_plugin_measurement_identifier;
 use crate::reducer::valid_plugin_measurement_row;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::InitializeParams;
+use codex_app_server_protocol::ItemCompletedNotification;
+use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ServerResponse;
+use codex_app_server_protocol::Turn;
+use codex_app_server_protocol::TurnCompletedNotification;
+use codex_app_server_protocol::TurnError;
+use codex_app_server_protocol::TurnItemsView;
+use codex_app_server_protocol::TurnStartedNotification;
+use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::item_event_to_server_notification;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::default_client::create_client;
 use codex_plugin::PluginId;
 use codex_plugin::PluginTelemetryMetadata;
+use codex_protocol::ThreadId;
+use codex_protocol::items::CollabAgentToolCallItem;
+use codex_protocol::items::CollabAgentToolCallStatus;
+use codex_protocol::items::TurnItem;
+use codex_protocol::protocol::Event;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -335,10 +352,50 @@ impl AnalyticsEventsClient {
         ));
     }
 
+    /// Logs Guardian turn and tool events that bypass the app-server listener.
+    pub fn track_guardian_session_event(&self, thread_id: ThreadId, event: &Event) {
+        if let Some(notification) = session_event_to_analytics_notification(thread_id, event) {
+            self.track_notification(&notification);
+        }
+    }
+
+    pub fn track_collab_tool_call(
+        &self,
+        turn_id: String,
+        mut item: CollabAgentToolCallItem,
+        started_at_ms: i64,
+        completed_at_ms: i64,
+    ) {
+        let thread_id = item.sender_thread_id.to_string();
+        let completed_item = TurnItem::CollabAgentToolCall(item.clone()).into();
+        item.status = CollabAgentToolCallStatus::InProgress;
+
+        self.track_notification(&ServerNotification::ItemStarted(ItemStartedNotification {
+            item: TurnItem::CollabAgentToolCall(item).into(),
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            started_at_ms,
+        }));
+        self.track_notification(&ServerNotification::ItemCompleted(
+            ItemCompletedNotification {
+                item: completed_item,
+                thread_id,
+                turn_id,
+                completed_at_ms,
+            },
+        ));
+    }
+
     pub fn track_code_mode_tool_call(&self, input: crate::facts::CodeModeToolCallFact) {
         self.record_fact(AnalyticsFact::Custom(
             CustomAnalyticsFact::CodeModeToolCall(input),
         ));
+    }
+
+    pub fn track_control_tool_call(&self, input: crate::facts::ControlToolCallFact) {
+        self.record_fact(AnalyticsFact::Custom(CustomAnalyticsFact::ControlToolCall(
+            input,
+        )));
     }
 
     pub fn track_guardian_review(
@@ -437,6 +494,12 @@ impl AnalyticsEventsClient {
 
     pub fn track_compaction(&self, event: crate::facts::CodexCompactionEvent) {
         self.record_fact(AnalyticsFact::Custom(CustomAnalyticsFact::Compaction(
+            Box::new(event),
+        )));
+    }
+
+    pub fn track_guardian_v2_event(&self, event: GuardianV2Event) {
+        self.record_fact(AnalyticsFact::Custom(CustomAnalyticsFact::GuardianV2(
             Box::new(event),
         )));
     }
@@ -674,6 +737,94 @@ impl AnalyticsEventsClient {
             return;
         }
         self.record_fact(AnalyticsFact::Notification(Box::new(notification.clone())));
+    }
+}
+
+fn session_event_to_analytics_notification(
+    thread_id: ThreadId,
+    event: &Event,
+) -> Option<ServerNotification> {
+    let notification = match &event.msg {
+        EventMsg::ItemStarted(started) => item_event_to_server_notification(
+            event.msg.clone(),
+            &started.thread_id.to_string(),
+            &started.turn_id,
+        ),
+        EventMsg::ItemCompleted(completed) => item_event_to_server_notification(
+            event.msg.clone(),
+            &completed.thread_id.to_string(),
+            &completed.turn_id,
+        ),
+        EventMsg::TurnStarted(started) => {
+            ServerNotification::TurnStarted(TurnStartedNotification {
+                thread_id: thread_id.to_string(),
+                turn: Turn {
+                    started_at: started.started_at,
+                    ..analytics_turn(&started.turn_id, TurnStatus::InProgress)
+                },
+            })
+        }
+        EventMsg::TurnComplete(completed) => {
+            let error = completed.error.as_ref().map(|error| TurnError {
+                message: String::new(),
+                codex_error_info: error.codex_error_info.clone().map(Into::into),
+                additional_details: None,
+                misalignment: None,
+            });
+            let status = if error.is_some() {
+                TurnStatus::Failed
+            } else {
+                TurnStatus::Completed
+            };
+            ServerNotification::TurnCompleted(TurnCompletedNotification {
+                thread_id: thread_id.to_string(),
+                turn: Turn {
+                    error,
+                    started_at: completed.started_at,
+                    completed_at: completed.completed_at,
+                    duration_ms: completed.duration_ms,
+                    ..analytics_turn(&completed.turn_id, status)
+                },
+            })
+        }
+        EventMsg::TurnAborted(aborted) => {
+            ServerNotification::TurnCompleted(TurnCompletedNotification {
+                thread_id: thread_id.to_string(),
+                turn: Turn {
+                    started_at: aborted.started_at,
+                    completed_at: aborted.completed_at,
+                    duration_ms: aborted.duration_ms,
+                    ..analytics_turn(
+                        aborted.turn_id.as_deref().unwrap_or(&event.id),
+                        TurnStatus::Interrupted,
+                    )
+                },
+            })
+        }
+        // Legacy tool events accompany canonical items. Messages, reasoning, and review
+        // content must not enter the analytics queue.
+        _ => return None,
+    };
+    match &notification {
+        ServerNotification::ItemStarted(ItemStartedNotification { item, .. })
+        | ServerNotification::ItemCompleted(ItemCompletedNotification { item, .. }) => {
+            tracked_tool_item_id(item)?;
+        }
+        _ => {}
+    }
+    Some(notification)
+}
+
+fn analytics_turn(turn_id: &str, status: TurnStatus) -> Turn {
+    Turn {
+        id: turn_id.to_string(),
+        items: Vec::new(),
+        items_view: TurnItemsView::NotLoaded,
+        status,
+        error: None,
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
     }
 }
 

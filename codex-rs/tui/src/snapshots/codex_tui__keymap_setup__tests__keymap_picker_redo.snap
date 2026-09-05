@@ -1,0 +1,5 @@
+---
+source: tui/src/keymap_setup.rs
+expression: redo_row
+---
+› Vim normal     Redo                       ctrl-r

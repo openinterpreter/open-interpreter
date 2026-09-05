@@ -374,8 +374,7 @@ impl ConnectionDriver {
                 return false;
             }
         };
-        let lane = message.transport_lane();
-        self.queue_frame(frame, lane)
+        self.queue_frame(frame)
     }
 
     fn shutdown_abandoned_session(&mut self, session: RemoteSession) -> bool {

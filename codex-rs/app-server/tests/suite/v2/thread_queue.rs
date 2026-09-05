@@ -4,10 +4,10 @@ use anyhow::Context;
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
+use app_test_support::create_escalated_command_execution_sse_response;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
-use app_test_support::create_shell_command_sse_response;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
@@ -19,6 +19,9 @@ use codex_app_server_protocol::QueuedSubmission;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadListResponse;
+use codex_app_server_protocol::ThreadLoadedListParams;
+use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadQueueAddParams;
 use codex_app_server_protocol::ThreadQueueAddResponse;
 use codex_app_server_protocol::ThreadQueueChangedNotification;
@@ -32,10 +35,16 @@ use codex_app_server_protocol::ThreadQueueStartParams;
 use codex_app_server_protocol::ThreadQueueStartResponse;
 use codex_app_server_protocol::ThreadQueueUpdateParams;
 use codex_app_server_protocol::ThreadQueueUpdateResponse;
+use codex_app_server_protocol::ThreadReadParams;
+use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::ThreadSettingsUpdateParams;
+use codex_app_server_protocol::ThreadSettingsUpdateResponse;
+use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnInterruptResponse;
@@ -43,6 +52,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
+use codex_protocol::openai_models::ReasoningEffort;
 use core_test_support::skip_if_remote;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -412,6 +422,7 @@ async fn idle_queue_dispatch_preserves_client_id() -> Result<()> {
         metadata["turn_id"].as_str(),
         Some(completed.turn.id.as_str())
     );
+    assert_eq!(metadata["turn_trigger"].as_str(), Some("queue"));
     Ok(())
 }
 
@@ -439,6 +450,21 @@ async fn cold_thread_resume_dispatches_a_persisted_queued_submission() -> Result
         .await?;
     let _: TurnCompletedNotification =
         timeout(READ_TIMEOUT, first.read_notification("turn/completed")).await??;
+    let update_id = first
+        .send_thread_settings_update_request(ThreadSettingsUpdateParams {
+            thread_id: thread_id.clone(),
+            model: Some("gpt-5.2".to_string()),
+            effort: Some(ReasoningEffort::High),
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadSettingsUpdateResponse =
+        timeout(READ_TIMEOUT, first.read_response(update_id)).await??;
+    let _: ThreadSettingsUpdatedNotification = timeout(
+        READ_TIMEOUT,
+        first.read_notification("thread/settings/updated"),
+    )
+    .await??;
     drop(first);
 
     let mut resumed = TestAppServer::builder()
@@ -454,10 +480,52 @@ async fn cold_thread_resume_dispatches_a_persisted_queued_submission() -> Result
         },
     )
     .await?;
+    let read_id = resumed
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: thread_id.clone(),
+            include_turns: false,
+        })
+        .await?;
+    let read: ThreadReadResponse = timeout(READ_TIMEOUT, resumed.read_response(read_id)).await??;
+    assert_eq!(
+        (read.thread.model.as_deref(), read.thread.reasoning_effort),
+        (Some("gpt-5.2"), Some(ReasoningEffort::High))
+    );
+    assert_eq!(read.thread.status, ThreadStatus::NotLoaded);
+    for use_state_db_only in [false, true] {
+        let list_id = resumed
+            .send_raw_request(
+                "thread/list",
+                Some(json!({ "useStateDbOnly": use_state_db_only })),
+            )
+            .await?;
+        let listed: ThreadListResponse =
+            timeout(READ_TIMEOUT, resumed.read_response(list_id)).await??;
+        let listed = listed
+            .data
+            .iter()
+            .find(|listed| listed.id == thread_id)
+            .expect("persisted thread should be listed");
+        assert_eq!(
+            (listed.model.as_deref(), listed.reasoning_effort.clone()),
+            (Some("gpt-5.2"), Some(ReasoningEffort::High))
+        );
+        assert_eq!(listed.status, ThreadStatus::NotLoaded);
+    }
+    let loaded_id = resumed
+        .send_thread_loaded_list_request(ThreadLoadedListParams::default())
+        .await?;
+    let loaded: ThreadLoadedListResponse =
+        timeout(READ_TIMEOUT, resumed.read_response(loaded_id)).await??;
+    assert!(
+        loaded.data.is_empty(),
+        "metadata reads must not resume threads"
+    );
     assert_eq!(
         list_queue(&mut resumed, &thread_id).await?.data,
         vec![queued]
     );
+
     let request_id = resumed
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: thread_id.clone(),
@@ -715,7 +783,7 @@ async fn queue_start_without_id_starts_the_head_when_idle() -> Result<()> {
         create_final_assistant_message_sse_response("first queued message done")?,
         create_final_assistant_message_sse_response("second queued message done")?,
     ];
-    let (mut app, _codex_home, _server) = queue_app(responses).await?;
+    let (mut app, _codex_home, server) = queue_app(responses).await?;
     let thread_id = app
         .start_thread(ThreadStartParams::default())
         .await?
@@ -765,6 +833,26 @@ async fn queue_start_without_id_starts_the_head_when_idle() -> Result<()> {
         assert_eq!(completed.turn.status, TurnStatus::Completed);
     }
     assert!(list_queue(&mut app, &thread_id).await?.data.is_empty());
+
+    let requests = server
+        .received_requests()
+        .await
+        .context("mock request capture unavailable")?;
+    let response_requests = requests
+        .iter()
+        .filter(|request| request.url.path().ends_with("/responses"))
+        .collect::<Vec<_>>();
+    assert_eq!(response_requests.len(), 3);
+    for request in &response_requests[1..] {
+        let metadata_header = request
+            .headers
+            .get("x-codex-turn-metadata")
+            .context("queued model request is missing its x-codex-turn-metadata header")?
+            .to_str()
+            .context("queued turn metadata header is not valid ASCII")?;
+        let metadata: Value = serde_json::from_str(metadata_header)?;
+        assert_eq!(metadata["turn_trigger"].as_str(), Some("queue"));
+    }
     Ok(())
 }
 
@@ -863,7 +951,7 @@ async fn queue_app(responses: Vec<String>) -> Result<(TestAppServer, TempDir, Mo
 async fn queue_app_with_server(server: MockServer) -> Result<(TestAppServer, TempDir, MockServer)> {
     let codex_home = TempDir::new()?;
     let config = MockResponsesConfig::new(&server.uri())
-        .with_approval_policy("untrusted")
+        .with_approval_policy("on-request")
         .with_root_config(r#"approvals_reviewer = "user""#);
     config.write(codex_home.path())?;
     let app = TestAppServer::builder()
@@ -888,7 +976,7 @@ fn blocked_turn_response() -> Result<String> {
         "import time; time.sleep(10)".to_string(),
     ];
 
-    create_shell_command_sse_response(
+    create_escalated_command_execution_sse_response(
         shell_command,
         /*workdir*/ None,
         /*timeout_ms*/ Some(10_000),

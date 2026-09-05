@@ -127,8 +127,7 @@ impl ConnectionDriver {
             },
             &self.event_tx,
         );
-        let lane = message.transport_lane();
-        self.queue_frame(frame, lane)
+        self.queue_frame(frame)
     }
 
     fn execute(
@@ -187,8 +186,7 @@ impl ConnectionDriver {
             },
             &self.event_tx,
         );
-        let lane = message.transport_lane();
-        self.queue_frame(frame, lane)
+        self.queue_frame(frame)
     }
 
     fn wait(
@@ -317,7 +315,6 @@ impl ConnectionDriver {
         };
         self.requests
             .insert_pending(request_id, pending, &self.event_tx);
-        let lane = message.transport_lane();
-        self.queue_frame(frame, lane)
+        self.queue_frame(frame)
     }
 }

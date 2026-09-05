@@ -5,6 +5,8 @@ use codex_utils_path_uri::PathUri;
 use tokio::io;
 use tokio_util::io::ReaderStream;
 
+use crate::CapabilityRootsDiscoverParams;
+use crate::CapabilityRootsDiscoverResponse;
 use crate::CopyOptions;
 use crate::CreateDirectoryOptions;
 use crate::ExecServerRuntimePaths;
@@ -15,10 +17,13 @@ use crate::FileMetadata;
 use crate::FileSystemReadStream;
 use crate::FileSystemResult;
 use crate::FileSystemSandboxContext;
+use crate::GetMetadataOptions;
 use crate::ReadDirectoryEntry;
+use crate::ReadFileOptions;
 use crate::RemoveOptions;
 use crate::WalkOptions;
 use crate::WalkOutcome;
+use crate::WriteFileOptions;
 use crate::fs_helper::FsHelperPayload;
 use crate::fs_helper::FsHelperRequest;
 use crate::fs_sandbox::FileSystemSandboxRunner;
@@ -38,6 +43,22 @@ pub struct SandboxedFileSystem {
 }
 
 impl SandboxedFileSystem {
+    #[tracing::instrument(
+        name = "capability_roots.discover_v1",
+        skip_all,
+        fields(root_count = params.roots.len())
+    )]
+    pub(crate) async fn discover_capability_roots(
+        &self,
+        params: CapabilityRootsDiscoverParams,
+        sandbox: &FileSystemSandboxContext,
+    ) -> FileSystemResult<CapabilityRootsDiscoverResponse> {
+        self.run_sandboxed(sandbox, FsHelperRequest::DiscoverCapabilityRoots(params))
+            .await?
+            .expect_capability_roots_discover()
+            .map_err(map_sandbox_error)
+    }
+
     pub(crate) async fn open_file_for_read(
         &self,
         path: &PathUri,
@@ -97,6 +118,7 @@ impl SandboxedFileSystem {
     async fn read_file(
         &self,
         path: &PathUri,
+        options: ReadFileOptions,
         sandbox: Option<&FileSystemSandboxContext>,
     ) -> FileSystemResult<Vec<u8>> {
         let sandbox = require_platform_sandbox(sandbox)?;
@@ -106,6 +128,7 @@ impl SandboxedFileSystem {
                 sandbox,
                 FsHelperRequest::ReadFile(FsReadFileParams {
                     path: path.clone(),
+                    follow_symlinks: (!options.follow_symlinks).then_some(false),
                     sandbox: None,
                 }),
             )
@@ -124,6 +147,7 @@ impl SandboxedFileSystem {
         &self,
         path: &PathUri,
         contents: Vec<u8>,
+        options: WriteFileOptions,
         sandbox: Option<&FileSystemSandboxContext>,
     ) -> FileSystemResult<()> {
         let sandbox = require_platform_sandbox(sandbox)?;
@@ -133,6 +157,7 @@ impl SandboxedFileSystem {
             FsHelperRequest::WriteFile(FsWriteFileParams {
                 path: path.clone(),
                 data_base64: STANDARD.encode(contents),
+                follow_symlinks: (!options.follow_symlinks).then_some(false),
                 sandbox: None,
             }),
         )
@@ -155,8 +180,8 @@ impl SandboxedFileSystem {
             FsHelperRequest::CreateDirectory(FsCreateDirectoryParams {
                 path: path.clone(),
                 recursive: Some(options.recursive),
+                follow_symlinks: (!options.follow_symlinks).then_some(false),
                 sandbox: None,
-                private: None,
             }),
         )
         .await?
@@ -168,6 +193,7 @@ impl SandboxedFileSystem {
     async fn get_metadata(
         &self,
         path: &PathUri,
+        options: GetMetadataOptions,
         sandbox: Option<&FileSystemSandboxContext>,
     ) -> FileSystemResult<FileMetadata> {
         let sandbox = require_platform_sandbox(sandbox)?;
@@ -177,6 +203,7 @@ impl SandboxedFileSystem {
                 sandbox,
                 FsHelperRequest::GetMetadata(FsGetMetadataParams {
                     path: path.clone(),
+                    follow_symlinks: (!options.follow_symlinks).then_some(false),
                     sandbox: None,
                 }),
             )
@@ -259,6 +286,7 @@ impl SandboxedFileSystem {
                 path: path.clone(),
                 recursive: Some(remove_options.recursive),
                 force: Some(remove_options.force),
+                follow_symlinks: (!remove_options.follow_symlinks).then_some(false),
                 sandbox: None,
             }),
         )
@@ -306,9 +334,10 @@ impl ExecutorFileSystem for SandboxedFileSystem {
     fn read_file<'a>(
         &'a self,
         path: &'a PathUri,
+        options: ReadFileOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
-        Box::pin(SandboxedFileSystem::read_file(self, path, sandbox))
+        Box::pin(SandboxedFileSystem::read_file(self, path, options, sandbox))
     }
 
     fn read_file_stream<'a>(
@@ -329,10 +358,11 @@ impl ExecutorFileSystem for SandboxedFileSystem {
         &'a self,
         path: &'a PathUri,
         contents: Vec<u8>,
+        options: WriteFileOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, ()> {
         Box::pin(SandboxedFileSystem::write_file(
-            self, path, contents, sandbox,
+            self, path, contents, options, sandbox,
         ))
     }
 
@@ -350,9 +380,12 @@ impl ExecutorFileSystem for SandboxedFileSystem {
     fn get_metadata<'a>(
         &'a self,
         path: &'a PathUri,
+        options: GetMetadataOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, FileMetadata> {
-        Box::pin(SandboxedFileSystem::get_metadata(self, path, sandbox))
+        Box::pin(SandboxedFileSystem::get_metadata(
+            self, path, options, sandbox,
+        ))
     }
 
     fn read_directory<'a>(

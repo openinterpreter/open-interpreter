@@ -69,6 +69,7 @@ pub fn installed_connector_runtime<'a>(
         let policy_allows_tool = policy
             .policy(AppToolPolicyInput {
                 connector_id: Some(connector_id),
+                link_id: None,
                 tool_name: tool.tool_name,
                 tool_title: tool.tool_title,
                 destructive_hint: tool.destructive_hint,

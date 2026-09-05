@@ -1,5 +1,6 @@
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
+use crate::context::world_state::validate_managed_developer_instructions;
 use crate::guardian::BUNDLED_GUARDIAN_POLICY;
 use crate::path_utils::normalize_for_native_workdir;
 use crate::unified_exec::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS;
@@ -7,6 +8,7 @@ use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
 use crate::windows_sandbox::resolve_windows_sandbox_mode;
 use crate::windows_sandbox::resolve_windows_sandbox_private_desktop;
+use codex_agent_roles::load_agent_roles;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
@@ -31,6 +33,7 @@ use codex_config::config_toml::ThreadStoreToml;
 use codex_config::config_toml::validate_model_providers;
 use codex_config::loader::load_config_layers_state;
 use codex_config::loader::project_trust_key;
+use codex_config::permissions_toml::PermissionProfileToml;
 use codex_config::permissions_toml::PermissionsToml;
 use codex_config::sandbox_mode_requirement_for_permission_profile;
 use codex_config::types::ApprovalsReviewer;
@@ -57,6 +60,7 @@ use codex_core_plugins::PluginLoadOutcome;
 use codex_core_plugins::PluginsConfigInput;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::LOCAL_FS;
+use codex_exec_server::ReadFileOptions;
 use codex_features::CodeModeConfigToml;
 use codex_features::CurrentTimeReminderConfigToml;
 use codex_features::CurrentTimeReminderDeliveryMode;
@@ -69,6 +73,7 @@ use codex_features::Features;
 use codex_features::FeaturesToml;
 use codex_features::MultiAgentV2ConfigToml;
 use codex_features::NetworkProxyConfigToml;
+use codex_features::SleepToolMode;
 use codex_features::TokenBudgetConfigToml;
 use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_http_client::HttpClientFactory;
@@ -76,6 +81,7 @@ use codex_http_client::OutboundProxyPolicy;
 use codex_install_context::InstallContext;
 use codex_login::AuthManagerConfig;
 use codex_login::AuthRouteConfig;
+use codex_mcp::DEFAULT_OPTIONAL_MCP_STARTUP_GRACE;
 use codex_mcp::McpConfig;
 use codex_mcp::McpPluginAttribution;
 use codex_mcp::McpProtocolMode;
@@ -112,11 +118,14 @@ use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ModelMessages;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::permissions::ReadDenyMatcher;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_rmcp_client::McpOAuthRefreshMode;
 pub use codex_thread_store::ExtraConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
@@ -131,9 +140,11 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::ErrorKind;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::config::permissions::BUILT_IN_READ_ONLY_PROFILE;
 use crate::config::permissions::BUILT_IN_WORKSPACE_PROFILE;
@@ -150,13 +161,13 @@ use codex_network_proxy::NetworkProxyConfig;
 use toml::Value as TomlValue;
 use toml_edit::DocumentMut;
 
-pub(crate) mod agent_roles;
 mod auth_keyring;
 pub mod edit;
 mod managed_features;
 mod network_proxy_spec;
 mod otel;
 mod permission_profile_catalog;
+mod permission_profile_selection;
 mod permissions;
 mod requirements;
 mod resolved_permission_profile;
@@ -164,6 +175,7 @@ mod resolved_permission_profile;
 mod schema;
 pub use auth_keyring::bootstrap_auth_config;
 pub use auth_keyring::resolve_bootstrap_auth_keyring_backend_kind;
+pub use codex_agent_roles::AgentRoleConfig;
 pub use codex_config::ConfigLoadOptions;
 pub use codex_config::Constrained;
 pub use codex_config::ConstraintError;
@@ -180,11 +192,20 @@ pub use permission_profile_catalog::permission_profile_catalog;
 use permission_profile_catalog::permission_profile_catalog_from_permissions;
 use permission_profile_catalog::permission_profile_is_allowed;
 use permission_profile_catalog::validate_permission_profile_for_deny_read;
+pub use permission_profile_selection::ResolvedPermissionProfileSelection;
+pub use permission_profile_selection::resolve_permission_profile_selection;
+pub use permissions::compile_permission_profile;
 pub(crate) use permissions::is_builtin_permission_profile_name;
+pub use permissions::resolve_permission_profile;
 pub(crate) use resolved_permission_profile::PermissionProfileState;
 
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_FILES: i64 = 10 * 1024 * 1024;
+
+/// Signals that a public config selected the retired `untrusted` approval policy.
+#[derive(Debug, thiserror::Error)]
+#[error("approval_policy = \"untrusted\" is no longer supported; remove this setting")]
+pub struct UnsupportedUntrustedApprovalPolicyError;
 
 /// Compatibility-only config retained so legacy `ghost_snapshot` settings
 /// continue to load even though snapshots are no longer produced.
@@ -286,6 +307,8 @@ pub struct Permissions {
     /// Constrained permission profile plus its selected profile identity, if
     /// the profile came from a built-in or named config profile.
     permission_profile_state: PermissionProfileState,
+    /// Managed deny-read rules retained independently from user-defined denies.
+    managed_deny_read_policy: Option<Arc<FileSystemSandboxPolicy>>,
     /// Thread-scoped runtime workspace roots. Symbolic `:workspace_roots`
     /// entries in the permission profile are materialized against these roots.
     workspace_roots: Vec<AbsolutePathBuf>,
@@ -321,6 +344,7 @@ impl Permissions {
             permission_profile_state: PermissionProfileState::from_constrained_legacy(
                 permission_profile,
             )?,
+            managed_deny_read_policy: None,
             workspace_roots: Vec::new(),
             network: None,
             allow_login_shell: true,
@@ -377,8 +401,10 @@ impl Permissions {
         &self,
         permission_profile: &PermissionProfile,
     ) -> ConstraintResult<()> {
+        let permission_profile =
+            self.permission_profile_preserving_managed_denied_reads(permission_profile.clone());
         self.permission_profile_state
-            .can_set_legacy_permission_profile(permission_profile)
+            .can_set_legacy_permission_profile(&permission_profile)
     }
 
     pub fn set_workspace_roots(&mut self, workspace_roots: Vec<AbsolutePathBuf>) {
@@ -444,8 +470,7 @@ impl Permissions {
             &file_system_sandbox_policy,
             network_sandbox_policy,
         );
-        self.permission_profile_state
-            .can_set_legacy_permission_profile(&permission_profile)
+        self.can_set_permission_profile(&permission_profile)
     }
 
     /// Set permissions from a legacy sandbox policy and keep every permission
@@ -485,9 +510,7 @@ impl Permissions {
             ],
         };
 
-        self.permission_profile_state
-            .set_legacy_permission_profile(permission_profile)?;
-        Ok(())
+        self.set_permission_profile(permission_profile)
     }
 
     /// Set permissions from the canonical profile.
@@ -495,8 +518,33 @@ impl Permissions {
         &mut self,
         permission_profile: PermissionProfile,
     ) -> ConstraintResult<()> {
+        let permission_profile =
+            self.permission_profile_preserving_managed_denied_reads(permission_profile);
         self.permission_profile_state
             .set_legacy_permission_profile(permission_profile)
+    }
+
+    fn permission_profile_preserving_managed_denied_reads(
+        &self,
+        permission_profile: PermissionProfile,
+    ) -> PermissionProfile {
+        let Some(managed_deny_read_policy) = self.managed_deny_read_policy.as_ref() else {
+            return permission_profile;
+        };
+        if matches!(
+            sandbox_mode_requirement_for_permission_profile(&permission_profile),
+            SandboxModeRequirement::DangerFullAccess | SandboxModeRequirement::ExternalSandbox
+        ) {
+            return permission_profile;
+        }
+        let enforcement = permission_profile.enforcement();
+        let (mut file_system_policy, network_policy) = permission_profile.to_runtime_permissions();
+        file_system_policy.preserve_deny_read_restrictions_from(managed_deny_read_policy);
+        PermissionProfile::from_runtime_permissions_with_enforcement(
+            enforcement,
+            &file_system_policy,
+            network_policy,
+        )
     }
 }
 
@@ -659,6 +707,9 @@ pub struct Config {
     /// Whether to inject the `<skills_instructions>` developer block.
     pub include_skill_instructions: bool,
 
+    /// Optional token budget override for the available-skills catalog.
+    pub skill_max_context_tokens: Option<NonZeroUsize>,
+
     /// Whether orchestrator-owned skills are exposed to the model.
     pub orchestrator_skills_enabled: bool,
 
@@ -701,6 +752,9 @@ pub struct Config {
 
     /// Show startup tooltips in the TUI welcome screen.
     pub show_tooltips: bool,
+
+    /// Generate automatic TUI recaps. Manual `/recap` remains available when disabled.
+    pub tui_auto_recap: bool,
 
     /// Persisted startup availability NUX state for model tooltips.
     pub model_availability_nux: ModelAvailabilityNuxConfig,
@@ -809,6 +863,9 @@ pub struct Config {
     /// of the local listener address. The local callback listener still binds
     /// to 127.0.0.1 (using `mcp_oauth_callback_port` when provided).
     pub mcp_oauth_callback_url: Option<String>,
+
+    /// How long to wait for optional MCP servers while building the initial tool catalog.
+    pub mcp_optional_startup_grace: Duration,
 
     /// Combined provider map (defaults plus user-defined providers).
     pub model_providers: HashMap<String, ModelProviderInfo>,
@@ -960,10 +1017,6 @@ pub struct Config {
     /// instructions inserted into developer messages when realtime becomes
     /// active.
     pub experimental_realtime_start_instructions: Option<String>,
-    /// Experimental / do not use. When set, app-server fetches thread-scoped
-    /// config from a remote service at this endpoint.
-    pub experimental_thread_config_endpoint: Option<String>,
-
     /// Experimental / do not use. Selects the thread persistence backend.
     pub experimental_thread_store: ThreadStoreConfig,
     /// When set, restricts ChatGPT login to one or more workspace identifiers.
@@ -990,9 +1043,6 @@ pub struct Config {
     /// Configuration for the experimental code-mode tool surface.
     pub code_mode: CodeModeConfig,
 
-    /// If set to `true`, used only the experimental unified exec tool.
-    pub use_experimental_unified_exec_tool: bool,
-
     /// Maximum poll window for background terminal output (`write_stdin`), in milliseconds.
     /// Default: `300000` (5 minutes).
     pub background_terminal_max_timeout: u64,
@@ -1010,6 +1060,8 @@ pub struct Config {
     pub rollout_budget: Option<RolloutBudgetConfig>,
     /// Current-time reminder and clock tool configuration, when enabled.
     pub current_time_reminder: Option<CurrentTimeReminderConfig>,
+    /// How the sleep tool is selected when its feature gate is enabled.
+    pub sleep_tool_mode: SleepToolMode,
 
     /// Centralized feature flags; source of truth for feature gating.
     pub features: ManagedFeatures,
@@ -1089,6 +1141,7 @@ const AUTO_COMPACT_FALLBACK_PROMPT_MAX_BYTES: usize = 2000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TokenBudgetConfig {
+    pub use_history_notes_extension: bool,
     pub reminder_threshold_tokens: Option<i64>,
     pub reminder_message_template: String,
     pub guidance_message: Option<String>,
@@ -1181,6 +1234,7 @@ impl TokenBudgetConfig {
 impl Default for TokenBudgetConfig {
     fn default() -> Self {
         Self {
+            use_history_notes_extension: false,
             reminder_threshold_tokens: None,
             reminder_message_template: DEFAULT_TOKEN_BUDGET_REMINDER_MESSAGE_TEMPLATE.to_string(),
             guidance_message: None,
@@ -1460,6 +1514,17 @@ impl Config {
         &self.sqlite
     }
 
+    /// Whether Guardian may use the unmetered Codex inference endpoints.
+    pub fn free_guardian_enabled(&self) -> bool {
+        self.config_layer_stack
+            .effective_config()
+            .get("features")
+            .and_then(|features| features.get("guardianv2"))
+            .and_then(|guardian| guardian.get("free_guardian"))
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false)
+    }
+
     /// Resolves the configured, reviewer-catalog, or bundled Guardian policy.
     pub fn resolve_guardian_policy<'a>(
         &'a self,
@@ -1660,7 +1725,8 @@ impl Config {
                     plugin.config_name.clone(),
                     plugin.display_name().to_string(),
                 )
-            };
+            }
+            .with_host_root(PathUri::from_abs_path(&plugin.root));
             for (name, plugin_server) in plugin_mcp_servers {
                 catalog.register(McpServerRegistration::from_plugin(
                     name,
@@ -1685,9 +1751,15 @@ impl Config {
             apps_mcp_product_sku: self.apps_mcp_product_sku.clone(),
             codex_home: self.codex_home.to_path_buf(),
             mcp_oauth_credentials_store_mode: self.mcp_oauth_credentials_store_mode,
+            oauth_refresh_mode: if self.features.enabled(Feature::McpOAuthRefreshCoordination) {
+                McpOAuthRefreshMode::Coordinated
+            } else {
+                McpOAuthRefreshMode::Legacy
+            },
             auth_keyring_backend_kind: self.auth_keyring_backend_kind(),
             mcp_oauth_callback_port: self.mcp_oauth_callback_port,
             mcp_oauth_callback_url: self.mcp_oauth_callback_url.clone(),
+            optional_mcp_startup_grace: self.mcp_optional_startup_grace,
             skill_mcp_dependency_install_enabled: self
                 .features
                 .enabled(Feature::SkillMcpDependencyInstall),
@@ -1696,6 +1768,7 @@ impl Config {
             config_layer_stack: self.config_layer_stack.clone(),
             approvals_reviewer: self.approvals_reviewer,
             environment_cwds: HashMap::new(),
+            server_permission_profiles: HashMap::new(),
             codex_linux_sandbox_exe: self.codex_linux_sandbox_exe.clone(),
             use_legacy_landlock: self.features.use_legacy_landlock(),
             apps_enabled: self.features.enabled(Feature::Apps),
@@ -2025,7 +2098,7 @@ fn filter_mcp_servers_by_requirements(
         let allowed = allowlist
             .value
             .get(name)
-            .is_some_and(|requirement| requirement.matches(server));
+            .is_some_and(|requirement| server.matches_requirement(requirement));
         if allowed {
             server.disabled_reason = None;
         } else {
@@ -2061,7 +2134,7 @@ fn filter_plugin_mcp_servers_by_requirements(
     for (name, server) in mcp_servers.iter_mut() {
         let allowed = plugin_mcp_requirements
             .and_then(|mcp_requirements| mcp_requirements.get(name))
-            .is_some_and(|requirement| requirement.matches(server));
+            .is_some_and(|requirement| server.matches_requirement(requirement));
         if allowed {
             server.disabled_reason = None;
         } else {
@@ -2280,17 +2353,6 @@ pub fn set_default_oss_provider(codex_home: &Path, provider: &str) -> std::io::R
         .map_err(|err| std::io::Error::other(format!("failed to persist config.toml: {err}")))
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AgentRoleConfig {
-    /// Human-facing role documentation used in spawn tool guidance.
-    /// Required for loaded user-defined roles after deprecated/new metadata precedence resolves.
-    pub description: Option<String>,
-    /// Path to a role-specific config layer.
-    pub config_file: Option<PathBuf>,
-    /// Candidate nicknames for agents spawned with this role.
-    pub nickname_candidates: Option<Vec<String>>,
-}
-
 fn resolve_tool_suggest_config(
     config_toml: &ConfigToml,
     config_layer_stack: &ConfigLayerStack,
@@ -2399,6 +2461,7 @@ struct PermissionSelectionToml {
 struct EffectivePermissionSelection<'a> {
     profiles: Option<PermissionsToml>,
     selected_profile_id: Option<&'a str>,
+    persisted_profile_id_was_provided: bool,
     requirements_force_profile_selection: bool,
 }
 
@@ -2414,7 +2477,8 @@ impl EffectivePermissionSelection<'_> {
         default_permissions_override: Option<&str>,
         permission_config_syntax: Option<PermissionConfigSyntax>,
     ) -> bool {
-        self.requirements_force_profile_selection
+        self.persisted_profile_id_was_provided
+            || self.requirements_force_profile_selection
             || default_permissions_override.is_some()
             || matches!(
                 permission_config_syntax,
@@ -2510,6 +2574,8 @@ fn apply_managed_filesystem_constraints(
 #[derive(Default, Debug, Clone)]
 pub struct ConfigOverrides {
     pub model: Option<String>,
+    /// Transient wire protocol override for the selected provider.
+    pub wire_api: Option<codex_model_provider_info::WireApi>,
     pub review_model: Option<String>,
     pub cwd: Option<PathBuf>,
     pub approval_policy: Option<AskForApproval>,
@@ -2517,6 +2583,10 @@ pub struct ConfigOverrides {
     pub sandbox_mode: Option<SandboxMode>,
     pub permission_profile: Option<PermissionProfile>,
     pub default_permissions: Option<String>,
+    /// Permission profile ID recovered from persisted thread state. Explicit
+    /// permission overrides take precedence, and stale profile IDs fall back
+    /// to the configured default.
+    pub persisted_permission_profile_id: Option<String>,
     pub model_provider: Option<String>,
     pub service_tier: Option<Option<String>>,
     pub codex_self_exe: Option<PathBuf>,
@@ -2593,7 +2663,7 @@ fn resolve_update_plan_enabled(config_toml: &ConfigToml) -> bool {
         .tools
         .as_ref()
         .and_then(|tools| tools.update_plan.as_ref())
-        .is_none_or(|config| config.enabled)
+        .is_some_and(|config| config.enabled)
 }
 
 fn resolve_orchestrator_feature_enabled(
@@ -2706,7 +2776,7 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
     }
 }
 
-fn resolve_token_budget_config(
+pub(crate) fn resolve_token_budget_config(
     config_toml: &ConfigToml,
     features: &ManagedFeatures,
 ) -> std::io::Result<Option<TokenBudgetConfig>> {
@@ -2715,6 +2785,9 @@ fn resolve_token_budget_config(
     }
 
     let token_budget_config = token_budget_toml_config(config_toml.features.as_ref());
+    let use_history_notes_extension = token_budget_config
+        .and_then(|config| config.use_history_notes_extension)
+        .unwrap_or_default();
     let reminder_threshold_tokens =
         token_budget_config.and_then(|config| config.reminder_threshold_tokens);
     let reminder_message_template = token_budget_config
@@ -2732,6 +2805,7 @@ fn resolve_token_budget_config(
         token_budget_config.and_then(|config| config.auto_compact_fallback_buffer_tokens);
 
     let token_budget = TokenBudgetConfig {
+        use_history_notes_extension,
         reminder_threshold_tokens,
         reminder_message_template,
         guidance_message,
@@ -3103,6 +3177,12 @@ impl Config {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
             })?;
         }
+        validate_managed_developer_instructions(
+            config_layer_stack
+                .requirements()
+                .additional_developer_instructions
+                .as_ref(),
+        )?;
         let orchestrator = cfg.orchestrator.as_ref();
         let orchestrator_skills_enabled =
             resolve_orchestrator_feature_enabled(orchestrator.and_then(|value| value.skills.as_ref()));
@@ -3123,6 +3203,8 @@ impl Config {
         let ConfigRequirements {
             allowed_login_methods: _,
             allowed_chatgpt_workspaces: _,
+            cli_auth_credentials_store,
+            chatgpt_base_url: _,
             sqlite_home: _,
             log_dir: _,
             model_catalog_json: _,
@@ -3149,12 +3231,14 @@ impl Config {
             enforce_residency,
             network: network_requirements,
             filesystem: filesystem_requirements,
+            additional_developer_instructions: _,
             guardian_policy_config_source: _,
         } = config_layer_stack.requirements().clone();
 
         // Destructure ConfigOverrides fully to ensure all overrides are applied.
         let ConfigOverrides {
             model,
+            wire_api,
             review_model: override_review_model,
             cwd,
             approval_policy: approval_policy_override,
@@ -3162,6 +3246,7 @@ impl Config {
             sandbox_mode,
             permission_profile,
             default_permissions: default_permissions_override,
+            persisted_permission_profile_id,
             model_provider,
             service_tier: service_tier_override,
             codex_self_exe,
@@ -3306,9 +3391,23 @@ impl Config {
             sandbox_mode,
         );
         let requirements_toml = config_layer_stack.requirements_toml();
+        let windows_sandbox_level = match effective_windows_sandbox_mode {
+            Some(WindowsSandboxModeToml::Elevated) => WindowsSandboxLevel::Elevated,
+            Some(WindowsSandboxModeToml::Unelevated) => WindowsSandboxLevel::RestrictedToken,
+            None => WindowsSandboxLevel::Disabled,
+        };
+        let persisted_permission_profile_id = if sandbox_mode.is_some()
+            || permission_profile.is_some()
+            || default_permissions_override.is_some()
+        {
+            None
+        } else {
+            persisted_permission_profile_id.as_deref()
+        };
         let effective_permission_selection = resolve_effective_permission_selection(
             cfg.permissions.as_ref(),
             default_permissions_override.as_deref(),
+            persisted_permission_profile_id,
             cfg.default_permissions.as_deref(),
             requirements_toml,
             &mut startup_warnings,
@@ -3327,11 +3426,6 @@ impl Config {
             ));
         }
 
-        let windows_sandbox_level = match effective_windows_sandbox_mode {
-            Some(WindowsSandboxModeToml::Elevated) => WindowsSandboxLevel::Elevated,
-            Some(WindowsSandboxModeToml::Unelevated) => WindowsSandboxLevel::RestrictedToken,
-            None => WindowsSandboxLevel::Disabled,
-        };
         let memories_config: MemoriesConfig = cfg.memories.clone().unwrap_or_default().into();
         let memories_root = memory_root(&codex_home);
 
@@ -3339,7 +3433,9 @@ impl Config {
             default_permissions_override.as_deref(),
             permission_config_syntax,
         );
-        let explicit_permission_profile_mode = default_permissions_override.is_some()
+        let explicit_permission_profile_mode = effective_permission_selection
+            .persisted_profile_id_was_provided
+            || default_permissions_override.is_some()
             || matches!(
                 permission_config_syntax,
                 Some(PermissionConfigSyntax::Profiles)
@@ -3351,7 +3447,9 @@ impl Config {
         .into_iter()
         .filter(|profile| !is_builtin_permission_profile_name(&profile.id))
         .collect();
-        let using_implicit_builtin_profile = permission_config_syntax.is_none()
+        let using_implicit_builtin_profile = !effective_permission_selection
+            .persisted_profile_id_was_provided
+            && permission_config_syntax.is_none()
             && effective_permission_selection.selected_profile_id.is_none();
         let should_seed_legacy_workspace_roots = effective_permission_selection
             .selected_profile_id
@@ -3541,7 +3639,15 @@ impl Config {
                     network_proxy,
                 );
             }
+            configured_network_proxy_config
+                .set_credential_broker_openai_base_url(cfg.openai_base_url.as_deref());
             configured_network_proxy_config.enabled = true;
+        }
+        if cfg.approval_policy == Some(AskForApproval::UnlessTrusted) {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                UnsupportedUntrustedApprovalPolicyError,
+            ));
         }
         let approval_policy_was_explicit =
             approval_policy_override.is_some() || cfg.approval_policy.is_some();
@@ -3604,11 +3710,19 @@ impl Config {
         let token_budget = resolve_token_budget_config(&cfg, &features)?;
         let rollout_budget = resolve_rollout_budget_config(&cfg, &features)?;
         let current_time_reminder = resolve_current_time_reminder_config(&cfg, &features)?;
+        let sleep_tool_mode = cfg
+            .features
+            .as_ref()
+            .and_then(|features| features.sleep_tool.as_ref())
+            .and_then(|feature| match feature {
+                FeatureToml::Enabled(_) => None,
+                FeatureToml::Config(config) => config.mode,
+            })
+            .unwrap_or_default();
         let terminal_resize_reflow = resolve_terminal_resize_reflow_config(&cfg);
 
         let agent_roles =
-            agent_roles::load_agent_roles(fs, &cfg, &config_layer_stack, &mut startup_warnings)
-                .await?;
+            load_agent_roles(fs, &cfg, &config_layer_stack, &mut startup_warnings).await?;
 
         let openai_base_url = cfg
             .openai_base_url
@@ -3622,7 +3736,7 @@ impl Config {
         let model_provider_id = model_provider
             .or(cfg.model_provider)
             .unwrap_or_else(|| "openai".to_string());
-        let model_provider = model_providers
+        let mut model_provider = model_providers
             .get(&model_provider_id)
             .ok_or_else(|| {
                 let message = if model_provider_id == LEGACY_OLLAMA_CHAT_PROVIDER_ID {
@@ -3633,6 +3747,9 @@ impl Config {
                 std::io::Error::new(std::io::ErrorKind::NotFound, message)
             })?
             .clone();
+        if let Some(wire_api) = wire_api {
+            model_provider.wire_api = wire_api;
+        }
 
         let shell_environment_policy = cfg.shell_environment_policy.into();
         let allow_login_shell = cfg.allow_login_shell.unwrap_or(true);
@@ -3739,8 +3856,6 @@ impl Config {
             config
         };
 
-        let use_experimental_unified_exec_tool = features.enabled(Feature::UnifiedExec);
-
         let forced_chatgpt_workspace_id = cfg
             .forced_chatgpt_workspace_id
             .clone()
@@ -3812,6 +3927,10 @@ impl Config {
             .as_ref()
             .and_then(|skills| skills.include_instructions)
             .unwrap_or(true);
+        let skill_max_context_tokens = cfg
+            .skills
+            .as_ref()
+            .and_then(|skills| skills.max_context_tokens);
         let include_environment_context = cfg.include_environment_context.unwrap_or(true);
         let guardian_policy_config =
             guardian_policy_config_from_requirements(config_layer_stack.requirements_toml())
@@ -3949,15 +4068,17 @@ impl Config {
             effective_file_system_sandbox_policy
                 .preserve_deny_read_restrictions_from(&file_system_sandbox_policy);
         }
-        if let Some(Sourced {
-            value: filesystem_requirements,
-            ..
-        }) = filesystem_requirements.as_ref()
-        {
-            apply_managed_filesystem_constraints(
-                &mut effective_file_system_sandbox_policy,
-                filesystem_requirements,
-            );
+        let managed_deny_read_policy = filesystem_requirements
+            .as_ref()
+            .filter(|Sourced { value, .. }| !value.deny_read.is_empty())
+            .map(|Sourced { value, .. }| {
+                let mut policy = FileSystemSandboxPolicy::restricted(Vec::new());
+                apply_managed_filesystem_constraints(&mut policy, value);
+                Arc::new(policy)
+            });
+        if let Some(managed_deny_read_policy) = managed_deny_read_policy.as_ref() {
+            effective_file_system_sandbox_policy
+                .preserve_deny_read_restrictions_from(managed_deny_read_policy);
         }
         let effective_file_system_sandbox_policy = effective_file_system_sandbox_policy
             .with_additional_readable_roots(resolved_cwd.as_path(), &helper_readable_roots);
@@ -3970,6 +4091,58 @@ impl Config {
             .value
             .set(effective_permission_profile)
             .map_err(std::io::Error::from)?;
+        if let Some(Sourced {
+            source: requirement_source,
+            ..
+        }) = filesystem_requirements.as_ref()
+            && let Some(managed_file_system_policy) = managed_deny_read_policy.as_ref()
+        {
+            let _initial_matcher =
+                ReadDenyMatcher::try_new(managed_file_system_policy, resolved_cwd.as_path())
+                    .map_err(std::io::Error::other)?;
+            let managed_file_system_policy = Arc::clone(managed_file_system_policy);
+            let permission_cwd = resolved_cwd.clone();
+            let requirement_source = requirement_source.clone();
+            constrained_permission_profile
+                .value
+                .add_validator(move |permission_profile| {
+                    let managed_deny_matcher =
+                        ReadDenyMatcher::new(&managed_file_system_policy, permission_cwd.as_path());
+                    let file_system_policy = permission_profile.file_system_sandbox_policy();
+                    let missing_required_deny = managed_file_system_policy
+                        .entries
+                        .iter()
+                        .any(|entry| !file_system_policy.entries.contains(entry));
+                    let violating_root = file_system_policy
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.access.can_read())
+                        .find_map(|entry| {
+                            let FileSystemPath::Path { path } = &entry.path else {
+                                return None;
+                            };
+                            let path = path.to_abs_path().ok()?;
+                            managed_deny_matcher
+                                .as_ref()
+                                .is_some_and(|matcher| matcher.is_read_denied(path.as_path()))
+                                .then_some(path)
+                        });
+                    if missing_required_deny || violating_root.is_some() {
+                        return Err(ConstraintError::InvalidValue {
+                            field_name: "permissions.filesystem",
+                            candidate: violating_root
+                                .map_or_else(|| "missing managed deny".to_string(), |path| {
+                                    path.to_string_lossy().into_owned()
+                                }),
+                            allowed: "all managed deny_read restrictions".to_string(),
+                            requirement_source: requirement_source.clone(),
+                        });
+                    }
+
+                    Ok(())
+                })
+                .map_err(std::io::Error::from)?;
+        }
         let permission_profile_state = PermissionProfileState::from_constrained_active_profile(
             constrained_permission_profile.value,
             active_permission_profile,
@@ -3998,6 +4171,7 @@ impl Config {
             permissions: Permissions {
                 approval_policy: constrained_approval_policy.value,
                 permission_profile_state,
+                managed_deny_read_policy,
                 workspace_roots,
                 network,
                 allow_login_shell,
@@ -4019,15 +4193,19 @@ impl Config {
             include_apps_instructions,
             include_collaboration_mode_instructions,
             include_skill_instructions,
+            skill_max_context_tokens,
             orchestrator_skills_enabled,
             orchestrator_mcp_enabled,
             include_environment_context,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
             // is important in code to differentiate the mode from the store implementation.
-            cli_auth_credentials_store_mode: resolve_cli_auth_credentials_store_mode(
-                cfg.cli_auth_credentials_store.unwrap_or_default(),
-                env!("CARGO_PKG_VERSION"),
-            ),
+            cli_auth_credentials_store_mode: match cli_auth_credentials_store {
+                Some(required) => required.value,
+                None => resolve_cli_auth_credentials_store_mode(
+                    cfg.cli_auth_credentials_store.unwrap_or_default(),
+                    env!("CARGO_PKG_VERSION"),
+                ),
+            },
             mcp_servers,
             non_prefixed_mcp_tool_servers,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
@@ -4038,6 +4216,10 @@ impl Config {
             ),
             mcp_oauth_callback_port: cfg.mcp_oauth_callback_port,
             mcp_oauth_callback_url: cfg.mcp_oauth_callback_url.clone(),
+            mcp_optional_startup_grace: cfg
+                .mcp_optional_startup_grace_ms
+                .map(Duration::from_millis)
+                .unwrap_or(DEFAULT_OPTIONAL_MCP_STARTUP_GRACE),
             model_providers,
             project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(AGENTS_MD_MAX_BYTES),
             project_doc_fallback_filenames: cfg
@@ -4130,7 +4312,6 @@ impl Config {
             experimental_realtime_ws_backend_prompt: cfg.experimental_realtime_ws_backend_prompt,
             experimental_realtime_ws_startup_context: cfg.experimental_realtime_ws_startup_context,
             experimental_realtime_start_instructions: cfg.experimental_realtime_start_instructions,
-            experimental_thread_config_endpoint: cfg.experimental_thread_config_endpoint,
             experimental_thread_store: thread_store_config(cfg.experimental_thread_store),
             forced_chatgpt_workspace_id,
             forced_login_method,
@@ -4140,13 +4321,13 @@ impl Config {
             update_plan_enabled,
             tool_registry,
             code_mode,
-            use_experimental_unified_exec_tool,
             background_terminal_max_timeout,
             ghost_snapshot,
             multi_agent_v2,
             token_budget,
             rollout_budget,
             current_time_reminder,
+            sleep_tool_mode,
             features,
             suppress_unstable_features_warning: cfg
                 .suppress_unstable_features_warning
@@ -4154,7 +4335,12 @@ impl Config {
             active_project,
             notices,
             check_for_update_on_startup,
-            disable_paste_burst: cfg.disable_paste_burst.unwrap_or(false),
+            disable_paste_burst: cfg
+                .tui
+                .as_ref()
+                .and_then(|tui| tui.disable_paste_burst)
+                .or(cfg.disable_paste_burst)
+                .unwrap_or(false),
             analytics_enabled: cfg.analytics.as_ref().and_then(|a| a.enabled),
             feedback_enabled: cfg
                 .feedback
@@ -4169,6 +4355,7 @@ impl Config {
                 .unwrap_or_default(),
             animations: cfg.tui.as_ref().map(|t| t.animations).unwrap_or(true),
             show_tooltips: cfg.tui.as_ref().map(|t| t.show_tooltips).unwrap_or(true),
+            tui_auto_recap: cfg.tui.as_ref().map(|t| t.auto_recap).unwrap_or(/*default*/ true),
             model_availability_nux: cfg
                 .tui
                 .as_ref()
@@ -4236,7 +4423,7 @@ impl Config {
 
         let path_uri = PathUri::from_abs_path(path);
         let contents = fs
-            .read_file_text(&path_uri, /*sandbox*/ None)
+            .read_file_text(&path_uri, ReadFileOptions::default(), /*sandbox*/ None)
             .await
             .map_err(|e| {
                 std::io::Error::new(
@@ -4293,7 +4480,33 @@ impl Config {
             .is_some()
     }
 
-    pub(crate) fn network_proxy_spec_for_active_permission_profile(
+    /// Resolves a named permission profile from effective config and managed requirements.
+    pub fn resolve_permission_profile(
+        &self,
+        profile_name: &str,
+    ) -> std::io::Result<PermissionProfileToml> {
+        let cfg: ConfigToml = self
+            .config_layer_stack
+            .effective_config()
+            .try_into()
+            .map_err(|err| {
+                std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "failed to read effective config for selected permission profile: {err}"
+                    ),
+                )
+            })?;
+        let permissions = merge_managed_permission_profiles(
+            cfg.permissions.as_ref(),
+            self.config_layer_stack.requirements_toml(),
+        )?
+        .unwrap_or_default();
+
+        permissions::resolve_permission_profile(&permissions, profile_name)
+    }
+
+    pub fn network_proxy_spec_for_active_permission_profile(
         &self,
         active_permission_profile: &ActivePermissionProfile,
         permission_profile: &PermissionProfile,
@@ -4330,6 +4543,8 @@ impl Config {
                         network_proxy,
                     );
                 }
+                configured_network_proxy_config
+                    .set_credential_broker_openai_base_url(cfg.openai_base_url.as_deref());
                 configured_network_proxy_config.enabled = true;
             }
             configured_network_proxy_config
@@ -4396,18 +4611,31 @@ fn merge_managed_permission_profiles(
 }
 
 fn resolve_effective_permission_selection<'a>(
-    configured_permissions: Option<&PermissionsToml>,
+    configured_profiles: Option<&PermissionsToml>,
     default_permissions_override: Option<&'a str>,
-    configured_default_permissions: Option<&'a str>,
+    persisted_profile_id: Option<&'a str>,
+    configured_default_profile_id: Option<&'a str>,
     requirements_toml: &'a ConfigRequirementsToml,
     startup_warnings: &mut Vec<String>,
 ) -> std::io::Result<EffectivePermissionSelection<'a>> {
-    let profiles = merge_managed_permission_profiles(configured_permissions, requirements_toml)?;
+    let profiles = merge_managed_permission_profiles(configured_profiles, requirements_toml)?;
     validate_user_permission_profile_names(profiles.as_ref())?;
     validate_required_permission_profile_catalog(requirements_toml, profiles.as_ref())?;
+    let valid_persisted_profile_id = persisted_profile_id.filter(|profile_id| {
+        is_builtin_permission_profile_name(profile_id)
+            || profiles.as_ref().is_some_and(|profiles| {
+                compile_permission_profile_selection(
+                    Some(profiles),
+                    profile_id,
+                    /*workspace_write*/ None,
+                    &mut Vec::new(),
+                )
+                .is_ok()
+            })
+    });
     let selected_profile_id = resolve_default_permissions(
-        default_permissions_override,
-        configured_default_permissions,
+        default_permissions_override.or(valid_persisted_profile_id),
+        configured_default_profile_id,
         requirements_toml,
         startup_warnings,
     )?;
@@ -4415,6 +4643,8 @@ fn resolve_effective_permission_selection<'a>(
     Ok(EffectivePermissionSelection {
         profiles,
         selected_profile_id,
+        persisted_profile_id_was_provided: default_permissions_override.is_none()
+            && valid_persisted_profile_id.is_some(),
         requirements_force_profile_selection: requirements_toml
             .allowed_permission_profiles
             .is_some(),

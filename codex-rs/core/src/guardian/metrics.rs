@@ -7,6 +7,7 @@ use codex_analytics::GuardianReviewFailureReason;
 use codex_analytics::GuardianReviewSessionKind;
 use codex_analytics::GuardianReviewTerminalStatus;
 use codex_analytics::GuardianReviewedAction;
+use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_otel::GUARDIAN_REVIEW_COUNT_METRIC;
 use codex_otel::GUARDIAN_REVIEW_DURATION_METRIC;
 use codex_otel::GUARDIAN_REVIEW_TOKEN_USAGE_METRIC;
@@ -31,7 +32,23 @@ pub(crate) fn emit_guardian_review_metrics(
         .map(|(key, value)| (*key, value.as_str()))
         .collect();
 
-    session_telemetry.counter(GUARDIAN_REVIEW_COUNT_METRIC, /*inc*/ 1, &tag_refs);
+    // Custom MCP tool names may contain user data; only attribute tools from the OpenAI Apps server.
+    let mcp_tags = if let GuardianReviewedAction::McpToolCall {
+        server, tool_name, ..
+    } = reviewed_action
+        && server == CODEX_APPS_MCP_SERVER_NAME
+    {
+        vec![("tool", sanitize_metric_tag_value(tool_name))]
+    } else {
+        Vec::new()
+    };
+    let mut counter_tag_refs = tag_refs.clone();
+    counter_tag_refs.extend(mcp_tags.iter().map(|(key, value)| (*key, value.as_str())));
+    session_telemetry.counter(
+        GUARDIAN_REVIEW_COUNT_METRIC,
+        /*inc*/ 1,
+        &counter_tag_refs,
+    );
     session_telemetry.record_duration(
         GUARDIAN_REVIEW_DURATION_METRIC,
         Duration::from_millis(completion_latency_ms),
@@ -178,6 +195,7 @@ fn reviewed_action_tag(action: &GuardianReviewedAction) -> &'static str {
     match action {
         GuardianReviewedAction::Shell { .. } => "shell",
         GuardianReviewedAction::UnifiedExec { .. } => "unified_exec",
+        GuardianReviewedAction::WriteStdin { .. } => "write_stdin",
         GuardianReviewedAction::Execve { .. } => "execve",
         GuardianReviewedAction::ApplyPatch {} => "apply_patch",
         GuardianReviewedAction::NetworkAccess { .. } => "network_access",
@@ -251,6 +269,7 @@ mod tests {
     use opentelemetry_sdk::metrics::data::ResourceMetrics;
     use pretty_assertions::assert_eq;
     use std::collections::BTreeMap;
+    use test_case::test_case;
 
     fn test_session_telemetry() -> SessionTelemetry {
         let exporter = InMemoryMetricExporter::default();
@@ -312,21 +331,23 @@ mod tests {
         }
     }
 
-    fn histogram_sums(resource_metrics: &ResourceMetrics, name: &str) -> BTreeMap<String, u64> {
+    fn histogram_sums(
+        resource_metrics: &ResourceMetrics,
+        name: &str,
+        expected_base_tags: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, u64> {
         let metric = find_metric(resource_metrics, name);
         match metric.data() {
             AggregatedMetrics::F64(data) => match data {
                 MetricData::Histogram(histogram) => histogram
                     .data_points()
                     .map(|point| {
-                        let attrs = attributes_to_map(point.attributes());
-                        (
-                            attrs
-                                .get("token_type")
-                                .cloned()
-                                .unwrap_or_else(|| "sample".to_string()),
-                            point.sum() as u64,
-                        )
+                        let mut attrs = attributes_to_map(point.attributes());
+                        let token_type = attrs
+                            .remove("token_type")
+                            .unwrap_or_else(|| "sample".to_string());
+                        assert_eq!(&attrs, expected_base_tags);
+                        (token_type, point.sum() as u64)
                     })
                     .collect(),
                 _ => panic!("unexpected histogram aggregation"),
@@ -335,8 +356,44 @@ mod tests {
         }
     }
 
-    #[test]
-    fn guardian_review_metrics_record_counts_durations_and_token_usage() {
+    #[test_case(
+        GuardianReviewedAction::NetworkAccess {
+            protocol: codex_protocol::approvals::NetworkApprovalProtocol::Https,
+            port: 443,
+        },
+        "network_access",
+        BTreeMap::new();
+        "network access"
+    )]
+    #[test_case(
+        GuardianReviewedAction::McpToolCall {
+            server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
+            tool_name: "search docs".to_string(),
+            connector_id: None,
+            connector_name: None,
+            tool_title: None,
+        },
+        "mcp_tool_call",
+        BTreeMap::from([("tool".to_string(), "search_docs".to_string())]);
+        "openai apps tool call"
+    )]
+    #[test_case(
+        GuardianReviewedAction::McpToolCall {
+            server: "codex_apps_custom".to_string(),
+            tool_name: "search_private_docs".to_string(),
+            connector_id: None,
+            connector_name: None,
+            tool_title: None,
+        },
+        "mcp_tool_call",
+        BTreeMap::new();
+        "custom mcp tool call"
+    )]
+    fn guardian_review_metrics_record_counts_durations_and_token_usage(
+        reviewed_action: GuardianReviewedAction,
+        expected_action: &str,
+        expected_mcp_tags: BTreeMap<String, String>,
+    ) {
         let session_telemetry = test_session_telemetry();
         let result = GuardianReviewAnalyticsResult {
             decision: GuardianReviewDecision::Approved,
@@ -366,10 +423,7 @@ mod tests {
             &session_telemetry,
             &result,
             GuardianApprovalRequestSource::DelegatedSubagent,
-            &GuardianReviewedAction::NetworkAccess {
-                protocol: codex_protocol::approvals::NetworkApprovalProtocol::Https,
-                port: 443,
-            },
+            &reviewed_action,
             /*completion_latency_ms*/ 456,
         );
 
@@ -378,31 +432,34 @@ mod tests {
             .expect("runtime metrics snapshot");
         let (attrs, value) = counter_point(&snapshot, GUARDIAN_REVIEW_COUNT_METRIC);
 
-        assert_eq!(value, 1);
-        assert_eq!(
-            attrs,
-            BTreeMap::from([
-                ("action".to_string(), "network_access".to_string()),
-                (
-                    "approval_request_source".to_string(),
-                    "delegated_subagent".to_string()
-                ),
-                ("decision".to_string(), "approved".to_string()),
-                ("failure_reason".to_string(), "none".to_string()),
-                ("guardian_model".to_string(), "gpt-5.4_guardian".to_string()),
-                ("guardian_reasoning_effort".to_string(), "low".to_string()),
-                ("had_prior_review_context".to_string(), "true".to_string()),
-                ("outcome".to_string(), "allow".to_string()),
-                ("reviewed_action_truncated".to_string(), "true".to_string()),
-                ("risk_level".to_string(), "low".to_string()),
-                ("session_kind".to_string(), "trunk_reused".to_string()),
-                ("terminal_status".to_string(), "approved".to_string()),
-                ("user_authorization".to_string(), "high".to_string()),
-            ])
-        );
+        let expected_base_tags = BTreeMap::from([
+            ("action".to_string(), expected_action.to_string()),
+            (
+                "approval_request_source".to_string(),
+                "delegated_subagent".to_string(),
+            ),
+            ("decision".to_string(), "approved".to_string()),
+            ("failure_reason".to_string(), "none".to_string()),
+            ("guardian_model".to_string(), "gpt-5.4_guardian".to_string()),
+            ("guardian_reasoning_effort".to_string(), "low".to_string()),
+            ("had_prior_review_context".to_string(), "true".to_string()),
+            ("outcome".to_string(), "allow".to_string()),
+            ("reviewed_action_truncated".to_string(), "true".to_string()),
+            ("risk_level".to_string(), "low".to_string()),
+            ("session_kind".to_string(), "trunk_reused".to_string()),
+            ("terminal_status".to_string(), "approved".to_string()),
+            ("user_authorization".to_string(), "high".to_string()),
+        ]);
+        let mut expected_counter_tags = expected_base_tags.clone();
+        expected_counter_tags.extend(expected_mcp_tags);
+        assert_eq!((attrs, value), (expected_counter_tags, 1));
 
         assert_eq!(
-            histogram_sums(&snapshot, GUARDIAN_REVIEW_TOKEN_USAGE_METRIC),
+            histogram_sums(
+                &snapshot,
+                GUARDIAN_REVIEW_TOKEN_USAGE_METRIC,
+                &expected_base_tags
+            ),
             BTreeMap::from([
                 ("cached_input".to_string(), 4),
                 ("cache_write_input".to_string(), 2),
@@ -414,11 +471,19 @@ mod tests {
             ])
         );
         assert_eq!(
-            histogram_sums(&snapshot, GUARDIAN_REVIEW_DURATION_METRIC),
+            histogram_sums(
+                &snapshot,
+                GUARDIAN_REVIEW_DURATION_METRIC,
+                &expected_base_tags
+            ),
             BTreeMap::from([("sample".to_string(), 456)])
         );
         assert_eq!(
-            histogram_sums(&snapshot, GUARDIAN_REVIEW_TTFT_DURATION_METRIC),
+            histogram_sums(
+                &snapshot,
+                GUARDIAN_REVIEW_TTFT_DURATION_METRIC,
+                &expected_base_tags
+            ),
             BTreeMap::from([("sample".to_string(), 123)])
         );
     }

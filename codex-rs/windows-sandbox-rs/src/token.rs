@@ -276,7 +276,7 @@ pub unsafe fn get_logon_sid_bytes(h_token: HANDLE) -> Result<Vec<u8>> {
     Err(anyhow!("Logon SID not present on token"))
 }
 
-unsafe fn get_user_sid_bytes(h_token: HANDLE) -> Result<Vec<u8>> {
+pub(crate) unsafe fn get_user_sid_bytes(h_token: HANDLE) -> Result<Vec<u8>> {
     let mut needed: u32 = 0;
     GetTokenInformation(h_token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
     if needed == 0 {

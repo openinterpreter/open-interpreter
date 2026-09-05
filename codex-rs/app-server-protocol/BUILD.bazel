@@ -9,3 +9,11 @@ codex_rust_crate(
         allow_empty = True,
     ),
 )
+
+alias(
+    name = "schema-generator",
+    testonly = True,
+    actual = ":app-server-protocol-unit-tests-bin",
+    tags = ["manual"],
+    visibility = ["//bazel/schema:__pkg__"],
+)

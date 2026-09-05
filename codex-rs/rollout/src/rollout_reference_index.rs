@@ -5,8 +5,6 @@ use std::collections::hash_map::Entry;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Duration;
-use std::time::Instant;
 
 use codex_protocol::RolloutId;
 use codex_protocol::ThreadId;
@@ -34,83 +32,32 @@ struct IndexedRollout {
 }
 
 impl RolloutReferenceIndex {
-    /// Scans active and archived local rollout metadata without a deadline.
+    /// Scans active and archived local rollout metadata.
     pub async fn scan(codex_home: &Path) -> io::Result<Self> {
-        let Some(index) = Self::scan_with_deadline(codex_home, ScanDeadline::Unlimited).await?
-        else {
-            return Err(io::Error::other(
-                "unlimited rollout reference scan exceeded a deadline",
-            ));
-        };
-        Ok(index)
-    }
-
-    /// Scans active and archived local rollout metadata until the worker deadline expires.
-    ///
-    /// Returns None instead of a partial index when the deadline expires.
-    pub(crate) async fn scan_until(
-        codex_home: &Path,
-        started_at: Instant,
-        max_runtime: Duration,
-    ) -> io::Result<Option<Self>> {
-        Self::scan_with_deadline(
-            codex_home,
-            ScanDeadline::Until {
-                started_at,
-                max_runtime,
-            },
-        )
+        Self::scan_paths(vec![
+            codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
+            codex_home.join(SESSIONS_SUBDIR),
+        ])
         .await
     }
 
-    /// Returns how many other discovered rollouts directly reference `rollout_id`.
-    pub fn reference_count(&self, rollout_id: RolloutId) -> usize {
-        self.reference_counts_by_rollout
-            .get(&rollout_id)
-            .copied()
-            .unwrap_or_default()
+    /// Scans only unarchived rollouts to locate files that still need to be archived.
+    ///
+    /// Reference counts exclude archived history and must not be used to decide whether a
+    /// rollout can be deleted or compressed.
+    pub async fn scan_unarchived(codex_home: &Path) -> io::Result<Self> {
+        Self::scan_paths(vec![codex_home.join(SESSIONS_SUBDIR)]).await
     }
 
-    /// Returns the direct history-base edge for `rollout_id`, if one was discovered.
-    pub fn history_base(&self, rollout_id: RolloutId) -> Option<&HistoryPosition> {
-        self.rollouts_by_id
-            .get(&rollout_id)
-            .and_then(|rollout| rollout.history_base.as_ref())
-    }
-
-    /// Returns rollout IDs and paths whose session metadata belongs to `thread_id`.
-    pub fn rollouts_for_thread(
-        &self,
-        thread_id: ThreadId,
-    ) -> impl Iterator<Item = (RolloutId, &Path)> {
-        self.rollouts_by_id
-            .iter()
-            .filter(move |(_, rollout)| rollout.thread_id == thread_id)
-            .map(|(rollout_id, rollout)| (*rollout_id, rollout.path.as_path()))
-    }
-
-    async fn scan_with_deadline(
-        codex_home: &Path,
-        deadline: ScanDeadline,
-    ) -> io::Result<Option<Self>> {
+    async fn scan_paths(mut stack: Vec<PathBuf>) -> io::Result<Self> {
         let mut rollouts_by_id = HashMap::new();
-        let mut stack = vec![
-            codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
-            codex_home.join(SESSIONS_SUBDIR),
-        ];
         while let Some(directory) = stack.pop() {
-            if deadline.expired() {
-                return Ok(None);
-            }
             let mut entries = match tokio::fs::read_dir(directory.as_path()).await {
                 Ok(entries) => entries,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                 Err(err) => return Err(err),
             };
             loop {
-                if deadline.expired() {
-                    return Ok(None);
-                }
                 let Some(entry) = entries.next_entry().await? else {
                     break;
                 };
@@ -154,31 +101,36 @@ impl RolloutReferenceIndex {
                 .entry(history_base.thread_id)
                 .or_default() += 1;
         }
-        Ok(Some(Self {
+        Ok(Self {
             rollouts_by_id,
             reference_counts_by_rollout,
-        }))
+        })
     }
-}
 
-#[derive(Clone, Copy)]
-enum ScanDeadline {
-    Unlimited,
-    Until {
-        started_at: Instant,
-        max_runtime: Duration,
-    },
-}
+    /// Returns how many other discovered rollouts directly reference `rollout_id`.
+    pub fn reference_count(&self, rollout_id: RolloutId) -> usize {
+        self.reference_counts_by_rollout
+            .get(&rollout_id)
+            .copied()
+            .unwrap_or_default()
+    }
 
-impl ScanDeadline {
-    fn expired(self) -> bool {
-        match self {
-            Self::Unlimited => false,
-            Self::Until {
-                started_at,
-                max_runtime,
-            } => started_at.elapsed() >= max_runtime,
-        }
+    /// Returns the direct history-base edge for `rollout_id`, if one was discovered.
+    pub fn history_base(&self, rollout_id: RolloutId) -> Option<&HistoryPosition> {
+        self.rollouts_by_id
+            .get(&rollout_id)
+            .and_then(|rollout| rollout.history_base.as_ref())
+    }
+
+    /// Returns rollout IDs and paths whose session metadata belongs to `thread_id`.
+    pub fn rollouts_for_thread(
+        &self,
+        thread_id: ThreadId,
+    ) -> impl Iterator<Item = (RolloutId, &Path)> {
+        self.rollouts_by_id
+            .iter()
+            .filter(move |(_, rollout)| rollout.thread_id == thread_id)
+            .map(|(rollout_id, rollout)| (*rollout_id, rollout.path.as_path()))
     }
 }
 

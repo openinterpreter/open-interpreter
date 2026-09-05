@@ -1,8 +1,13 @@
 //! Key routing and composer-adjacent UI interaction for `ChatWidget`.
 
 use super::*;
+use crate::bottom_pane::BottomPaneView;
 
 impl ChatWidget {
+    pub(crate) fn set_agents_navigation_enabled(&mut self, enabled: bool) {
+        self.bottom_pane.set_agents_navigation_enabled(enabled);
+    }
+
     pub(crate) fn keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
         self.bottom_pane.keymap_contexts()
     }
@@ -34,7 +39,7 @@ impl ChatWidget {
             return;
         }
 
-        if self.handle_reasoning_shortcut(key_event) {
+        if self.handle_reasoning_shortcut(key_event) || self.handle_permission_shortcut(key_event) {
             self.bottom_pane.clear_quit_shortcut_hint();
             self.quit_shortcut_expires_at = None;
             self.quit_shortcut_key = None;
@@ -151,14 +156,6 @@ impl ChatWidget {
             return;
         }
 
-        if matches!(key_event.code, KeyCode::Esc)
-            && key_event.kind == KeyEventKind::Press
-            && self.should_show_plan_mode_nudge()
-        {
-            self.dismiss_plan_mode_nudge();
-            return;
-        }
-
         if self.handle_plugins_popup_key_event(key_event) {
             return;
         }
@@ -176,7 +173,6 @@ impl ChatWidget {
                     self.add_error_message(PARENT_OWNED_INPUT_MESSAGE.to_string());
                 } else {
                     self.cycle_collaboration_mode();
-                    self.refresh_plan_mode_nudge();
                 }
             }
             _ => {
@@ -184,6 +180,7 @@ impl ChatWidget {
                 let should_pause_active_goal =
                     self.bottom_pane.should_interrupt_running_task(key_event);
                 let input_result = self.bottom_pane.handle_key_event(key_event);
+                self.sync_backend_banner_view();
                 if should_pause_active_goal {
                     self.pause_active_goal_for_interrupt();
                 }
@@ -215,7 +212,6 @@ impl ChatWidget {
 
     pub(crate) fn apply_external_edit(&mut self, text: String) {
         self.bottom_pane.apply_external_edit(text);
-        self.refresh_plan_mode_nudge();
         self.request_redraw();
     }
 
@@ -233,12 +229,28 @@ impl ChatWidget {
 
     pub(crate) fn show_selection_view(&mut self, params: SelectionViewParams) {
         self.bottom_pane.show_selection_view(params);
-        self.refresh_plan_mode_nudge();
         self.request_redraw();
+    }
+
+    pub(crate) fn show_bottom_pane_view(&mut self, view: Box<dyn BottomPaneView>) {
+        self.bottom_pane.show_view(view);
+        self.request_redraw();
+    }
+
+    pub(crate) fn replace_bottom_pane_view_if_present(
+        &mut self,
+        view_id: &'static str,
+        view: Box<dyn BottomPaneView>,
+    ) {
+        self.bottom_pane.replace_view_if_present(view_id, view);
     }
 
     pub(crate) fn selected_index_for_present_view(&self, view_id: &'static str) -> Option<usize> {
         self.bottom_pane.selected_index_for_present_view(view_id)
+    }
+
+    pub(crate) fn selected_index_for_active_view(&self, view_id: &'static str) -> Option<usize> {
+        self.bottom_pane.selected_index_for_active_view(view_id)
     }
 
     pub(crate) fn replace_selection_view_if_present(
@@ -246,13 +258,8 @@ impl ChatWidget {
         view_id: &'static str,
         params: SelectionViewParams,
     ) -> bool {
-        let replaced = self
-            .bottom_pane
-            .replace_selection_view_if_present(view_id, params);
-        if replaced {
-            self.refresh_plan_mode_nudge();
-        }
-        replaced
+        self.bottom_pane
+            .replace_selection_view_if_present(view_id, params)
     }
 
     pub(crate) fn no_modal_or_popup_active(&self) -> bool {
@@ -306,6 +313,99 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(super) fn show_copy_picker(&mut self) {
+        let Some(markdown) = self
+            .transcript
+            .last_agent_markdown
+            .clone()
+            .filter(|markdown| !markdown.is_empty())
+        else {
+            self.copy_last_agent_markdown();
+            return;
+        };
+
+        let mut choices = vec![(
+            "Whole response".to_string(),
+            Arc::<str>::from(markdown.as_str()),
+        )];
+        let source = self
+            .transcript
+            .last_agent_source
+            .as_deref()
+            .unwrap_or(&markdown);
+        choices.extend(
+            crate::markdown::extract_copy_targets(source)
+                .into_iter()
+                .filter_map(|target| match target {
+                    crate::markdown::CopyTarget::Code { language, content } => Some((
+                        language.map_or_else(
+                            || "Code block".to_string(),
+                            |language| format!("{language} code"),
+                        ),
+                        content,
+                    )),
+                    crate::markdown::CopyTarget::Quote(content) => {
+                        let content: String = content
+                            .split_inclusive('\n')
+                            .map(|line| crate::git_action_directives::strip_line_directives(line).0)
+                            .collect();
+                        (!content.trim().is_empty())
+                            .then(|| ("Blockquote".to_string(), Arc::from(content)))
+                    }
+                }),
+        );
+
+        let items = choices
+            .into_iter()
+            .map(|(label, text)| {
+                let description = text
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .map(|line| line.trim().chars().take(72).collect());
+                SelectionItem {
+                    name: label.clone(),
+                    description,
+                    actions: vec![Box::new(move |tx| {
+                        tx.send(AppEvent::CopySelection {
+                            text: Arc::clone(&text),
+                            label: label.clone(),
+                        });
+                    })],
+                    dismiss_on_select: true,
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        self.show_selection_view(SelectionViewParams {
+            title: Some("Copy from response".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            ..Default::default()
+        });
+        self.defer_input_until_settings_applied();
+    }
+
+    pub(crate) fn copy_selection(&mut self, text: Arc<str>, label: String) {
+        self.copy_selection_with(&text, &label, crate::clipboard_copy::copy_to_clipboard);
+    }
+
+    pub(super) fn copy_selection_with(
+        &mut self,
+        text: &str,
+        label: &str,
+        copy_fn: impl FnOnce(&str) -> Result<Option<crate::clipboard_copy::ClipboardLease>, String>,
+    ) {
+        match copy_fn(text) {
+            Ok(lease) => {
+                self.clipboard_lease = lease;
+                self.add_info_message(format!("Copied {label} to clipboard"), /*hint*/ None);
+            }
+            Err(error) => self.add_error_message(format!("Copy failed: {error}")),
+        }
+        self.request_redraw();
+    }
+
     #[cfg(test)]
     pub(crate) fn last_agent_markdown_text(&self) -> Option<&str> {
         self.transcript.last_agent_markdown.as_deref()
@@ -322,7 +422,10 @@ impl ChatWidget {
         } else {
             "Name thread"
         };
-        let view = CustomPromptView::new(
+        let suggestion_request = self
+            .thread_id
+            .map(|thread_id| (thread_id, uuid::Uuid::new_v4()));
+        let mut view = CustomPromptView::new(
             title.to_string(),
             "Type a name and press Enter".to_string(),
             /*initial_text*/ existing_name.unwrap_or_default().to_string(),
@@ -337,8 +440,32 @@ impl ChatWidget {
                 tx.set_thread_name(name);
             }),
         );
+        if let Some((_, request_id)) = suggestion_request {
+            view = view.with_text_suggestion(
+                request_id,
+                "Generating a title suggestion…".to_string(),
+                "Suggested from this conversation".to_string(),
+            );
+        }
+        self.bottom_pane.show_text_prompt(view);
+        if let Some((thread_id, request_id)) = suggestion_request {
+            self.app_event_tx.send(AppEvent::SuggestThreadName {
+                thread_id,
+                request_id,
+            });
+        }
+    }
 
-        self.bottom_pane.show_view(Box::new(view));
+    pub(crate) fn apply_thread_name_suggestion(
+        &mut self,
+        thread_id: ThreadId,
+        request_id: uuid::Uuid,
+        suggestion: Option<&str>,
+    ) {
+        if self.thread_id == Some(thread_id) {
+            self.bottom_pane
+                .apply_text_suggestion(request_id, suggestion);
+        }
     }
 
     pub(super) fn ensure_thread_rename_allowed(&mut self) -> bool {
@@ -353,13 +480,11 @@ impl ChatWidget {
 
     pub(crate) fn handle_paste(&mut self, text: String) {
         self.bottom_pane.handle_paste(text);
-        self.refresh_plan_mode_nudge();
     }
 
     // Returns true if caller should skip rendering this frame (a future frame is scheduled).
     pub(crate) fn handle_paste_burst_tick(&mut self, frame_requester: FrameRequester) -> bool {
         if self.bottom_pane.flush_paste_burst_if_due() {
-            self.refresh_plan_mode_nudge();
             // A paste just flushed; request an immediate redraw and skip this frame.
             self.request_redraw();
             true

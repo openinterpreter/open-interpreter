@@ -12,6 +12,7 @@ use chrono::Utc;
 use codex_protocol::RolloutId;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -75,6 +76,8 @@ pub fn builder_from_items(
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
+        | RolloutItem::RealtimeItem(_)
+        | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::EventMsg(_) => None,
     }) && let Some(builder) = builder_from_session_meta(session_meta, rollout_path)
@@ -106,6 +109,26 @@ pub fn builder_from_items(
 pub fn rollout_id_from_path(rollout_path: &Path) -> Option<RolloutId> {
     let file_name = rollout_path.file_name()?.to_str()?;
     Some(RolloutFileName::parse(file_name)?.rollout_id())
+}
+
+/// Reads the logical fork cutoff without mistaking a revert's history base for its parent.
+///
+/// Older rollouts lack the explicit cutoff. Their history base is safe to use only when it
+/// names the logical parent directly or the current file is the thread's original rollout.
+/// An ambiguous legacy revert omits the cutoff rather than reporting another thread's boundary.
+pub fn forked_from_ordinal_exclusive(
+    meta: &SessionMeta,
+    rollout_path: Option<&Path>,
+) -> Option<u64> {
+    let parent_id = meta.forked_from_id?;
+    meta.forked_from_ordinal_exclusive.or_else(|| {
+        meta.history_base
+            .filter(|base| {
+                base.thread_id == parent_id
+                    || rollout_path.and_then(rollout_id_from_path) == Some(meta.id)
+            })
+            .map(|base| base.end_ordinal_exclusive)
+    })
 }
 
 pub async fn extract_metadata_from_rollout(
@@ -144,6 +167,8 @@ pub async fn extract_metadata_from_rollout(
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::RealtimeItem(_)
+            | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_) => None,
         }),

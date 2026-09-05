@@ -6,14 +6,22 @@ use std::time::Duration;
 use crate::DB_FALLBACK_METRIC;
 use crate::DB_INIT_DURATION_METRIC;
 use crate::DB_INIT_METRIC;
+use crate::LOG_QUEUE_DROPPED_METRIC;
+use crate::LOG_WRITE_BYTES_METRIC;
+use crate::LOG_WRITE_DURATION_METRIC;
+use crate::LOG_WRITE_ENTRIES_METRIC;
+use crate::LOG_WRITE_MAX_ENTRY_BYTES_METRIC;
+use crate::LOG_WRITE_METRIC;
+use crate::LogEntry;
 use tracing::debug;
 
-/// Low-cardinality sink for SQLite startup and fallback telemetry.
+/// Low-cardinality sink for SQLite startup, fallback, and log-write telemetry.
 ///
 /// Implementations should absorb delivery failures locally. Database behavior
 /// must not depend on whether telemetry export succeeds.
 pub trait DbTelemetry: Send + Sync + 'static {
     fn counter(&self, name: &str, inc: i64, tags: &[(&str, &str)]);
+    fn histogram(&self, name: &str, value: i64, tags: &[(&str, &str)]);
     fn record_duration(&self, name: &str, duration: Duration, tags: &[(&str, &str)]);
 }
 
@@ -94,6 +102,38 @@ pub fn record_fallback(
         DB_FALLBACK_METRIC,
         &[("caller", caller), ("reason", reason)],
     );
+}
+
+pub(crate) fn record_log_write(
+    telemetry: Option<&dyn DbTelemetry>,
+    duration: Duration,
+    entries: &[LogEntry],
+    result: &anyhow::Result<()>,
+) {
+    let Some(telemetry) = resolve_telemetry(telemetry) else {
+        return;
+    };
+
+    let outcome = DbOutcomeTags::from_result(result);
+    let tags = [("status", outcome.status), ("error", outcome.error)];
+    let mut batch_bytes = 0_i64;
+    let mut max_entry_bytes = 0_i64;
+    for entry in entries {
+        let entry_bytes = entry.estimated_bytes();
+        batch_bytes = batch_bytes.saturating_add(entry_bytes);
+        max_entry_bytes = max_entry_bytes.max(entry_bytes);
+    }
+    let entry_count = i64::try_from(entries.len()).unwrap_or(i64::MAX);
+
+    telemetry.counter(LOG_WRITE_METRIC, /*inc*/ 1, &tags);
+    telemetry.record_duration(LOG_WRITE_DURATION_METRIC, duration, &tags);
+    telemetry.histogram(LOG_WRITE_BYTES_METRIC, batch_bytes, &tags);
+    telemetry.histogram(LOG_WRITE_ENTRIES_METRIC, entry_count, &tags);
+    telemetry.histogram(LOG_WRITE_MAX_ENTRY_BYTES_METRIC, max_entry_bytes, &tags);
+}
+
+pub(crate) fn record_log_queue_drop(reason: &'static str, telemetry: Option<&dyn DbTelemetry>) {
+    record_counter(telemetry, LOG_QUEUE_DROPPED_METRIC, &[("reason", reason)]);
 }
 
 fn record_counter(telemetry: Option<&dyn DbTelemetry>, name: &str, tags: &[(&str, &str)]) {
@@ -205,3 +245,7 @@ mod tests {
         assert_eq!(classify_sqlite_code("2067"), "constraint");
     }
 }
+
+#[cfg(test)]
+#[path = "log_write_telemetry_tests.rs"]
+mod log_write_telemetry_tests;

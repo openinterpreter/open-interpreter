@@ -167,7 +167,9 @@ def manifest_errors(
                         "create crate features"
                     )
 
-            if not is_internal_dependency(path, dependency_name, dependency, internal_package_names):
+            if not is_internal_dependency(
+                path, dependency_name, dependency, internal_package_names
+            ):
                 continue
 
             dependency_features = dependency.get("features")
@@ -354,7 +356,9 @@ def add_unused_exception_errors(
         )
 
 
-def add_failure(failures_by_path: dict[str, list[str]], path_key: str, error: str) -> None:
+def add_failure(
+    failures_by_path: dict[str, list[str]], path_key: str, error: str
+) -> None:
     failures_by_path.setdefault(path_key, []).append(error)
 
 

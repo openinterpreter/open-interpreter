@@ -291,12 +291,19 @@ impl SqliteConfig {
     }
 
     /// Open an existing Codex SQLite database without creating or modifying it.
-    pub async fn open_read_only_pool(&self, path: &Path) -> Result<SqlitePool, Error> {
-        let options = SqliteConnectOptions::new()
+    pub async fn open_read_only_pool(
+        &self,
+        path: &Path,
+        busy_timeout: Option<Duration>,
+    ) -> Result<SqlitePool, Error> {
+        let mut options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(false)
             .read_only(true)
             .log_statements(LevelFilter::Off);
+        if let Some(busy_timeout) = busy_timeout {
+            options = options.busy_timeout(busy_timeout);
+        }
         SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(options)

@@ -7,7 +7,11 @@ use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
+use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::SkillInvocationContributor;
+use codex_extension_api::SkillInvocationInput;
+use codex_extension_api::SkillInvocationKind;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
@@ -32,7 +36,26 @@ use core_test_support::skip_if_wine_exec;
 use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
+use pretty_assertions::assert_eq;
 use std::sync::Arc;
+use std::sync::Mutex;
+
+#[derive(Default)]
+struct SkillInvocationRecorder(Mutex<Vec<(String, SkillInvocationKind)>>);
+
+impl SkillInvocationContributor for SkillInvocationRecorder {
+    fn on_skill_invocation<'a>(
+        &'a self,
+        input: SkillInvocationInput<'a>,
+    ) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((input.skill_resource.to_owned(), input.kind));
+        })
+    }
+}
 
 async fn write_repo_skill(
     cwd: AbsolutePathBuf,
@@ -45,15 +68,23 @@ async fn write_repo_skill(
     let skill_dir_uri = PathUri::from_host_native_path(&skill_dir)?;
     fs.create_directory(
         &skill_dir_uri,
-        CreateDirectoryOptions { recursive: true },
+        CreateDirectoryOptions {
+            recursive: true,
+            follow_symlinks: true,
+        },
         /*sandbox*/ None,
     )
     .await?;
     let contents = format!("---\nname: {name}\ndescription: {description}\n---\n\n{body}\n");
     let path = skill_dir.join("SKILL.md");
     let path_uri = PathUri::from_host_native_path(&path)?;
-    fs.write_file(&path_uri, contents.into_bytes(), /*sandbox*/ None)
-        .await?;
+    fs.write_file(
+        &path_uri,
+        contents.into_bytes(),
+        Default::default(),
+        /*sandbox*/ None,
+    )
+    .await?;
     Ok(())
 }
 
@@ -67,9 +98,14 @@ async fn user_turn_includes_skill_instructions() -> Result<()> {
 
     let server = start_mock_server().await;
     let skill_body = "skill body";
-    let mut builder = test_codex().with_workspace_setup(move |cwd, fs| async move {
-        write_repo_skill(cwd, fs, "demo", "demo skill", skill_body).await
-    });
+    let recorder = Arc::new(SkillInvocationRecorder::default());
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.skill_invocation_contributor(recorder.clone());
+    let mut builder = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
+        .with_workspace_setup(move |cwd, fs| async move {
+            write_repo_skill(cwd, fs, "demo", "demo skill", skill_body).await
+        });
     let test = builder.build_with_auto_env(&server).await?;
 
     let skill_path = test
@@ -140,6 +176,17 @@ async fn user_turn_includes_skill_instructions() -> Result<()> {
         }),
         "expected skill instructions in user input, got {user_texts:?}"
     );
+    assert!(request.has_content_kinds(&["skills.selected_skill_instructions"]));
+    assert_eq!(
+        *recorder
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        vec![(
+            skill_path.display().to_string(),
+            SkillInvocationKind::Explicit
+        )],
+    );
 
     Ok(())
 }
@@ -157,6 +204,7 @@ async fn user_turn_selects_symlinked_skill_by_advertised_discovery_path() -> Res
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
     install(&mut extensions, |config: &Config| SkillsExtensionConfig {
         include_instructions: config.include_skill_instructions,
+        max_context_tokens: config.skill_max_context_tokens,
         bundled_skills_enabled: false,
         orchestrator_skills_enabled: false,
         shadow_selection_enabled: false,
@@ -221,10 +269,16 @@ async fn user_turn_selects_symlinked_skill_by_advertised_discovery_path() -> Res
 
     let request = mock.single_request();
     let developer_texts = request.message_input_texts("developer");
-    let advertised_path = format!(
-        "(file: {})",
-        discovery_path.to_string_lossy().replace('\\', "/")
-    );
+    let discovery_root_display = discovery_root.to_string_lossy().replace('\\', "/");
+    let root_suffix = format!(" = `{discovery_root_display}`");
+    let discovery_root_alias = developer_texts
+        .iter()
+        .flat_map(|text| text.lines())
+        .find(|line| line.ends_with(&root_suffix))
+        .and_then(|line| line.strip_prefix("- `"))
+        .and_then(|line| line.split_once("` = ").map(|(alias, _)| alias))
+        .expect("skill catalog should alias the advertised discovery root");
+    let advertised_path = format!("(file: {discovery_root_alias}/linked-demo/SKILL.md)");
     assert!(
         developer_texts
             .iter()

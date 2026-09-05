@@ -5,6 +5,7 @@ members = [
     "analytics",
     "agent-graph-store",
     "agent-identity",
+    "agent-roles",
     "backend-client",
     "bwrap",
     "build-info",
@@ -37,6 +38,7 @@ members = [
     "collaboration-mode-templates",
     "connectors",
     "config",
+    "config-schema",
     "context-fragments",
     "shell-command",
     "shell-escalation",
@@ -45,8 +47,9 @@ members = [
     "core-api",
     "core-plugins",
     "diagnostics",
-    "history",
+    "guardian-context",
     "hooks",
+    "history",
     "http-client",
     "secrets",
     "exec",
@@ -60,8 +63,8 @@ members = [
     "ext/extension-api",
     "ext/goal",
     "ext/git-attribution",
-    "ext/guardian",
     "ext/guardian-v2",
+    "ext/history-notes",
     "ext/image-generation",
     "ext/items",
     "ext/memories",
@@ -87,6 +90,8 @@ members = [
     "ollama",
     "process-hardening",
     "product-info",
+    "realtime-webrtc",
+    "voice-host",
     "protocol",
     "prompts",
     "rollout",
@@ -97,10 +102,12 @@ members = [
     "sandboxing",
     "stdio-to-uds",
     "otel",
+    "otel-trace-websocket",
     "tui",
     "tools",
     "v8-poc",
     "websocket-client",
+    "worktree",
     "workload-identity",
     "utils/absolute-path",
     "utils/audio",
@@ -108,11 +115,13 @@ members = [
     "utils/cargo-bin",
     "git-utils",
     "utils/cache",
+    "utils/git-discovery",
     "utils/image",
     "utils/json-to-toml",
     "utils/home-dir",
     "utils/pty",
     "utils/readiness",
+    "utils/redacted-string",
     "utils/rustls-provider",
     "utils/string",
     "utils/cli",
@@ -142,7 +151,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.0.40"
+version = "0.0.41"
 # Track the edition for all workspace crates in one place. Individual
 # crates can still override this value, but keeping it here means new
 # crates created with `cargo new -w ...` automatically inherit the 2024
@@ -152,11 +161,13 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 # Internal
+codex-realtime-webrtc = { path = "realtime-webrtc" }
 app_test_support = { path = "app-server/tests/common" }
 codex-acp-server = { path = "acp-server" }
 codex-analytics = { path = "analytics" }
 codex-agent-graph-store = { path = "agent-graph-store" }
 codex-agent-identity = { path = "agent-identity" }
+codex-agent-roles = { path = "agent-roles" }
 codex-ansi-escape = { path = "ansi-escape" }
 codex-api = { path = "codex-api" }
 codex-aws-auth = { path = "aws-auth" }
@@ -205,8 +216,8 @@ codex-extension-api = { path = "ext/extension-api" }
 codex-extension-items = { path = "ext/items" }
 codex-goal-extension = { path = "ext/goal" }
 codex-git-attribution = { path = "ext/git-attribution" }
-codex-guardian = { path = "ext/guardian" }
 codex-guardian-v2 = { path = "ext/guardian-v2" }
+codex-history-notes-extension = { path = "ext/history-notes" }
 codex-image-generation-extension = { path = "ext/image-generation" }
 codex-external-agent-migration = { path = "external-agent-migration" }
 codex-experimental-api-macros = { path = "codex-experimental-api-macros" }
@@ -216,6 +227,7 @@ codex-install-context = { path = "install-context" }
 codex-file-search = { path = "file-search" }
 codex-file-watcher = { path = "file-watcher" }
 codex-git-utils = { path = "git-utils" }
+codex-guardian-context = { path = "guardian-context" }
 codex-hooks = { path = "hooks" }
 codex-history = { path = "history" }
 codex-keyring-store = { path = "keyring-store" }
@@ -235,6 +247,7 @@ codex-models-manager = { path = "models-manager" }
 codex-network-proxy = { path = "network-proxy" }
 codex-ollama = { path = "ollama" }
 codex-otel = { path = "otel" }
+codex-otel-trace-websocket = { path = "otel-trace-websocket" }
 codex-plugin = { path = "plugin" }
 codex-model-provider = { path = "model-provider" }
 codex-process-hardening = { path = "process-hardening" }
@@ -269,6 +282,7 @@ codex-utils-cargo-bin = { path = "utils/cargo-bin" }
 codex-utils-cli = { path = "utils/cli" }
 codex-utils-elapsed = { path = "utils/elapsed" }
 codex-utils-fuzzy-match = { path = "utils/fuzzy-match" }
+codex-utils-git-discovery = { path = "utils/git-discovery" }
 codex-utils-home-dir = { path = "utils/home-dir" }
 codex-utils-image = { path = "utils/image" }
 codex-utils-json-to-toml = { path = "utils/json-to-toml" }
@@ -278,6 +292,7 @@ codex-utils-path = { path = "utils/path-utils" }
 codex-utils-path-uri = { path = "utils/path-uri" }
 codex-utils-plugins = { path = "utils/plugins" }
 codex-utils-pty = { path = "utils/pty" }
+codex-utils-redacted-string = { path = "utils/redacted-string" }
 codex-utils-rustls-provider = { path = "utils/rustls-provider" }
 codex-utils-sandbox-summary = { path = "utils/sandbox-summary" }
 codex-utils-sleep-inhibitor = { path = "utils/sleep-inhibitor" }
@@ -296,6 +311,7 @@ allocative = "0.3.3"
 agent-client-protocol = { version = "=0.12.1", features = ["unstable"] }
 ansi-to-tui = "8.0.1"
 anyhow = "1"
+appcontainer_common = { git = "https://github.com/microsoft/mxc", rev = "6cd3d58f05d3447e67109cfb75e042803b843ca4" }
 arboard = { version = "3", features = ["wayland-data-control"] }
 arc-swap = "1.9.0"
 assert_cmd = "2"
@@ -346,6 +362,7 @@ flate2 = "1.1.8"
 futures = { version = "0.3", default-features = false }
 gethostname = "1.1.0"
 gix = { version = "0.81.0", default-features = false, features = ["sha1"] }
+gix-url = "0.35.2"
 glob = "0.3"
 globset = "0.4"
 hmac = "0.12.1"
@@ -410,7 +427,7 @@ regex = "1.12.3"
 regex-lite = "0.1.8"
 reqwest = { version = "0.12", features = ["brotli", "cookies"] }
 rustix = { version = "1.1.4", features = ["net"] }
-rmcp = { version = "=3.0.0", default-features = false }
+rmcp = { version = "=3.1.3", default-features = false }
 runfiles = { git = "https://github.com/dzbarsky/rules_rust", rev = "b56cbaa8465e74127f1ea216f813cd377295ad81" }
 rustls = { version = "0.23", default-features = false, features = [
     "aws_lc_rs",
@@ -488,6 +505,7 @@ tonic = { version = "0.14.3", default-features = false, features = ["channel", "
 tonic-prost = "0.14.3"
 tree-sitter = "0.25.10"
 tree-sitter-bash = "0.25"
+tree-sitter-powershell = "=0.26.4"
 ts-rs = "11"
 tungstenite = { version = "0.27.0", features = ["deflate", "proxy"] }
 uds_windows = "1.1.0"

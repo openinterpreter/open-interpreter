@@ -7,6 +7,7 @@ pub use elicitation::ElicitationLifecycle;
 pub use elicitation::ElicitationReviewRequest;
 pub use elicitation::ElicitationReviewer;
 pub use elicitation::ElicitationReviewerHandle;
+pub use event_stream::McpEventStreamOpener;
 pub use resource_client::McpEventCatalogSnapshot;
 pub use resource_client::McpEventDefinition;
 pub use resource_client::McpEventNotification;
@@ -15,6 +16,7 @@ pub use resource_client::McpResourceClient;
 pub use resource_client::McpResourceClientCacheKey;
 pub use resource_client::McpResourcePage;
 pub use resource_client::McpResourceReadResult;
+pub use rmcp::model::ReadResourceRequestParams;
 pub use rmcp_client::MCP_SANDBOX_STATE_META_CAPABILITY;
 pub use runtime::McpRuntime;
 pub use runtime::McpRuntimeContext;
@@ -24,6 +26,7 @@ pub use runtime::SandboxState;
 pub use runtime::apply_http_headers_helper;
 pub use tool_catalog_cache::McpToolCatalogCache;
 pub use tools::ToolInfo;
+pub use trusted_access::TrustedAccessContext;
 
 /// Backward-compatible name for the shared Codex Apps tools runtime.
 pub type CodexAppsToolsCache = codex_connectors::ConnectorRuntimeManager<ToolInfo>;
@@ -31,6 +34,7 @@ pub type CodexAppsToolsCache = codex_connectors::ConnectorRuntimeManager<ToolInf
 pub type CodexAppsToolsCacheKey = codex_connectors::ConnectorRuntimeContextKey;
 
 pub use catalog::McpCatalogBuilder;
+pub use catalog::McpEnvironmentAuthority;
 pub use catalog::McpPluginAttribution;
 pub use catalog::McpServerConflict;
 pub use catalog::McpServerConflictAction;
@@ -40,6 +44,7 @@ pub use catalog::ResolvedMcpCatalog;
 pub use catalog::ResolvedMcpServer;
 
 pub use mcp::CODEX_APPS_MCP_SERVER_NAME;
+pub use mcp::DEFAULT_OPTIONAL_MCP_STARTUP_GRACE;
 pub use mcp::McpConfig;
 pub use mcp::ToolPluginProvenance;
 pub use server::EffectiveMcpServer;
@@ -81,6 +86,7 @@ pub use mcp::ResolvedMcpOAuthScopes;
 pub use mcp::compute_auth_statuses;
 pub use mcp::discover_supported_scopes;
 pub use mcp::oauth_login_support;
+pub use mcp::resolve_oauth_callback;
 pub use mcp::resolve_oauth_scopes;
 pub use mcp::should_retry_without_scopes;
 
@@ -97,13 +103,17 @@ mod client_capabilities;
 pub(crate) mod codex_apps;
 pub(crate) mod connection_manager;
 pub(crate) mod elicitation;
+mod event_stream;
+mod executor_environment_http_client;
 pub(crate) mod mcp;
 mod openai_docs_source_attribution;
 mod pagination;
 mod plugin_config;
 mod resource_client;
+mod resource_origin;
 pub(crate) mod rmcp_client;
 pub(crate) mod runtime;
 pub(crate) mod server;
 mod tool_catalog_cache;
 pub(crate) mod tools;
+mod trusted_access;

@@ -1,0 +1,96 @@
+---
+source: tui/src/bottom_pane/textarea/hyperlinks_tests.rs
+expression: "snapshots.join(\"\\n\")"
+---
+separator U+2003, width 48
+|https://one.test/a https://two.test/b           |
+|                                                |
+|                                                |
+|                                                |
+Hyperlinks:
+  row 0, columns 0..18 -> https://one.test/a
+  row 0, columns 19..37 -> https://two.test/b
+
+separator U+2003, width 20
+|https://one.test/a  |
+|https://two.test/b  |
+|                    |
+|                    |
+Hyperlinks:
+  row 0, columns 0..18 -> https://one.test/a
+  row 1, columns 0..18 -> https://two.test/b
+
+separator U+00A0, width 48
+|https://one.test/a https://two.test/b           |
+|                                                |
+|                                                |
+|                                                |
+Hyperlinks:
+  row 0, columns 0..18 -> https://one.test/a
+  row 0, columns 19..37 -> https://two.test/b
+
+separator U+00A0, width 20
+|https://one.test/   |
+|a https://two.test/b|
+|                    |
+|                    |
+Hyperlinks:
+  row 0, columns 0..17 -> https://one.test/a
+  row 1, columns 0..1 -> https://one.test/a
+  row 1, columns 2..20 -> https://two.test/b
+
+separator U+2007, width 48
+|https://one.test/a https://two.test/b           |
+|                                                |
+|                                                |
+|                                                |
+Hyperlinks:
+  row 0, columns 0..18 -> https://one.test/a
+  row 0, columns 19..37 -> https://two.test/b
+
+separator U+2007, width 20
+|https://one.test/   |
+|a https://two.test/b|
+|                    |
+|                    |
+Hyperlinks:
+  row 0, columns 0..17 -> https://one.test/a
+  row 1, columns 0..1 -> https://one.test/a
+  row 1, columns 2..20 -> https://two.test/b
+
+separator U+202F, width 48
+|https://one.test/a https://two.test/b           |
+|                                                |
+|                                                |
+|                                                |
+Hyperlinks:
+  row 0, columns 0..18 -> https://one.test/a
+  row 0, columns 19..37 -> https://two.test/b
+
+separator U+202F, width 20
+|https://one.test/   |
+|a https://two.test/b|
+|                    |
+|                    |
+Hyperlinks:
+  row 0, columns 0..17 -> https://one.test/a
+  row 1, columns 0..1 -> https://one.test/a
+  row 1, columns 2..20 -> https://two.test/b
+
+separator U+2028, width 48
+|https://one.test/a https://two.test/b           |
+|                                                |
+|                                                |
+|                                                |
+Hyperlinks:
+  row 0, columns 0..18 -> https://one.test/a
+  row 0, columns 19..37 -> https://two.test/b
+
+separator U+2028, width 20
+|https://one.test/a  |
+|https://two.test/b  |
+|                    |
+|                    |
+Hyperlinks:
+  row 0, columns 0..18 -> https://one.test/a
+  row 1, columns 0..18 -> https://two.test/b

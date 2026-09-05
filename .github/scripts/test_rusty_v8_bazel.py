@@ -236,12 +236,7 @@ class RustyV8BazelTest(unittest.TestCase):
             TemporaryDirectory() as target_dir,
             TemporaryDirectory() as output_dir,
         ):
-            gn_out = (
-                Path(target_dir)
-                / "x86_64-pc-windows-msvc"
-                / "release"
-                / "gn_out"
-            )
+            gn_out = Path(target_dir) / "x86_64-pc-windows-msvc" / "release" / "gn_out"
             (gn_out / "obj").mkdir(parents=True)
             (gn_out / "obj" / "rusty_v8.lib").write_bytes(b"archive")
             (gn_out / "src_binding.rs").write_text("binding")

@@ -1,121 +1,116 @@
+//! Manage privileged bridge processes and transfer their loopback TCP listeners.
+//!
+//! Received descriptors are CLOEXEC and owned even when validation rejects them.
+//! Shape validation does not authenticate the sender: the caller must retain exclusive
+//! control of the anonymous channel and close bootstrap descriptors before untrusted execution.
+
+use rustix::io::retry_on_intr;
+use rustix::net::RecvAncillaryBuffer;
+use rustix::net::RecvAncillaryMessage;
+use rustix::net::RecvFlags;
+use rustix::net::ReturnFlags;
+use rustix::net::SendAncillaryBuffer;
+use rustix::net::SendAncillaryMessage;
+use rustix::net::SendFlags;
+use rustix::net::SocketType;
+use rustix::net::ipproto;
+use rustix::net::sockopt;
 use std::io;
-use std::path::Path;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::io::IoSlice;
+use std::io::IoSliceMut;
+use std::mem::MaybeUninit;
+use std::net::Ipv4Addr;
+use std::net::SocketAddr;
+use std::net::TcpListener;
+use std::os::fd::AsFd;
+use std::os::fd::AsRawFd;
+use std::os::fd::FromRawFd;
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 
-pub(crate) const PROXY_SOCKET_DIR_PREFIX: &str = "codex-linux-sandbox-proxy-";
+const LISTENER_MESSAGE: u8 = 1;
 
-pub(crate) fn cleanup_stale_proxy_socket_dirs_in(temp_dir: &Path) -> io::Result<()> {
-    for entry in std::fs::read_dir(temp_dir)? {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(_) => continue,
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
-        let Some(owner_pid) = parse_proxy_socket_dir_owner_pid(file_name.as_ref()) else {
-            continue;
-        };
-        if is_pid_alive(owner_pid) {
-            continue;
-        }
-
-        let _ = cleanup_proxy_socket_dir(entry.path().as_path());
+pub(crate) fn send_listener(channel: &UnixStream, listener: &TcpListener) -> io::Result<()> {
+    let descriptors = [listener.as_fd()];
+    let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+    let mut control = SendAncillaryBuffer::new(&mut space);
+    if !control.push(SendAncillaryMessage::ScmRights(&descriptors)) {
+        return Err(io::Error::other("missing proxy listener control header"));
     }
-
+    // rustix surfaces EINTR on both its libc and raw-syscall backends.
+    // Retry interrupted sends so a handled signal does not abort the handoff.
+    let sent = retry_on_intr(|| {
+        rustix::net::sendmsg(
+            channel,
+            &[IoSlice::new(&[LISTENER_MESSAGE])],
+            &mut control,
+            SendFlags::NOSIGNAL,
+        )
+    })?;
+    if sent != 1 {
+        return Err(io::Error::other("failed to transfer proxy listener"));
+    }
     Ok(())
 }
 
-fn parse_proxy_socket_dir_owner_pid(file_name: &str) -> Option<u32> {
-    let suffix = file_name.strip_prefix(PROXY_SOCKET_DIR_PREFIX)?;
-    let (pid_raw, _) = suffix.split_once('-')?;
-    pid_raw.parse::<u32>().ok().filter(|pid| *pid != 0)
-}
+pub(crate) fn receive_listener(channel: &UnixStream) -> io::Result<TcpListener> {
+    let mut byte = [0_u8];
+    let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+    let mut control = RecvAncillaryBuffer::new(&mut space);
+    // rustix surfaces EINTR on both its libc and raw-syscall backends.
+    // Retry interrupted receives so a handled signal does not abort the handoff.
+    let message = retry_on_intr(|| {
+        rustix::net::recvmsg(
+            channel,
+            &mut [IoSliceMut::new(&mut byte)],
+            &mut control,
+            RecvFlags::CMSG_CLOEXEC,
+        )
+    })?;
 
-fn is_pid_alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return false;
-    };
-    is_pid_alive_raw(pid)
-}
-
-fn is_pid_alive_raw(pid: libc::pid_t) -> bool {
-    is_pid_alive_in_proc_root(pid, Path::new("/proc"))
-}
-
-fn is_pid_alive_in_proc_root(pid: libc::pid_t, proc_root: &Path) -> bool {
-    let status = unsafe { libc::kill(pid, 0) };
-    if status != 0 {
-        let err = io::Error::last_os_error();
-        return !matches!(err.raw_os_error(), Some(libc::ESRCH));
-    }
-
-    match std::fs::read_to_string(proc_root.join(format!("{pid}/stat"))) {
-        Ok(status) => !matches!(
-            status
-                .rsplit_once(") ")
-                .and_then(|(_, fields)| fields.chars().next()),
-            Some('Z')
-        ),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => !proc_root.is_dir(),
-        Err(_) => true,
-    }
-}
-
-pub(crate) fn spawn_proxy_socket_dir_cleanup_worker(
-    socket_dir: PathBuf,
-    host_bridge_pids: Vec<libc::pid_t>,
-) -> io::Result<()> {
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    if pid == 0 {
-        if detach_bridge_stdio().is_err() {
-            unsafe { libc::_exit(1) };
-        }
-
-        loop {
-            if host_bridge_pids
-                .iter()
-                .copied()
-                .all(|bridge_pid| !is_pid_alive_raw(bridge_pid))
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-
-        let _ = cleanup_proxy_socket_dir(socket_dir.as_path());
-        unsafe { libc::_exit(0) };
-    }
-
-    Ok(())
-}
-
-fn cleanup_proxy_socket_dir(socket_dir: &Path) -> io::Result<()> {
-    for _ in 0..20 {
-        match std::fs::remove_dir_all(socket_dir) {
-            Ok(()) => return Ok(()),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+    // Alignment headroom can fit extra descriptors. Own all of them before checking
+    // the count; rustix also closes any descriptors left undrained on error paths.
+    let mut descriptors = Vec::new();
+    let mut unexpected_message = false;
+    for ancillary in control.drain() {
+        match ancillary {
+            RecvAncillaryMessage::ScmRights(received) => descriptors.extend(received),
+            _ => unexpected_message = true,
         }
     }
-
-    match std::fs::remove_dir_all(socket_dir) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err),
+    if message.bytes != 1
+        || byte != [LISTENER_MESSAGE]
+        || message
+            .flags
+            .intersects(ReturnFlags::CTRUNC | ReturnFlags::TRUNC)
+        || unexpected_message
+        || descriptors.len() != 1
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid proxy listener handoff",
+        ));
     }
+
+    let listener = TcpListener::from(descriptors.remove(/*index*/ 0));
+    if sockopt::socket_type(&listener)? != SocketType::STREAM
+        || sockopt::socket_protocol(&listener)? != Some(ipproto::TCP)
+        || !sockopt::socket_acceptconn(&listener)?
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "proxy handoff requires a TCP listener",
+        ));
+    }
+    if !matches!(listener.local_addr()?, SocketAddr::V4(address)
+        if *address.ip() == Ipv4Addr::LOCALHOST && address.port() != 0)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "proxy listener must be bound to IPv4 loopback",
+        ));
+    }
+    Ok(listener)
 }
 
 pub(crate) fn harden_bridge_process(expected_parent_pid: libc::pid_t) -> io::Result<()> {
@@ -197,49 +192,26 @@ fn redirect_bridge_output(source_fd: libc::c_int) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn create_ready_pipe() -> io::Result<(libc::c_int, libc::c_int)> {
-    let mut pipe_fds = [0; 2];
-    let res = unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    if res != 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    let read_fd = match move_fd_above_stdio(pipe_fds[0]) {
-        Ok(fd) => fd,
-        Err(err) => {
-            let _ = close_fd(pipe_fds[0]);
-            let _ = close_fd(pipe_fds[1]);
-            return Err(err);
-        }
-    };
-    let write_fd = match move_fd_above_stdio(pipe_fds[1]) {
-        Ok(fd) => fd,
-        Err(err) => {
-            let _ = close_fd(read_fd);
-            let _ = close_fd(pipe_fds[1]);
-            return Err(err);
-        }
-    };
-
-    Ok((read_fd, write_fd))
-}
-
-fn move_fd_above_stdio(fd: libc::c_int) -> io::Result<libc::c_int> {
-    if fd > libc::STDERR_FILENO {
+pub(crate) fn move_fd_above_stdio(fd: OwnedFd) -> io::Result<OwnedFd> {
+    if fd.as_raw_fd() > libc::STDERR_FILENO {
         return Ok(fd);
     }
 
-    let relocated_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, libc::STDERR_FILENO + 1) };
+    // SAFETY: F_DUPFD_CLOEXEC takes an integer lower bound, not a pointer;
+    // `fd` owns the live descriptor throughout the call.
+    let relocated_fd = unsafe {
+        libc::fcntl(
+            fd.as_raw_fd(),
+            libc::F_DUPFD_CLOEXEC,
+            libc::STDERR_FILENO + 1,
+        )
+    };
     if relocated_fd < 0 {
         return Err(io::Error::last_os_error());
     }
 
-    if let Err(err) = close_fd(fd) {
-        let _ = close_fd(relocated_fd);
-        return Err(err);
-    }
-
-    Ok(relocated_fd)
+    // SAFETY: F_DUPFD_CLOEXEC returned a new descriptor; the original owner drops here.
+    Ok(unsafe { OwnedFd::from_raw_fd(relocated_fd) })
 }
 
 pub(crate) fn close_fd(fd: libc::c_int) -> io::Result<()> {

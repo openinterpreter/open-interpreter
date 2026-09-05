@@ -1,5 +1,6 @@
 use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
+use app_test_support::ChatGptIdTokenClaims;
 use app_test_support::TestAppServer;
 use app_test_support::write_chatgpt_auth;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
@@ -24,6 +25,7 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::path::Path;
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::time::timeout;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -95,13 +97,20 @@ async fn get_account_rate_limits_requires_chatgpt_auth() -> Result<()> {
     Ok(())
 }
 
+#[test_case("enterprise_cbp_automation", AccountPlanType::EnterpriseCbpAutomation; "enterprise_automation")]
+#[test_case("edu_plus", AccountPlanType::EduPlus; "edu_plus")]
+#[test_case("edu_pro", AccountPlanType::EduPro; "edu_pro")]
 #[tokio::test]
-async fn get_account_rate_limits_returns_snapshot() -> Result<()> {
+async fn get_account_rate_limits_returns_snapshot(
+    plan_type: &str,
+    expected_plan: AccountPlanType,
+) -> Result<()> {
     let codex_home = TempDir::new()?;
     write_chatgpt_auth(
         codex_home.path(),
         ChatGptAuthFixture::new("chatgpt-token")
             .account_id("account-123")
+            .chatgpt_user_id("user-123")
             .plan_type("pro"),
         AuthCredentialsStoreMode::File,
     )?;
@@ -126,8 +135,18 @@ async fn get_account_rate_limits_returns_snapshot() -> Result<()> {
         chrono::DateTime::parse_from_rfc3339("2026-06-18T00:00:00Z")
             .expect("parse second reset credit grant timestamp")
             .timestamp();
+    let banner = json!({
+        "banner_type": "selected_model_limit_reached",
+        "title": "Usage limit reached",
+        "description": "View your usage.",
+        "ctas": [{"action": "view_usage", "label": "View usage"}]
+    });
     let response_body = json!({
-        "plan_type": "enterprise_cbp_automation",
+        "account_id": "account-123",
+        "user_id": "user-123",
+        "rate_limit_upsell": banner,
+
+        "plan_type": plan_type,
         "rate_limit": {
             "allowed": true,
             "limit_reached": false,
@@ -230,6 +249,8 @@ async fn get_account_rate_limits_returns_snapshot() -> Result<()> {
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
 
     let expected = GetAccountRateLimitsResponse {
+        account_id: Some("account-123".to_string()),
+        rate_limit_upsell: Some(banner),
         rate_limits: RateLimitSnapshot {
             limit_id: Some("codex".to_string()),
             limit_name: None,
@@ -251,7 +272,7 @@ async fn get_account_rate_limits_returns_snapshot() -> Result<()> {
                 resets_at: secondary_reset_timestamp,
             }),
             spend_control_reached: Some(false),
-            plan_type: Some(AccountPlanType::EnterpriseCbpAutomation),
+            plan_type: Some(expected_plan),
             rate_limit_reached_type: Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached),
         },
         rate_limits_by_limit_id: Some(
@@ -279,7 +300,7 @@ async fn get_account_rate_limits_returns_snapshot() -> Result<()> {
                             resets_at: secondary_reset_timestamp,
                         }),
                         spend_control_reached: Some(false),
-                        plan_type: Some(AccountPlanType::EnterpriseCbpAutomation),
+                        plan_type: Some(expected_plan),
                         rate_limit_reached_type: Some(
                             RateLimitReachedType::WorkspaceMemberUsageLimitReached,
                         ),
@@ -299,7 +320,7 @@ async fn get_account_rate_limits_returns_snapshot() -> Result<()> {
                         credits: None,
                         individual_limit: None,
                         spend_control_reached: None,
-                        plan_type: Some(AccountPlanType::EnterpriseCbpAutomation),
+                        plan_type: Some(expected_plan),
                         rate_limit_reached_type: None,
                     },
                 ),
@@ -333,6 +354,85 @@ async fn get_account_rate_limits_returns_snapshot() -> Result<()> {
     };
     assert_eq!(received, expected);
 
+    Ok(())
+}
+
+#[test_case(Some("workspace-a"), Some("user-a"), /*restricted*/ false, /*permitted*/ true; "matching_identity")]
+#[test_case(Some("workspace-b"), Some("user-a"), /*restricted*/ false, /*permitted*/ false; "account_mismatch")]
+#[test_case(Some("workspace-a"), Some("user-b"), /*restricted*/ false, /*permitted*/ false; "user_mismatch")]
+#[test_case(/*account*/ None, Some("user-a"), /*restricted*/ false, /*permitted*/ false; "missing_account")]
+#[test_case(Some("workspace-a"), /*user*/ None, /*restricted*/ false, /*permitted*/ false; "missing_user")]
+#[test_case(Some("workspace-a"), Some("user-a"), /*restricted*/ true, /*permitted*/ false; "restricted_account")]
+#[tokio::test]
+async fn get_account_rate_limits_filters_banner_by_identity(
+    account: Option<&str>,
+    user: Option<&str>,
+    restricted: bool,
+    permitted: bool,
+) -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut claims = ChatGptIdTokenClaims::new()
+        .plan_type("team")
+        .chatgpt_user_id("user-a");
+    claims.chatgpt_account_is_fedramp = restricted;
+    write_chatgpt_auth(
+        codex_home.path(),
+        ChatGptAuthFixture::new("chatgpt-token")
+            .account_id("workspace-a")
+            .claims(claims),
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let server = MockServer::start().await;
+    write_chatgpt_base_url(codex_home.path(), &server.uri())?;
+    let banner = json!({
+        "banner_type": "selected_model_limit", "model_slug": "test-model-a",
+        "presentation": "inline", "title": "Usage limit reached",
+        "description": "Contact your owner.",
+        "ctas": [{"action": "notify_owner", "label": "Notify owner"}]
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .and(header("authorization", "Bearer chatgpt-token"))
+        .and(header("chatgpt-account-id", "workspace-a"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "account_id": account, "user_id": user, "plan_type": "team",
+            "rate_limit": {"allowed": true, "limit_reached": false,
+                "primary_window": {"used_percent": 42, "limit_window_seconds": 3600,
+                    "reset_after_seconds": 120, "reset_at": 2000000000}},
+            "rate_limit_upsell": banner, "rate_limit_reset_credits": {"available_count": 0}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/rate-limit-reset-credits"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "available_count": 0, "credits": []
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+    let request_id = mcp.send_get_account_rate_limits_request().await?;
+    let received: GetAccountRateLimitsResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
+    let snapshot = json!({
+        "limitId": "codex", "planType": "team",
+        "primary": {"usedPercent": 42, "windowDurationMins": 60, "resetsAt": 2000000000}
+    });
+    let expected: GetAccountRateLimitsResponse = serde_json::from_value(json!({
+        "accountId": account, "rateLimitUpsell": if permitted { Some(banner) } else { None },
+        "rateLimits": snapshot, "rateLimitsByLimitId": {"codex": snapshot},
+        "rateLimitResetCredits": {"availableCount": 0, "credits": []}
+    }))?;
+    assert_eq!(received, expected);
+    server.verify().await;
     Ok(())
 }
 

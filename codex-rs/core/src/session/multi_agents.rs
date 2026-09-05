@@ -73,12 +73,16 @@ pub(super) fn usage_hint_text(
     }
 
     let catalog = turn_context
-        .model_info
+        .model_info()
         .model_messages
         .as_ref()
         .and_then(|messages| messages.multi_agent.as_ref())
         .and_then(|messages| messages.role.as_ref());
-    let snapshot = resolve_usage_hints(&turn_context.config.multi_agent_v2, catalog);
+    let snapshot = resolve_usage_hints(
+        &turn_context.config.multi_agent_v2,
+        catalog,
+        !turn_context.config.update_plan_enabled && turn_context.config.model_catalog.is_none(),
+    );
     match session_source {
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }) => snapshot.subagent,
         SessionSource::Cli
@@ -94,6 +98,7 @@ pub(super) fn usage_hint_text(
 pub(crate) fn resolve_usage_hints(
     config: &MultiAgentV2Config,
     catalog: Option<&MultiAgentRoleMessages>,
+    omit_update_plan_instructions: bool,
 ) -> ResolvedMultiAgentV2UsageHints {
     let resolve_role = |configured: Option<&str>, catalog: Option<&str>, bundled: &str| {
         // Configured roles take precedence; empty configured or catalog roles suppress fallback.
@@ -106,6 +111,11 @@ pub(crate) fn resolve_usage_hints(
         if base.is_empty() {
             return None;
         }
+        let base = if omit_update_plan_instructions {
+            crate::context::without_update_plan_instructions(base)
+        } else {
+            base.to_string()
+        };
 
         let max_concurrency = config.max_concurrent_threads_per_session;
         let wait_agent_guidance = if config.wait_agent_enabled {
@@ -148,7 +158,7 @@ pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<M
     }
 
     let catalog_mode = turn_context
-        .model_info
+        .model_info()
         .model_messages
         .as_ref()
         .and_then(|messages| messages.multi_agent.as_ref())
@@ -165,7 +175,10 @@ pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<M
     let multi_agent_mode = match mode_hint_text {
         Some(hint_text) => MultiAgentMode::Custom(hint_text.to_string()),
         None => match turn_context.effective_reasoning_effort() {
-            Some(ReasoningEffort::Ultra) => MultiAgentMode::Proactive,
+            Some(ReasoningEffort::Ultra) => catalog_mode
+                .and_then(|messages| messages.proactive.clone())
+                .map(MultiAgentMode::Custom)
+                .unwrap_or(MultiAgentMode::Proactive),
             _ => catalog_mode
                 .and_then(|messages| messages.explicit.clone())
                 .map(MultiAgentMode::Custom)

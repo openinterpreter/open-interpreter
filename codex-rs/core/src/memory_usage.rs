@@ -4,7 +4,6 @@ use crate::tools::flat_tool_name;
 use crate::tools::handlers::unified_exec::ExecCommandArgs;
 use codex_memories_read::usage::MEMORIES_USAGE_METRIC;
 use codex_memories_read::usage::memories_usage_kinds_from_command;
-use codex_protocol::models::ShellCommandToolCallParams;
 
 pub(crate) fn emit_metric_for_tool_read(invocation: &ToolInvocation, success: bool) {
     let Some(command) = shell_script_for_invocation(invocation) else {
@@ -36,9 +35,6 @@ pub(crate) fn shell_script_for_invocation(invocation: &ToolInvocation) -> Option
     }
 
     match invocation.tool_name.name.as_str() {
-        "shell_command" => serde_json::from_str::<ShellCommandToolCallParams>(arguments)
-            .ok()
-            .map(|params| params.command),
         "exec_command" => serde_json::from_str::<ExecCommandArgs>(arguments)
             .ok()
             .map(|params| params.cmd),

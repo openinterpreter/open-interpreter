@@ -15,6 +15,7 @@ use crate::render::truncate_main_prompt_contents;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InjectedHostSkillPrompts {
     paths: HashSet<String>,
+    superseded_paths: HashSet<String>,
 }
 
 impl InjectedHostSkillPrompts {
@@ -24,12 +25,24 @@ impl InjectedHostSkillPrompts {
         self.paths.insert(path);
     }
 
+    pub fn insert_superseded_path(&mut self, path: impl Into<String>) {
+        let path = path.into();
+        self.superseded_paths
+            .insert(normalize_host_skill_path(&path));
+        self.insert_path(path);
+    }
+
     pub fn is_empty(&self) -> bool {
         self.paths.is_empty()
     }
 
     pub fn contains_path(&self, path: &str) -> bool {
         self.paths.contains(path) || self.paths.contains(&normalize_host_skill_path(path))
+    }
+
+    pub fn is_superseded_path(&self, path: &str) -> bool {
+        self.superseded_paths
+            .contains(&normalize_host_skill_path(path))
     }
 }
 

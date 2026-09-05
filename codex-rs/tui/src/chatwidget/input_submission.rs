@@ -3,6 +3,18 @@
 use super::*;
 
 impl ChatWidget {
+    pub(crate) fn set_task_mentions_enabled(&mut self, enabled: bool) {
+        self.bottom_pane.set_task_mentions_enabled(enabled);
+    }
+
+    pub(crate) fn on_task_search_result(
+        &mut self,
+        query: &str,
+        matches: Vec<crate::task_mentions::TaskMention>,
+    ) {
+        self.bottom_pane.on_task_search_result(query, matches);
+    }
+
     pub(super) fn user_message_from_submission(
         &mut self,
         text: String,
@@ -101,6 +113,19 @@ impl ChatWidget {
         history_record: UserMessageHistoryRecord,
         shell_escape_policy: ShellEscapePolicy,
     ) -> (bool, Option<AppCommand>) {
+        if self.misalignment_policy_violation {
+            return (false, None);
+        }
+        if self.input_queue.rate_limit_recovery_pending {
+            self.input_queue
+                .queued_user_messages
+                .push_back(QueuedUserMessage::from(user_message));
+            self.input_queue
+                .queued_user_message_history_records
+                .push_back(history_record);
+            self.refresh_pending_input_preview();
+            return (true, None);
+        }
         if !self.is_session_configured() {
             tracing::warn!("cannot submit user message before session is configured; queueing");
             self.input_queue
@@ -142,8 +167,12 @@ impl ChatWidget {
             local_images,
             remote_image_urls,
             text_elements,
-            mention_bindings,
+            mut mention_bindings,
         } = user_message;
+        if !self.bottom_pane.task_mentions_enabled() {
+            mention_bindings
+                .retain(|binding| crate::task_mentions::valid_thread_path(&binding.path).is_none());
+        }
 
         let render_in_history = !self.turn_lifecycle.agent_turn_running;
         let mut items: Vec<UserInput> = Vec::new();
@@ -309,6 +338,7 @@ impl ChatWidget {
         }
 
         self.maybe_apply_ide_context(&mut items);
+        crate::task_mentions::apply_task_references(&mut items, &mention_bindings, self.thread_id);
 
         let collaboration_mode = if self.collaboration_modes_enabled() {
             self.active_collaboration_mask
@@ -359,6 +389,11 @@ impl ChatWidget {
         // App-event submissions are handled serially, and turn/start can wait on remote work.
         // Queue the optimistic prompt first so the user's input is visible while that happens.
         // Direct submissions do not share that queue, so keep their existing failure behavior.
+        if render_in_history {
+            // Do not let a transient manual-recap progress cell become permanent terminal
+            // scrollback when the new user prompt flushes the active history cell.
+            self.clear_recap_loading();
+        }
         let render_before_submit =
             render_in_history && matches!(&self.codex_op_target, CodexOpTarget::AppEvent);
         if render_before_submit {
@@ -371,6 +406,7 @@ impl ChatWidget {
         if !self.submit_op(op.clone()) {
             return (false, None);
         }
+        self.dismiss_backend_banner_for_new_turn();
         if render_in_history {
             self.input_queue.user_turn_pending_start = true;
         }
@@ -386,22 +422,26 @@ impl ChatWidget {
                 path: binding.path.clone(),
             })
             .collect::<Vec<_>>();
-        let history_text = match &history_record {
+        let history = match &history_record {
             UserMessageHistoryRecord::UserMessageText if !submitted_message.text.is_empty() => {
-                Some(encode_history_mentions(
+                Some((
                     &submitted_message.text,
-                    &encoded_mentions,
+                    submitted_message.text_elements.as_slice(),
                 ))
             }
             UserMessageHistoryRecord::Override(history) if !history.text.is_empty() => {
-                Some(encode_history_mentions(&history.text, &encoded_mentions))
+                Some((&history.text, history.text_elements.as_slice()))
             }
             UserMessageHistoryRecord::UserMessageText | UserMessageHistoryRecord::Override(_) => {
                 None
             }
         };
-        if let Some(history_text) = history_text {
-            self.append_message_history_entry(history_text);
+        if let Some((text, elements)) = history {
+            self.append_message_history_entry(encode_history_mentions_at_elements(
+                text,
+                &encoded_mentions,
+                elements,
+            ));
         }
 
         if let Some(pending_steer) = pending_steer {

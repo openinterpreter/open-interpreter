@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/backend_banners_tests.rs
+assertion_line: 62
+expression: rendered
+---
+  Selected model usage exhausted
+  Ask your owner for credits or switch to another model.
+
+
+› Ask Codex to do anything
+
+  test-model-a default · /tmp/project

@@ -10,6 +10,7 @@ use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::TurnStatus;
 use codex_core::config::Config;
 use codex_model_provider_info::WireApi;
+use codex_product_info::Product;
 use codex_protocol::num_format::format_with_separators;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_utils_sandbox_summary::summarize_permission_profile;
@@ -19,6 +20,10 @@ use owo_colors::Style;
 use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
 use crate::event_processor::handle_last_message;
+
+fn config_summary_header(product: Product) -> String {
+    format!("{} v{}", product.display_name(), env!("CARGO_PKG_VERSION"))
+}
 
 pub(crate) struct EventProcessorWithHumanOutput {
     bold: Style,
@@ -214,8 +219,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
         prompt: &str,
         session_configured_event: &SessionConfiguredEvent,
     ) {
-        const VERSION: &str = env!("CARGO_PKG_VERSION");
-        eprintln!("OpenAI Codex v{VERSION}\n--------");
+        eprintln!("{}\n--------", config_summary_header(Product::current()));
         for (key, value) in config_summary_entries(config, session_configured_event) {
             eprintln!("{} {}", format!("{key}:").style(self.bold), value);
         }
@@ -239,6 +243,14 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 CodexStatus::Running
             }
             ServerNotification::Warning(notification) => self.process_warning(notification.message),
+            ServerNotification::AuthRecoveryStarted(notification) => {
+                eprintln!("{}", notification.message);
+                CodexStatus::Running
+            }
+            ServerNotification::AuthRecoveryCompleted(notification) => {
+                eprintln!("{}", notification.message.style(self.green));
+                CodexStatus::Running
+            }
             ServerNotification::Error(notification) => {
                 eprintln!(
                     "{} {}",

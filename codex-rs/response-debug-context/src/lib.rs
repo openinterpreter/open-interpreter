@@ -80,6 +80,7 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
         ApiError::QuotaExceeded => "quota exceeded".to_string(),
         ApiError::UsageNotIncluded => "usage not included".to_string(),
         ApiError::Retryable { .. } => "retryable error".to_string(),
+        ApiError::RateLimitExceeded { .. } => "rate limit exceeded".to_string(),
         ApiError::RateLimit(_) => "rate limit".to_string(),
         ApiError::InvalidRequest { .. } => "invalid request".to_string(),
         ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
@@ -134,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_error_messages_omit_http_bodies() {
+    fn telemetry_error_messages_omit_upstream_bodies() {
         let transport = TransportError::Http {
             status: StatusCode::UNAUTHORIZED,
             url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
@@ -146,6 +147,13 @@ mod tests {
         assert_eq!(
             telemetry_api_error_message(&ApiError::Transport(transport)),
             "http 401"
+        );
+        assert_eq!(
+            telemetry_api_error_message(&ApiError::RateLimitExceeded {
+                message: "private upstream diagnostic".to_string(),
+                delay: Some(std::time::Duration::from_secs(1)),
+            }),
+            "rate limit exceeded"
         );
     }
 

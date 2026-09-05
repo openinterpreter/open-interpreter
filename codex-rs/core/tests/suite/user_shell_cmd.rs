@@ -14,8 +14,10 @@ use codex_protocol::protocol::ExecOutputStream;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnAbortReason;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::user_input::UserInput;
 use core_test_support::PathBufExt;
+use core_test_support::PathExt;
 use core_test_support::assert_regex_match;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
@@ -27,6 +29,7 @@ use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::submit_thread_settings;
+use core_test_support::test_codex::local;
 use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
@@ -66,7 +69,10 @@ async fn user_shell_cmd_ls_and_cat_in_temp_dir() {
     // 1) shell command should list the file
     let list_cmd = "ls".to_string();
     codex
-        .submit(Op::RunUserShellCommand { command: list_cmd })
+        .submit(Op::RunUserShellCommand {
+            command: list_cmd,
+            timeout_ms: None,
+        })
         .await
         .unwrap();
     let msg = wait_for_event(&codex, |ev| matches!(ev, EventMsg::ExecCommandEnd(_))).await;
@@ -85,7 +91,10 @@ async fn user_shell_cmd_ls_and_cat_in_temp_dir() {
     // 2) shell command should print the file contents verbatim
     let cat_cmd = format!("cat {file_name}");
     codex
-        .submit(Op::RunUserShellCommand { command: cat_cmd })
+        .submit(Op::RunUserShellCommand {
+            command: cat_cmd,
+            timeout_ms: None,
+        })
         .await
         .unwrap();
     let msg = wait_for_event(&codex, |ev| matches!(ev, EventMsg::ExecCommandEnd(_))).await;
@@ -125,6 +134,7 @@ async fn user_shell_command_without_local_environment_emits_error() -> anyhow::R
     test.codex
         .submit(Op::RunUserShellCommand {
             command: "echo shell".to_string(),
+            timeout_ms: None,
         })
         .await?;
 
@@ -150,19 +160,19 @@ async fn user_shell_cmd_can_be_interrupted() {
         .expect("create new conversation");
     let codex = &fixture.codex;
 
-    // Start a long-running command and then interrupt it.
-    let sleep_cmd = "sleep 5".to_string();
+    // Start a long-running command and then interrupt it before its deadline.
     codex
-        .submit(Op::RunUserShellCommand { command: sleep_cmd })
+        .submit(Op::RunUserShellCommand {
+            command: slow_user_shell_command().to_string(),
+            timeout_ms: Some(28_800_000),
+        })
         .await
         .unwrap();
 
-    // Wait until it has started (ExecCommandBegin), then interrupt.
-    let _begin = wait_for_event_match(codex, |ev| match ev {
-        EventMsg::ExecCommandBegin(event) if event.source == ExecCommandSource::UserShell => {
-            Some(event.clone())
-        }
-        _ => None,
+    // Output proves that the process was spawned before cancellation.
+    wait_for_event(codex, |event| {
+        matches!(event, EventMsg::ExecCommandOutputDelta(delta)
+            if String::from_utf8_lossy(&delta.chunk).contains("shell-timeout-ready"))
     })
     .await;
     codex.submit(Op::Interrupt).await.unwrap();
@@ -180,6 +190,87 @@ async fn user_shell_cmd_can_be_interrupted() {
     assert_eq!(ev.reason, TurnAbortReason::Interrupted);
 }
 
+#[tokio::test]
+async fn user_shell_command_honors_default_and_extended_deadlines() -> anyhow::Result<()> {
+    for (timeout_ms, expected_ms) in [(None, 3_600_000), (Some(28_800_000), 28_800_000)] {
+        let server = start_mock_server().await;
+        // Honor the CI executor while retaining the local environment used by user shell commands.
+        let mut builder = test_codex();
+        let fixture = builder.build_with_remote_and_local_env(&server).await?;
+        // The remote cwd need not exist on the host, and may use a different path convention.
+        let local_cwd = fixture.cwd_path().abs();
+        let mut environments = vec![local(local_cwd.clone())];
+        if fixture.executor_environment().environment().is_remote() {
+            environments.insert(
+                /*index*/ 0,
+                fixture.executor_environment().selection().clone(),
+            );
+        }
+        submit_thread_settings(
+            &fixture.codex,
+            ThreadSettingsOverrides {
+                environments: Some(TurnEnvironmentSelections::new(local_cwd, environments)),
+                ..Default::default()
+            },
+        )
+        .await?;
+        fixture
+            .codex
+            .submit(Op::RunUserShellCommand {
+                command: slow_user_shell_command().to_string(),
+                timeout_ms,
+            })
+            .await?;
+        wait_for_event(&fixture.codex, |event| {
+            matches!(event, EventMsg::ExecCommandOutputDelta(delta)
+                if String::from_utf8_lossy(&delta.chunk).contains("shell-timeout-ready"))
+        })
+        .await;
+
+        let completed = async {
+            loop {
+                let event = fixture.codex.next_event().await.expect("read shell event");
+                if let EventMsg::ExecCommandEnd(end) = event.msg {
+                    break end;
+                }
+            }
+        };
+        tokio::pin!(completed);
+
+        // Leave time for shell startup, and let process I/O and reaping use real time.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(expected_ms - 60_000)).await;
+        tokio::time::resume();
+        assert!(
+            timeout(Duration::from_millis(250), &mut completed)
+                .await
+                .is_err(),
+            "shell command expired before its {expected_ms} ms deadline"
+        );
+
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::time::resume();
+        let end = timeout(Duration::from_secs(10), &mut completed).await?;
+        assert_eq!(end.exit_code, -1);
+        assert!(end.aggregated_output.contains("Timeout"));
+        assert!(end.aggregated_output.contains("shell-timeout-ready"));
+        wait_for_event(&fixture.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+    }
+    Ok(())
+}
+
+fn slow_user_shell_command() -> &'static str {
+    match codex_core::shell::default_user_shell().name() {
+        "powershell" => "Write-Output shell-timeout-ready; Start-Sleep -Seconds 60",
+        "cmd" => "echo shell-timeout-ready & ping -n 61 127.0.0.1 > nul",
+        _ => "printf 'shell-timeout-ready\\n'; exec sleep 60",
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_shell_command_does_not_replace_active_turn() -> anyhow::Result<()> {
     let server = start_mock_server().await;
@@ -189,18 +280,18 @@ async fn user_shell_command_does_not_replace_active_turn() -> anyhow::Result<()>
     let call_id = "active-turn-shell-call";
     let args = if cfg!(windows) {
         serde_json::json!({
-            "command": "Start-Sleep -Seconds 2; Write-Output model-shell",
-            "timeout_ms": 10_000,
+            "cmd": "Start-Sleep -Seconds 2; Write-Output model-shell",
+            "yield_time_ms": 10_000,
         })
     } else {
         serde_json::json!({
-            "command": "sleep 2; echo model-shell",
-            "timeout_ms": 10_000,
+            "cmd": "sleep 2; echo model-shell",
+            "yield_time_ms": 10_000,
         })
     };
     let first = sse(vec![
         ev_response_created("resp-1"),
-        ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+        ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
         ev_completed("resp-1"),
     ]);
     let second = sse(vec![
@@ -239,7 +330,9 @@ async fn user_shell_command_does_not_replace_active_turn() -> anyhow::Result<()>
         .await?;
 
     let _ = wait_for_event_match(&fixture.codex, |ev| match ev {
-        EventMsg::ExecCommandBegin(event) if event.source == ExecCommandSource::Agent => {
+        EventMsg::ExecCommandBegin(event)
+            if event.source == ExecCommandSource::UnifiedExecStartup =>
+        {
             Some(event.clone())
         }
         _ => None,
@@ -254,6 +347,7 @@ async fn user_shell_command_does_not_replace_active_turn() -> anyhow::Result<()>
         .codex
         .submit(Op::RunUserShellCommand {
             command: user_shell_command,
+            timeout_ms: None,
         })
         .await?;
 
@@ -319,6 +413,7 @@ async fn user_shell_command_history_is_persisted_and_shared_with_model() -> anyh
     test.codex
         .submit(Op::RunUserShellCommand {
             command: command.clone(),
+            timeout_ms: None,
         })
         .await?;
 
@@ -404,7 +499,10 @@ async fn user_shell_command_does_not_set_network_sandbox_env_var() -> anyhow::Re
         r#"sh -c "printf '%s' \"${CODEX_SANDBOX_NETWORK_DISABLED:-not-set}\"""#.to_string();
 
     test.codex
-        .submit(Op::RunUserShellCommand { command })
+        .submit(Op::RunUserShellCommand {
+            command,
+            timeout_ms: None,
+        })
         .await?;
 
     let ExecCommandEndEvent {
@@ -447,6 +545,7 @@ async fn user_shell_command_output_is_truncated_in_history() -> anyhow::Result<(
     test.codex
         .submit(Op::RunUserShellCommand {
             command: command.clone(),
+            timeout_ms: None,
         })
         .await?;
 
@@ -505,13 +604,13 @@ async fn user_shell_command_is_truncated_only_once() -> anyhow::Result<()> {
     let call_id = "user-shell-double-truncation";
     let args = if cfg!(windows) {
         serde_json::json!({
-            "command": "for ($i=1; $i -le 2000; $i++) { Write-Output $i }",
-            "timeout_ms": 5_000,
+            "cmd": "for ($i=1; $i -le 2000; $i++) { Write-Output $i }",
+            "yield_time_ms": 5_000,
         })
     } else {
         serde_json::json!({
-            "command": "seq 1 2000",
-            "timeout_ms": 5_000,
+            "cmd": "seq 1 2000",
+            "yield_time_ms": 5_000,
         })
     };
 
@@ -519,7 +618,7 @@ async fn user_shell_command_is_truncated_only_once() -> anyhow::Result<()> {
         &server,
         sse(vec![
             ev_response_created("resp-1"),
-            ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+            ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
             ev_completed("resp-1"),
         ]),
     )
@@ -535,7 +634,7 @@ async fn user_shell_command_is_truncated_only_once() -> anyhow::Result<()> {
 
     fixture
         .submit_turn_with_permission_profile(
-            "trigger big shell_command output",
+            "trigger big exec_command output",
             PermissionProfile::Disabled,
         )
         .await?;
@@ -543,13 +642,13 @@ async fn user_shell_command_is_truncated_only_once() -> anyhow::Result<()> {
     let output = mock2
         .single_request()
         .function_call_output_text(call_id)
-        .context("function_call_output present for shell_command call")?;
+        .context("function_call_output present for exec_command call")?;
 
     let truncation_headers = output.matches("Total output lines:").count();
 
     assert_eq!(
         truncation_headers, 1,
-        "shell_command output should carry only one truncation header: {output}"
+        "exec_command output should carry only one truncation header: {output}"
     );
 
     Ok(())

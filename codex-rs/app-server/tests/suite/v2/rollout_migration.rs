@@ -1,19 +1,19 @@
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
+use codex_app_server_protocol::ExperimentalFeatureEnablementSetParams;
+use codex_app_server_protocol::ExperimentalFeatureEnablementSetResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
+use codex_app_server_protocol::ThreadReadParams;
+use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput;
-use codex_thread_store::LocalThreadStore;
-use codex_thread_store::LocalThreadStoreConfig;
-use codex_thread_store::RolloutMigrationMode;
-use codex_thread_store::RolloutMigrationOptions;
-use codex_thread_store::RolloutMigrationStatus;
-use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -22,7 +22,7 @@ use tokio::time::timeout;
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[tokio::test]
-async fn migrated_legacy_thread_cold_resume_preserves_model_context() -> Result<()> {
+async fn runtime_enabled_legacy_migration_preserves_cold_resume_model_context() -> Result<()> {
     let server = responses::start_mock_server().await;
     let response_mock = responses::mount_sse_sequence(
         &server,
@@ -69,32 +69,37 @@ async fn migrated_legacy_thread_cold_resume_preserves_model_context() -> Result<
     .await??;
     timeout(DEFAULT_READ_TIMEOUT, primary.shutdown_gracefully()).await??;
 
-    let sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
-    let state_db =
-        codex_state::StateRuntime::init(sqlite.clone(), "mock_provider".to_string()).await?;
-    let store = LocalThreadStore::new(
-        LocalThreadStoreConfig {
-            codex_home: codex_home.path().to_path_buf(),
-            sqlite,
-            default_model_provider_id: "mock_provider".to_string(),
-        },
-        Some(state_db),
-    );
-    let report = store
-        .migrate_rollouts(RolloutMigrationOptions {
-            mode: RolloutMigrationMode::Apply,
-            max_mib_per_second: Some(1024),
-            ..RolloutMigrationOptions::default()
-        })
-        .await?;
-    assert_eq!(report.outcomes.len(), 1);
-    assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Migrated);
-    drop(store);
-
     let mut secondary = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
+    let enablement_id = secondary
+        .send_experimental_feature_enablement_set_request(ExperimentalFeatureEnablementSetParams {
+            enablement: BTreeMap::from([(
+                "background_paginated_rollout_migration".to_string(),
+                true,
+            )]),
+        })
+        .await?;
+    let _: ExperimentalFeatureEnablementSetResponse =
+        timeout(DEFAULT_READ_TIMEOUT, secondary.read_response(enablement_id)).await??;
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let read_id = secondary
+                .send_thread_read_request(ThreadReadParams {
+                    thread_id: thread.id.clone(),
+                    include_turns: false,
+                })
+                .await?;
+            let ThreadReadResponse { thread: read } = secondary.read_response(read_id).await?;
+            if read.history_mode == ThreadHistoryMode::Paginated {
+                return Ok::<(), anyhow::Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+
     let resume_id = secondary
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: thread.id.clone(),

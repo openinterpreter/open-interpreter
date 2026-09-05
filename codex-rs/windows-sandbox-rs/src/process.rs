@@ -97,12 +97,11 @@ pub unsafe fn create_process_as_user(
     logs_base_dir: Option<&Path>,
     stdio: Option<(HANDLE, HANDLE, HANDLE)>,
     console_mode: ConsoleMode,
-    use_private_desktop: bool,
+    desktop: LaunchDesktop,
 ) -> Result<CreatedProcess> {
     let cmdline_str = argv_to_command_line(argv);
     let mut cmdline: Vec<u16> = to_wide(&cmdline_str);
     let env_block = make_env_block(env_map);
-    let desktop = LaunchDesktop::prepare(use_private_desktop, logs_base_dir)?;
     let job = Arc::new(JobObject::create().context("create process job")?);
     let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
     let cwd_wide = to_wide(cwd);
@@ -229,7 +228,7 @@ pub fn spawn_process_with_pipes(
     stdin_mode: StdinMode,
     stderr_mode: StderrMode,
     console_mode: ConsoleMode,
-    use_private_desktop: bool,
+    desktop: LaunchDesktop,
     logs_base_dir: Option<&Path>,
 ) -> Result<PipeSpawnHandles> {
     let mut in_r: HANDLE = 0;
@@ -273,7 +272,7 @@ pub fn spawn_process_with_pipes(
             logs_base_dir,
             stdio,
             console_mode,
-            use_private_desktop,
+            desktop,
         )
     };
     let created = match spawn_result {

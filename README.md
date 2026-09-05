@@ -104,6 +104,8 @@ Open Interpreter ships with a QA skill that lets any model operate and test inte
 
 - Runs commands inside native sandboxing on macOS, Linux, and Windows.
 - Switches providers and models from the TUI with `/model`.
+- Runs any selected OpenAI-compatible provider through Chat Completions with
+  `interpreter --chat-completions` or `interpreter exec --chat-completions`.
 - Inspects or switches Rust-native model harnesses with `/harness`.
 - Tests web and native apps through the built-in QA skill.
 - Runs as an [Agent Client Protocol](https://agentclientprotocol.com/) agent for editors with `interpreter acp`.

@@ -73,22 +73,33 @@ impl App {
     /// Spawns a background task to fetch account rate limits and deliver the
     /// result as a `RateLimitsLoaded` event.
     ///
-    /// The `origin` is forwarded to the completion handler so it can distinguish
-    /// a startup prefetch (which updates cached snapshots and may surface a
-    /// reset-credit notice) from a `/status`-triggered refresh (which must
-    /// finalize the corresponding status card).
+    /// Recovery requests are coalesced and bounded by the reset-request timeout. The origin
+    /// also identifies command-specific completion work, such as finalizing a `/status` card,
+    /// without confusing sparse inference notifications with authoritative usage responses.
     pub(super) fn refresh_rate_limits(
         &mut self,
         app_server: &AppServerSession,
         origin: RateLimitRefreshOrigin,
     ) {
+        if matches!(
+            origin,
+            RateLimitRefreshOrigin::Recovery | RateLimitRefreshOrigin::ResetConsume { .. }
+        ) {
+            self.chat_widget.hold_rate_limit_recovery();
+        }
+        let Some((request_id, hard_stop_generation)) = self
+            .rate_limit_refresh_state
+            .start(origin, &mut self.rate_limit_hard_stop_generation)
+        else {
+            return;
+        };
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
-        let hard_stop_generation = self.rate_limit_hard_stop_generation;
         tokio::spawn(async move {
             let request = fetch_account_rate_limits(request_handle);
             let result = match origin {
-                RateLimitRefreshOrigin::ResetConsume { .. }
+                RateLimitRefreshOrigin::Recovery
+                | RateLimitRefreshOrigin::ResetConsume { .. }
                 | RateLimitRefreshOrigin::ResetPicker { .. } => {
                     tokio::time::timeout(RATE_LIMIT_RESET_REQUEST_TIMEOUT, request)
                         .await
@@ -102,6 +113,7 @@ impl App {
                 }
             };
             app_event_tx.send(AppEvent::RateLimitsLoaded {
+                request_id,
                 origin,
                 hard_stop_generation,
                 result,
@@ -208,6 +220,7 @@ impl App {
     pub(super) fn send_add_credits_nudge_email(
         &mut self,
         app_server: &AppServerSession,
+        request_id: Uuid,
         credit_type: AddCreditsNudgeCreditType,
     ) {
         let request_handle = app_server.request_handle();
@@ -216,7 +229,7 @@ impl App {
             let result = send_add_credits_nudge_email(request_handle, credit_type)
                 .await
                 .map_err(|err| err.to_string());
-            app_event_tx.send(AppEvent::AddCreditsNudgeEmailFinished { result });
+            app_event_tx.send(AppEvent::AddCreditsNudgeEmailFinished { request_id, result });
         });
     }
 
@@ -232,10 +245,10 @@ impl App {
         let app_event_tx = self.app_event_tx.clone();
         let cwd = self.config.cwd.to_path_buf();
         tokio::spawn(async move {
-            let result = fetch_skills_list(request_handle, cwd)
+            let result = fetch_skills_list(request_handle, cwd.clone())
                 .await
                 .map_err(|err| format!("{err:#}"));
-            app_event_tx.send(AppEvent::SkillsListLoaded { result });
+            app_event_tx.send(AppEvent::SkillsListLoaded { cwd, result });
         });
     }
 
@@ -565,14 +578,15 @@ impl App {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         if !self.config.features.enabled(Feature::Plugins) {
-            app_event_tx.send(AppEvent::PluginMentionsLoaded { plugins: None });
+            app_event_tx.send(AppEvent::PluginMentionsLoaded { cwd, plugins: None });
             return;
         }
 
         tokio::spawn(async move {
-            match fetch_plugin_mentions(request_handle, cwd).await {
+            match fetch_plugin_mentions(request_handle, cwd.clone()).await {
                 Ok(plugins) => {
                     app_event_tx.send(AppEvent::PluginMentionsLoaded {
+                        cwd,
                         plugins: Some(plugins),
                     });
                 }
@@ -652,17 +666,7 @@ impl App {
 
         let should_send = {
             let mut guard = store.lock().await;
-            guard
-                .buffer
-                .push_back(ThreadBufferedEvent::FeedbackSubmission(event.clone()));
-            if guard.buffer.len() > guard.capacity
-                && let Some(removed) = guard.buffer.pop_front()
-                && let ThreadBufferedEvent::Request(request) = &removed
-            {
-                guard
-                    .pending_interactive_replay
-                    .note_evicted_server_request(request.as_ref());
-            }
+            guard.push_buffered_event(ThreadBufferedEvent::FeedbackSubmission(event.clone()));
             guard.active
         };
 
@@ -1575,6 +1579,7 @@ mod tests {
         let statuses = vec![
             McpServerStatus {
                 name: "docs".to_string(),
+                runtime_status: None,
                 plugin_id: None,
                 server_info: None,
                 tools: HashMap::from([(
@@ -1596,6 +1601,7 @@ mod tests {
             },
             McpServerStatus {
                 name: "disabled".to_string(),
+                runtime_status: None,
                 plugin_id: None,
                 server_info: None,
                 tools: HashMap::new(),

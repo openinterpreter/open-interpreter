@@ -13,18 +13,15 @@ from pathlib import Path
 
 MODELS_DEV_URL = "https://models.dev/api.json"
 REPO_ROOT = Path(__file__).resolve().parents[2]
-OUTPUT_PATH = (
-    REPO_ROOT / "codex-rs" / "model-provider-info" / "provider_catalog.json"
-)
+OUTPUT_PATH = REPO_ROOT / "codex-rs" / "model-provider-info" / "provider_catalog.json"
 OVERRIDES_PATH = (
-    REPO_ROOT
-    / "codex-rs"
-    / "model-provider-info"
-    / "provider_catalog_overrides.json"
+    REPO_ROOT / "codex-rs" / "model-provider-info" / "provider_catalog_overrides.json"
 )
 DEFAULT_SORT_PRIORITY = 100
 SUPPORTED_WIRE_APIS = {"chat", "messages", "responses"}
-USER_AGENT = "OpenInterpreter/1.0 (+https://github.com/KillianLucas/open-interpreter-next)"
+USER_AGENT = (
+    "OpenInterpreter/1.0 (+https://github.com/KillianLucas/open-interpreter-next)"
+)
 
 
 def load_models_dev_catalog() -> dict[str, dict]:
@@ -129,7 +126,9 @@ def build_provider_entry(
     wire_api = wire_api_for_provider(provider_id, provider, overrides)
 
     models: list[dict] = []
-    for priority, (model_id, model) in enumerate((provider.get("models") or {}).items()):
+    for priority, (model_id, model) in enumerate(
+        (provider.get("models") or {}).items()
+    ):
         if not isinstance(model, dict) or not include_model(model):
             continue
         models.append(
@@ -184,7 +183,9 @@ def merge_live_provider_models(
             )
         headers["Authorization"] = f"Bearer {token}"
     elif auth is not None:
-        raise SystemExit(f"unsupported live model source auth for {provider_id}: {auth}")
+        raise SystemExit(
+            f"unsupported live model source auth for {provider_id}: {auth}"
+        )
 
     try:
         request = urllib.request.Request(url, headers=headers)
@@ -194,10 +195,13 @@ def merge_live_provider_models(
         raise SystemExit(f"live_model_sources.{provider_id} failed: {exc}") from exc
 
     existing = {model["id"] for model in models if isinstance(model.get("id"), str)}
-    next_priority = max(
-        (int(model.get("priority", -1)) for model in models),
-        default=-1,
-    ) + 1
+    next_priority = (
+        max(
+            (int(model.get("priority", -1)) for model in models),
+            default=-1,
+        )
+        + 1
+    )
     live_ids = live_model_ids(payload)
     if not live_ids:
         raise SystemExit(f"live_model_sources.{provider_id} returned no models")
@@ -237,7 +241,9 @@ def first_env_value(env_names: object) -> str | None:
 def format_env_names(env_names: object) -> str:
     if not isinstance(env_names, list):
         raise SystemExit("live model source auth_env must be a list")
-    values = [env_name for env_name in env_names if isinstance(env_name, str) and env_name]
+    values = [
+        env_name for env_name in env_names if isinstance(env_name, str) and env_name
+    ]
     return ", ".join(values) if values else "<none configured>"
 
 
@@ -361,7 +367,10 @@ def write_catalog(selected_provider_ids: set[str] | None = None) -> int:
     overrides = load_overrides()
     generated_providers = []
     for provider_id, provider in sorted(models_dev_catalog.items()):
-        if selected_provider_ids is not None and provider_id not in selected_provider_ids:
+        if (
+            selected_provider_ids is not None
+            and provider_id not in selected_provider_ids
+        ):
             continue
         if not isinstance(provider, dict):
             continue

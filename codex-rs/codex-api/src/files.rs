@@ -98,6 +98,8 @@ pub enum OpenAiFileError {
 struct CreateFileResponse {
     file_id: String,
     upload_url: String,
+    #[serde(default)]
+    pdf_c2pa_reservation: bool,
 }
 
 #[derive(Deserialize)]
@@ -257,6 +259,11 @@ pub async fn upload_openai_file(
         create_payload.file_id,
     );
     let finalize_request = serde_json::json!({});
+    let finalize_request = if create_payload.pdf_c2pa_reservation {
+        serde_json::json!({"pdf_c2pa_create_request": create_request})
+    } else {
+        finalize_request
+    };
     let finalize_started_at = Instant::now();
     loop {
         let finalize_response = authorized_request(client_pool, auth, Method::POST, &finalize_url)
@@ -464,6 +471,73 @@ mod tests {
         assert_eq!(uploaded.file_name, "hello.txt");
         assert_eq!(uploaded.mime_type, Some("text/plain".to_string()));
         assert_eq!(finalize_attempts.load(Ordering::SeqCst), 2);
+    }
+    #[tokio::test]
+    async fn upload_hosted_app_context_and_finalizes_reservation() {
+        let server = MockServer::start().await;
+        let create_request = serde_json::json!({
+            "file_name": "report.pdf",
+            "file_size": 8,
+            "use_case": "codex",
+            "codex_connector_id": "library",
+            "codex_action_name": "create_library_file",
+            "codex_model": "gpt-work",
+        });
+        Mock::given(method("POST"))
+            .and(path("/backend-api/files"))
+            .and(header("chatgpt-account-id", "account_id"))
+            .and(body_json(create_request.clone()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "file_id": "file_pdf",
+                "upload_url": format!("{}/upload/file_pdf", server.uri()),
+                "pdf_c2pa_reservation": true,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/upload/file_pdf"))
+            .and(header("content-length", "8"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/backend-api/files/file_pdf/uploaded"))
+            .and(body_json(serde_json::json!({
+                "pdf_c2pa_create_request": create_request,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "success",
+                "download_url": format!("{}/download/file_pdf", server.uri()),
+                "file_name": "report.pdf",
+                "mime_type": "application/pdf",
+                "file_size_bytes": 24,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let hosted_upload = HostedFileUploadContext {
+            connector_id: "library".to_string(),
+            action_name: "create_library_file".to_string(),
+            model: "gpt-work".to_string(),
+        };
+        let uploaded = upload_openai_file(
+            &base_url_for(&server),
+            &chatgpt_auth(),
+            &default_http_client_pool(),
+            "report.pdf".to_string(),
+            /*file_size_bytes*/ 8,
+            futures::stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"%PDF-1.4"))]),
+            Some(&hosted_upload),
+        )
+        .await
+        .expect("hosted PDF upload succeeds");
+
+        assert_eq!(uploaded.file_id, "file_pdf");
+        assert_eq!(uploaded.file_size_bytes, 24);
+        server.verify().await;
     }
 
     #[tokio::test]

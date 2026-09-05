@@ -119,6 +119,8 @@ pub struct SandboxExecRequest {
     pub network: Option<NetworkProxy>,
     pub network_environment_id: Option<String>,
     pub sandbox: SandboxType,
+    // TODO(anp): Reconcile these backend copies with the supplied sandbox context
+    // (TurnEnvironment::sandbox_context for turns), preserving this launch snapshot.
     pub windows_sandbox_level: WindowsSandboxLevel,
     pub windows_sandbox_private_desktop: bool,
     pub permission_profile: PermissionProfile,
@@ -139,6 +141,8 @@ pub struct SandboxTransformRequest<'a> {
     pub network: Option<&'a NetworkProxy>,
     pub sandbox_policy_cwd: &'a PathUri,
     pub codex_linux_sandbox_exe: Option<&'a Path>,
+    // TODO(anp): Reconcile these backend inputs with the supplied sandbox context
+    // (TurnEnvironment::sandbox_context for turns) so selection shares its authority.
     pub use_legacy_landlock: bool,
     pub windows_sandbox_level: WindowsSandboxLevel,
     pub windows_sandbox_private_desktop: bool,
@@ -207,6 +211,8 @@ pub enum SandboxTransformError {
     },
     MissingLinuxSandboxExecutable,
     EnvironmentNetworkProxy(String),
+    #[cfg(target_os = "macos")]
+    SeatbeltPreparation(String),
     #[cfg(target_os = "linux")]
     Wsl1UnsupportedForBubblewrap,
     #[cfg(not(target_os = "macos"))]
@@ -234,6 +240,10 @@ impl std::fmt::Display for SandboxTransformError {
             Self::EnvironmentNetworkProxy(err) => {
                 write!(f, "failed to prepare environment network proxy: {err}")
             }
+            #[cfg(target_os = "macos")]
+            Self::SeatbeltPreparation(err) => {
+                write!(f, "failed to prepare Seatbelt sandbox: {err}")
+            }
             #[cfg(target_os = "linux")]
             Self::Wsl1UnsupportedForBubblewrap => write!(f, "{WSL1_BWRAP_WARNING}"),
             #[cfg(not(target_os = "macos"))]
@@ -253,6 +263,8 @@ impl std::error::Error for SandboxTransformError {
             | Self::InvalidSandboxPolicyCwd { source, .. } => Some(source),
             Self::MissingLinuxSandboxExecutable => None,
             Self::EnvironmentNetworkProxy(_) => None,
+            #[cfg(target_os = "macos")]
+            Self::SeatbeltPreparation(_) => None,
             #[cfg(target_os = "linux")]
             Self::Wsl1UnsupportedForBubblewrap => None,
             #[cfg(not(target_os = "macos"))]
@@ -289,6 +301,9 @@ impl SandboxManager {
         windows_sandbox_level: WindowsSandboxLevel,
         has_managed_network_requirements: bool,
     ) -> SandboxType {
+        #[cfg(windows)]
+        crate::windows_mxc::record_availability_once();
+
         if self.should_sandbox(permission_profile, pref, has_managed_network_requirements) {
             get_platform_sandbox(windows_sandbox_level != WindowsSandboxLevel::Disabled)
                 .unwrap_or(SandboxType::None)
@@ -360,6 +375,7 @@ impl SandboxManager {
             SandboxType::MacosSeatbelt => {
                 use crate::seatbelt::CreateSeatbeltCommandArgsParams;
                 use crate::seatbelt::MACOS_PATH_TO_SEATBELT_EXECUTABLE;
+                use crate::seatbelt::SeatbeltPreparationError;
                 use crate::seatbelt::create_seatbelt_command_args_with_profile;
 
                 let pending = pending_sandboxed_request?;
@@ -380,7 +396,14 @@ impl SandboxManager {
                     },
                     self.seatbelt_profile,
                 )
-                .map_err(SandboxTransformError::EnvironmentNetworkProxy)?;
+                .map_err(|err| match err {
+                    SeatbeltPreparationError::FileSystem(message) => {
+                        SandboxTransformError::SeatbeltPreparation(message)
+                    }
+                    SeatbeltPreparationError::EnvironmentNetworkProxy(message) => {
+                        SandboxTransformError::EnvironmentNetworkProxy(message)
+                    }
+                })?;
                 let mut full_command = Vec::with_capacity(1 + args.len());
                 full_command.push(MACOS_PATH_TO_SEATBELT_EXECUTABLE.to_string());
                 full_command.append(&mut args);

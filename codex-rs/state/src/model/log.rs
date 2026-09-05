@@ -16,6 +16,17 @@ pub struct LogEntry {
     pub line: Option<i64>,
 }
 
+impl LogEntry {
+    pub(crate) fn estimated_bytes(&self) -> i64 {
+        let feedback_log_body = self.feedback_log_body.as_ref().or(self.message.as_ref());
+        feedback_log_body.map_or(0, String::len) as i64
+            + self.level.len() as i64
+            + self.target.len() as i64
+            + self.module_path.as_ref().map_or(0, String::len) as i64
+            + self.file.as_ref().map_or(0, String::len) as i64
+    }
+}
+
 #[derive(Clone, Debug, FromRow)]
 pub struct LogRow {
     pub id: i64,

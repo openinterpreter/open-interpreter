@@ -108,6 +108,7 @@ async fn termination_rejects_a_waiting_store_commit_before_the_next_cell_can_loa
     let host = RuntimeCellHost {
         cell_id: CellId::new("terminating-writer"),
         inner: Arc::clone(&runtime.inner),
+        execution_context: opentelemetry::Context::new(),
     };
     let completion = CellEvent::Completed {
         content_items: vec![OutputItem::Text {

@@ -3,16 +3,24 @@ use super::WorldStateSection;
 use crate::context::ContextWindowGuidance;
 use crate::context::ContextualUserFragment;
 
+const REPLACEMENT_NOTICE: &str =
+    "This context-window guidance replaces all previously provided context-window guidance.";
+const REMOVAL_NOTICE: &str = "The previously provided context-window guidance no longer applies.";
+
 /// Model-visible guidance for managing the current context window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ContextWindowGuidanceState {
+    // Empty string means no guidance.
     message: String,
 }
 
 impl ContextWindowGuidanceState {
-    pub(crate) fn new(message: &str) -> Self {
+    pub(crate) fn new(message: Option<&str>) -> Self {
         Self {
-            message: message.to_string(),
+            message: message
+                .filter(|message| !message.trim().is_empty())
+                .unwrap_or_default()
+                .to_string(),
         }
     }
 }
@@ -41,11 +49,25 @@ impl WorldStateSection for ContextWindowGuidanceState {
         &self,
         previous: PreviousSectionState<'_, Self::Snapshot>,
     ) -> Option<Box<dyn ContextualUserFragment>> {
-        if matches!(previous, PreviousSectionState::Known(message) if message == &self.message) {
+        if matches!(previous, PreviousSectionState::Known(previous) if previous == &self.message) {
             return None;
         }
-
-        Some(Box::new(ContextWindowGuidance::new(&self.message)))
+        let previous_may_contain_guidance = match previous {
+            PreviousSectionState::Known(previous) => !previous.is_empty(),
+            PreviousSectionState::Unknown => true,
+            PreviousSectionState::Absent => false,
+        };
+        let message = if self.message.is_empty() {
+            if !previous_may_contain_guidance {
+                return None;
+            }
+            REMOVAL_NOTICE.to_string()
+        } else if previous_may_contain_guidance {
+            format!("{REPLACEMENT_NOTICE}\n\n{}", self.message)
+        } else {
+            self.message.clone()
+        };
+        Some(Box::new(ContextWindowGuidance::new(&message)))
     }
 }
 

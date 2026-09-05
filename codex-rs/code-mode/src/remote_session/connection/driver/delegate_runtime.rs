@@ -318,8 +318,7 @@ impl ConnectionDriver {
                 }
             }
         };
-        let lane = message.transport_lane();
-        self.queue_frame(frame, lane)
+        self.queue_frame(frame)
     }
 
     pub(super) fn close_cell(&mut self, session_id: SessionId, cell_id: WireCellId) -> bool {

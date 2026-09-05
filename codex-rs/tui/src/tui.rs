@@ -48,7 +48,6 @@ use self::input_boundary::terminal_input_is_readable;
 use crate::custom_terminal;
 use crate::custom_terminal::Terminal as CustomTerminal;
 use crate::insert_history::HistoryLineWrapPolicy;
-use crate::insert_history::InsertHistoryMode;
 use crate::notifications::DesktopNotificationBackend;
 use crate::notifications::detect_backend;
 use crate::terminal_hyperlinks::HyperlinkLine;
@@ -58,6 +57,7 @@ use crate::tui::event_stream::TuiEventStream;
 #[cfg(unix)]
 use crate::tui::job_control::SuspendContext;
 use crate::tui::screen_size::ScreenSizePolicy;
+use crate::tui::scrollback::ScrollbackStrategy;
 use codex_config::types::NotificationCondition;
 use codex_config::types::NotificationMethod;
 
@@ -70,6 +70,7 @@ mod input_boundary;
 mod job_control;
 mod keyboard_modes;
 mod screen_size;
+mod scrollback;
 #[cfg(all(test, unix))]
 #[path = "tui_startup_tests.rs"]
 mod startup_tests;
@@ -497,7 +498,9 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
         !keyboard_modes::keyboard_enhancement_disabled() && detect_keyboard_enhancement_supported();
 
     #[cfg(windows)]
-    probe_windows_default_colors();
+    // OSC replies can arrive after their deadline. Do not issue terminal queries before directory
+    // trust and other protected startup screens have finished accepting their security decisions.
+    crate::terminal_palette::set_default_colors_from_startup_probe(/*colors*/ None);
 
     let tui = CustomTerminal::with_options_and_cursor_position(backend, cursor_pos)?;
     let stderr_guard = terminal_stderr::TerminalStderrGuard::install()?;
@@ -573,6 +576,10 @@ pub enum TuiEvent {
     /// The app refreshes terminal geometry for this draw because resize events are not delivered
     /// while the process is suspended.
     Resume,
+    /// A terminal focus notification indicating that the terminal or tab became active.
+    FocusGained,
+    /// A terminal focus notification indicating that the terminal or tab became inactive.
+    FocusLost,
 }
 
 pub struct Tui {
@@ -594,8 +601,7 @@ pub struct Tui {
     enhanced_keys_supported: bool,
     notification_backend: Option<DesktopNotificationBackend>,
     notification_condition: NotificationCondition,
-    // Raw terminal-wrapped history needs a non-scroll-region insertion path in Zellij.
-    is_zellij: bool,
+    scrollback: ScrollbackStrategy,
     // When false, enter_alt_screen() becomes a no-op.
     alt_screen_enabled: bool,
     // Keeps unmanaged process stderr writes out of the inline viewport.
@@ -631,7 +637,7 @@ impl Tui {
         // Cache this to avoid contention with the event reader.
         supports_color::on_cached(supports_color::Stream::Stdout);
         let _ = crate::terminal_palette::default_colors();
-        let is_zellij = codex_terminal_detection::terminal_info().is_zellij();
+        let scrollback = ScrollbackStrategy::detect(&codex_terminal_detection::terminal_info());
 
         Self {
             frame_requester,
@@ -650,7 +656,7 @@ impl Tui {
             enhanced_keys_supported,
             notification_backend: Some(detect_backend(NotificationMethod::default())),
             notification_condition: NotificationCondition::default(),
-            is_zellij,
+            scrollback,
             alt_screen_enabled: true,
             _stderr_guard: stderr_guard,
         }
@@ -668,6 +674,10 @@ impl Tui {
     ) {
         self.notification_backend = Some(detect_backend(method));
         self.notification_condition = condition;
+    }
+
+    pub(crate) fn is_terminal_focused(&self) -> bool {
+        self.terminal_focused.load(Ordering::Relaxed)
     }
 
     pub fn frame_requester(&self) -> FrameRequester {
@@ -691,6 +701,15 @@ impl Tui {
     // Inverse of `pause_events`.
     pub fn resume_events(&mut self) {
         self.event_broker.resume_events();
+    }
+
+    /// Discover the visible Windows theme only after protected startup decisions have completed.
+    #[cfg(windows)]
+    pub(crate) fn probe_default_colors_after_protected_startup(&mut self) {
+        self.pause_events();
+        probe_windows_default_colors();
+        self.resume_events();
+        self.frame_requester.schedule_frame();
     }
 
     /// Reclaim terminal modes and stderr after a panic hook ran inside a recovery boundary.
@@ -764,7 +783,7 @@ impl Tui {
     /// Emit a desktop notification now if the terminal is unfocused.
     /// Returns true if a notification was posted.
     pub fn notify(&mut self, message: impl AsRef<str>) -> bool {
-        let terminal_focused = self.terminal_focused.load(Ordering::Relaxed);
+        let terminal_focused = self.is_terminal_focused();
         if !should_emit_notification(self.notification_condition, terminal_focused) {
             return false;
         }
@@ -893,6 +912,7 @@ impl Tui {
         terminal: &mut Terminal,
         height: u16,
         screen_size: Size,
+        scrollback: ScrollbackStrategy,
     ) -> Result<bool> {
         let terminal_height_shrank = screen_size.height < terminal.last_known_screen_size.height;
         let terminal_height_grew = screen_size.height > terminal.last_known_screen_size.height;
@@ -908,9 +928,7 @@ impl Tui {
         if area.bottom() > screen_size.height {
             let scroll_by = area.bottom() - screen_size.height;
             if !terminal_height_shrank {
-                terminal
-                    .backend_mut()
-                    .scroll_region_up(0..area.top(), scroll_by)?;
+                scrollback.grow_viewport(terminal, area.top(), screen_size, scroll_by)?;
             }
             area.y = screen_size.height - area.height;
         } else if terminal_height_grew && viewport_was_bottom_aligned {
@@ -931,23 +949,21 @@ impl Tui {
     fn flush_pending_history_lines(
         terminal: &mut Terminal,
         pending_history_lines: &mut Vec<PendingHistoryLines>,
-        is_zellij: bool,
+        scrollback: ScrollbackStrategy,
+        screen_size: Size,
     ) -> Result<()> {
         if pending_history_lines.is_empty() {
             return Ok(());
         }
 
         for batch in pending_history_lines.iter() {
-            let mode = if is_zellij && batch.wrap_policy == HistoryLineWrapPolicy::Terminal {
-                InsertHistoryMode::ZellijRaw
-            } else {
-                InsertHistoryMode::Standard
-            };
+            let mode = scrollback.history_insertion_mode(batch.wrap_policy);
             crate::insert_history::insert_history_hyperlink_lines_with_mode_and_wrap_policy(
                 terminal,
                 &batch.lines,
                 mode,
                 batch.wrap_policy,
+                screen_size,
             )?;
         }
         pending_history_lines.clear();
@@ -990,9 +1006,12 @@ impl Tui {
             area.width = screen_size.width;
             // If the viewport has expanded, scroll everything else up to make room.
             if area.bottom() > screen_size.height {
-                terminal
-                    .backend_mut()
-                    .scroll_region_up(0..area.top(), area.bottom() - screen_size.height)?;
+                self.scrollback.grow_viewport(
+                    terminal,
+                    area.top(),
+                    screen_size,
+                    area.bottom() - screen_size.height,
+                )?;
                 area.y = screen_size.height - area.height;
             }
             if area != terminal.viewport_area {
@@ -1005,7 +1024,8 @@ impl Tui {
             Self::flush_pending_history_lines(
                 terminal,
                 &mut self.pending_history_lines,
-                self.is_zellij,
+                self.scrollback,
+                screen_size,
             )?;
 
             // Update the y position for suspending so Ctrl-Z can place the cursor correctly.
@@ -1111,8 +1131,12 @@ impl Tui {
             }
 
             let terminal = &mut self.terminal;
-            let needs_full_repaint =
-                Self::update_inline_viewport_for_resize_reflow(terminal, height, screen_size)?;
+            let needs_full_repaint = Self::update_inline_viewport_for_resize_reflow(
+                terminal,
+                height,
+                screen_size,
+                self.scrollback,
+            )?;
             // A zero- or one-row history region cannot isolate raw history writes from the
             // viewport, so replayed rows can leave stale cells inside the composer.
             let history_can_overlap_viewport =
@@ -1120,7 +1144,8 @@ impl Tui {
             Self::flush_pending_history_lines(
                 terminal,
                 &mut self.pending_history_lines,
-                self.is_zellij,
+                self.scrollback,
+                screen_size,
             )?;
 
             if needs_full_repaint || history_can_overlap_viewport {

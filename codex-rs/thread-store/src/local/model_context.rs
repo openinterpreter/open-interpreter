@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io;
 
 use codex_protocol::protocol::HistoryPosition;
@@ -26,13 +25,14 @@ mod tests;
 
 /// Loads rollout items needed to reconstruct the latest model-visible context.
 ///
-/// Plain paginated JSONL rollouts use a reverse scan. When it finds both a usable replacement-
+/// Paginated JSONL rollouts use a reverse scan. When it finds both a usable replacement-
 /// history checkpoint and the completed user-turn context needed for resume metadata, the returned
 /// replay starts with the canonical `SessionMeta` followed by that newest suffix. When no
 /// bounded cutoff is available, the scan continues to the beginning and returns the complete
 /// replay it already accumulated.
 ///
-/// Legacy and compressed rollout shapes keep the existing full-history path.
+/// Compressed segments are decoded before applying their original JSONL offsets. Legacy rollouts
+/// keep the existing full-history path.
 pub(super) async fn load_latest_model_context(
     store: &LocalThreadStore,
     params: LoadThreadHistoryParams,
@@ -65,12 +65,7 @@ pub(super) async fn load_latest_model_context(
         });
     }
 
-    let items = if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated)
-        && !path
-            .file_name()
-            .and_then(|file_name| file_name.to_str())
-            .is_some_and(|file_name| file_name.ends_with(".jsonl.zst"))
-    {
+    let items = if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated) {
         let lineage = store.resolve_rollout_lineage(params.thread_id).await?;
         scan_model_context_from_lineage(lineage, session_meta).await?
     } else {
@@ -137,7 +132,7 @@ fn scan_model_context_from_lineage_blocking(
 ) -> io::Result<Vec<RolloutItem>> {
     let mut scan = ModelContextScan::default();
     'segments: for segment in lineage.segments().iter().rev() {
-        let file = File::open(segment.rollout_path.as_path())?;
+        let file = codex_rollout::open_rollout_seekable_reader(segment.rollout_path.as_path())?;
         let mut scanner = match segment.end.map(|end| end.end_byte_offset) {
             Some(end_byte_offset) => ReverseJsonlScanner::new_at(file, end_byte_offset)?,
             None => ReverseJsonlScanner::new(file)?,

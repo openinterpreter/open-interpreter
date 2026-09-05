@@ -53,6 +53,7 @@ async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext>
     );
     let base_url = std::env::var("CODEX_CLOUD_TASKS_BASE_URL")
         .unwrap_or_else(|_| "https://chatgpt.com/backend-api".to_string());
+    let base_url = util::validate_chatgpt_base_url(&base_url)?;
 
     set_user_agent_suffix(user_agent_suffix);
 
@@ -62,7 +63,7 @@ async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext>
         return Ok(BackendContext {
             backend: Arc::new(codex_cloud_tasks_mock_client::MockClient),
             base_url,
-            environment_http: RouteAwareClientPool::new_without_request_logging(
+            environment_http: RouteAwareClientPool::new_without_redirects_or_request_logging(
                 http_client_factory,
                 ClientRouteClass::Api,
             ),
@@ -71,7 +72,7 @@ async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext>
 
     let ua = get_codex_user_agent();
     let (auth_manager, http_client_factory) = util::load_auth_manager(Some(base_url.clone())).await;
-    let environment_http = RouteAwareClientPool::new_without_request_logging(
+    let environment_http = RouteAwareClientPool::new_without_redirects_or_request_logging(
         http_client_factory.clone(),
         ClientRouteClass::Api,
     );

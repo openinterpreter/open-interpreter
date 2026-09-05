@@ -9,10 +9,15 @@ use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::write_chatgpt_auth;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigEdit;
+use codex_app_server_protocol::ConfigReadParams;
+use codex_app_server_protocol::ConfigReadResponse;
+use codex_app_server_protocol::ConfigRequirementsReadResponse;
 use codex_app_server_protocol::ConfigWriteResponse;
 use codex_app_server_protocol::ExperimentalFeatureEnablementSetParams;
 use codex_app_server_protocol::ExperimentalFeatureEnablementSetResponse;
 use codex_app_server_protocol::MergeStrategy;
+use codex_app_server_protocol::PermissionProfileListParams;
+use codex_app_server_protocol::PermissionProfileListResponse;
 use codex_app_server_protocol::PluginListParams;
 use codex_app_server_protocol::PluginListResponse;
 use codex_app_server_protocol::SkillScope;
@@ -34,6 +39,7 @@ use core_test_support::skip_if_remote;
 use core_test_support::skip_if_wine_exec;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::time::timeout;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -79,47 +85,6 @@ plugins = true
 "#,
         ),
     )
-}
-
-fn write_plugin_with_skill(
-    repo_root: &std::path::Path,
-    plugin_name: &str,
-    skill_name: &str,
-) -> Result<()> {
-    std::fs::create_dir_all(repo_root.join(".git"))?;
-    std::fs::create_dir_all(repo_root.join(".agents/plugins"))?;
-    std::fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
-        format!(
-            r#"{{
-  "name": "local-marketplace",
-  "plugins": [
-    {{
-      "name": "{plugin_name}",
-      "source": {{
-        "source": "local",
-        "path": "./{plugin_name}"
-      }}
-    }}
-  ]
-}}"#
-        ),
-    )?;
-
-    let plugin_root = repo_root.join(plugin_name);
-    std::fs::create_dir_all(plugin_root.join(".codex-plugin"))?;
-    std::fs::write(
-        plugin_root.join(".codex-plugin/plugin.json"),
-        format!(r#"{{"name":"{plugin_name}"}}"#),
-    )?;
-
-    let skill_dir = plugin_root.join("skills").join(skill_name);
-    std::fs::create_dir_all(&skill_dir)?;
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        format!("---\nname: {skill_name}\ndescription: {skill_name} description\n---\n\n# Body\n"),
-    )?;
-    Ok(())
 }
 
 fn write_cached_remote_plugin_with_skill(
@@ -695,72 +660,65 @@ async fn skills_list_loads_remote_installed_plugin_skills_from_cache() -> Result
         std::fs::canonicalize(skill.path.as_path())?,
         expected_skill_path
     );
-    assert_eq!(skill.enabled, true);
+    assert_eq!(
+        (skill.enabled, skill.plugin_id.as_deref()),
+        (true, Some("linear@openai-curated-remote")),
+    );
     Ok(())
 }
 
-#[tokio::test]
-async fn skills_list_excludes_plugin_skills_when_workspace_codex_plugins_disabled() -> Result<()> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_reads_complete_alongside_skills_list_request() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let repo_root = TempDir::new()?;
-    let server = MockServer::start().await;
-    write_skill(&codex_home, "home-skill")?;
-    write_plugin_with_skill(repo_root.path(), "demo-plugin", "plugin-skill")?;
-    write_plugins_enabled_config_with_base_url(
-        codex_home.path(),
-        &format!("{}/backend-api/", server.uri()),
-    )?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .account_id("account-123")
-            .chatgpt_user_id("user-123")
-            .chatgpt_account_id("account-123")
-            .plan_type("team"),
-        AuthCredentialsStoreMode::File,
-    )?;
-    Mock::given(method("GET"))
-        .and(path("/backend-api/accounts/account-123/settings"))
-        .and(header("authorization", "Bearer chatgpt-token"))
-        .and(header("chatgpt-account-id", "account-123"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(r#"{"beta_settings":{"enable_plugins":false}}"#),
-        )
-        .mount(&server)
-        .await;
-
+    let cwd = TempDir::new()?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
-        .without_auto_env()
         .without_managed_config()
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
 
-    let request_id = mcp
+    let skills_request_id = mcp
         .send_skills_list_request(SkillsListParams {
-            cwds: vec![repo_root.path().to_path_buf()],
+            cwds: vec![cwd.path().to_path_buf()],
             force_reload: true,
         })
         .await?;
 
+    let config_request_id = mcp
+        .send_config_read_request(ConfigReadParams {
+            include_layers: false,
+            cwd: None,
+        })
+        .await?;
+    let requirements_request_id = mcp.send_config_requirements_read_request().await?;
+    let permission_profiles_request_id = mcp
+        .send_permission_profile_list_request(PermissionProfileListParams {
+            cursor: None,
+            limit: None,
+            cwd: None,
+        })
+        .await?;
+
+    let (config, requirements, permission_profiles) = timeout(Duration::from_secs(5), async {
+        let config: ConfigReadResponse = mcp.read_response(config_request_id).await?;
+        let requirements: ConfigRequirementsReadResponse =
+            mcp.read_response(requirements_request_id).await?;
+        let permission_profiles: PermissionProfileListResponse =
+            mcp.read_response(permission_profiles_request_id).await?;
+        anyhow::Ok((config, requirements, permission_profiles))
+    })
+    .await??;
+    assert!(config.layers.is_none());
+    assert_eq!(
+        requirements,
+        ConfigRequirementsReadResponse { requirements: None }
+    );
+    assert!(!permission_profiles.data.is_empty());
+
     let SkillsListResponse { data } =
-        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(skills_request_id)).await??;
     assert_eq!(data.len(), 1);
-    assert!(
-        data[0]
-            .skills
-            .iter()
-            .any(|skill| skill.name == "home-skill"),
-        "non-plugin skills should remain available"
-    );
-    assert!(
-        data[0]
-            .skills
-            .iter()
-            .all(|skill| skill.name != "demo-plugin:plugin-skill"),
-        "plugin skills should be hidden when workspace Codex plugins are disabled"
-    );
+
     Ok(())
 }
 
@@ -837,8 +795,10 @@ async fn skills_list_accepts_relative_cwds() -> Result<()> {
     Ok(())
 }
 
+#[test_case(false; "plugins disabled by default")]
+#[test_case(true; "plugins enabled by default")]
 #[tokio::test]
-async fn skills_list_preserves_requested_cwd_order() -> Result<()> {
+async fn skills_list_preserves_requested_cwd_order(home_plugins_enabled: bool) -> Result<()> {
     skip_if_wine_exec!(
         Ok(()),
         "skills/list currently requires host-native cwd paths for workspace config"
@@ -846,25 +806,32 @@ async fn skills_list_preserves_requested_cwd_order() -> Result<()> {
     let codex_home = TempDir::new()?;
     let first_cwd = TempDir::new()?;
     let second_cwd = TempDir::new()?;
+    let third_cwd = TempDir::new()?;
     write_skill(&codex_home, "shared-skill")?;
     write_cached_local_curated_plugin_with_skill(codex_home.path(), "openai-api-curated")?;
     std::fs::write(
         codex_home.path().join("config.toml"),
-        r#"[features]
-plugins = true
+        format!(
+            r#"[features]
+plugins = {home_plugins_enabled}
 
 [plugins."google-calendar@openai-api-curated"]
-enabled = true
-"#,
+enabled = false
+"#
+        ),
     )?;
 
-    for (cwd, plugin_enabled) in [(first_cwd.path(), true), (second_cwd.path(), false)] {
+    for (cwd, plugins_enabled, plugin_enabled) in [
+        (first_cwd.path(), true, true),
+        (second_cwd.path(), false, true),
+        (third_cwd.path(), true, false),
+    ] {
         std::fs::create_dir_all(cwd.join(".git"))?;
         std::fs::create_dir_all(cwd.join(".codex"))?;
         std::fs::write(
             cwd.join(".codex/config.toml"),
             format!(
-                "[plugins.\"google-calendar@openai-api-curated\"]\nenabled = {plugin_enabled}\n"
+                "[features]\nplugins = {plugins_enabled}\n[plugins.\"google-calendar@openai-api-curated\"]\nenabled = {plugin_enabled}\n"
             ),
         )?;
         set_project_trust_level(codex_home.path(), cwd, TrustLevel::Trusted)?;
@@ -879,6 +846,7 @@ enabled = true
     for (cwd, name) in [
         (first_cwd.path(), "first-project-skill"),
         (second_cwd.path(), "second-project-skill"),
+        (third_cwd.path(), "third-project-skill"),
     ] {
         let cwd = AbsolutePathBuf::try_from(cwd)?;
         let git_dir = PathUri::from_abs_path(&cwd.join(".git"));
@@ -887,7 +855,10 @@ enabled = true
             file_system
                 .create_directory(
                     directory,
-                    CreateDirectoryOptions { recursive: true },
+                    CreateDirectoryOptions {
+                        recursive: true,
+                        follow_symlinks: true,
+                    },
                     /*sandbox*/ None,
                 )
                 .await?;
@@ -896,34 +867,36 @@ enabled = true
             .write_file(
                 &skill_dir.join("SKILL.md")?,
                 format!("---\nname: {name}\ndescription: {name}\n---\n").into_bytes(),
+                Default::default(),
                 /*sandbox*/ None,
             )
             .await?;
     }
 
-    for (request_index, force_reload) in [false, false, true].into_iter().enumerate() {
-        if request_index == 1 {
-            write_skill(&codex_home, "new-skill")?;
-        }
-
+    for force_reload in [false, false, true] {
         let request_id = mcp
             .send_skills_list_request(SkillsListParams {
                 cwds: vec![
                     first_cwd.path().to_path_buf(),
                     second_cwd.path().to_path_buf(),
+                    third_cwd.path().to_path_buf(),
                 ],
                 force_reload,
             })
             .await?;
         let SkillsListResponse { data } =
             timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
-        assert_eq!(data.len(), 2);
-        assert_eq!(data[0].cwd, first_cwd.path());
-        assert_eq!(data[1].cwd, second_cwd.path());
-        for (entry, project_skill) in data
-            .iter()
-            .zip(["first-project-skill", "second-project-skill"])
-        {
+        assert_eq!(
+            data.iter()
+                .map(|entry| entry.cwd.as_path())
+                .collect::<Vec<_>>(),
+            vec![first_cwd.path(), second_cwd.path(), third_cwd.path()],
+        );
+        for (entry, (project_skill, plugin_enabled)) in data.iter().zip([
+            ("first-project-skill", true),
+            ("second-project-skill", false),
+            ("third-project-skill", false),
+        ]) {
             assert_eq!(entry.errors, Vec::new());
             assert!(
                 entry
@@ -931,6 +904,10 @@ enabled = true
                     .iter()
                     .any(|skill| skill.name == "shared-skill")
             );
+            let mut expected_skills = vec![project_skill];
+            if plugin_enabled {
+                expected_skills.push("google-calendar:meeting-prep");
+            }
             assert_eq!(
                 entry
                     .skills
@@ -941,11 +918,7 @@ enabled = true
                     })
                     .map(|skill| skill.name.as_str())
                     .collect::<Vec<_>>(),
-                vec![project_skill, "google-calendar:meeting-prep"]
-            );
-            assert_eq!(
-                entry.skills.iter().any(|skill| skill.name == "new-skill"),
-                force_reload
+                expected_skills
             );
         }
     }
@@ -984,7 +957,10 @@ enabled = true
         file_system
             .create_directory(
                 &cwd.join(".git")?,
-                CreateDirectoryOptions { recursive: true },
+                CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
                 /*sandbox*/ None,
             )
             .await?;
@@ -1325,6 +1301,7 @@ async fn skills_changed_notification_is_emitted_after_skill_change() -> Result<(
             history_mode: None,
             session_start_source: None,
             thread_source: None,
+            project_id: None,
             dynamic_tools: None,
             environments: None,
             selected_capability_roots: None,

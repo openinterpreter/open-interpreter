@@ -19,10 +19,15 @@ mod runtime;
 mod sqlite;
 mod telemetry;
 
+pub use model::CreatedProject;
 pub use model::LogEntry;
 pub use model::LogQuery;
 pub use model::LogRow;
 pub use model::Phase2JobClaimOutcome;
+pub use model::Project;
+pub use model::ProjectRoot;
+pub use model::ProjectSortKey;
+pub use model::ProjectsPage;
 pub use model::QueuedUserSubmissionRecord;
 pub use model::RolloutMigrationCursor;
 pub use model::RolloutMigrationSkippedRollout;
@@ -50,6 +55,10 @@ pub use model::Stage1JobClaim;
 pub use model::Stage1JobClaimOutcome;
 pub use model::Stage1Output;
 pub use model::Stage1StartupClaimParams;
+pub use model::ThreadArtifact;
+pub use model::ThreadArtifactAttachmentOutcome;
+pub use model::ThreadArtifactPage;
+pub use model::ThreadArtifactRemovalOutcome;
 pub use model::ThreadGoal;
 pub use model::ThreadGoalStatus;
 pub use model::ThreadMetadata;
@@ -70,6 +79,7 @@ pub use runtime::GoalUpdate;
 pub use runtime::MemoryStore;
 pub use runtime::RemoteControlEnrollmentRecord;
 pub use runtime::RuntimeDbBackup;
+pub use runtime::SqliteIntegrityCheck;
 pub use runtime::SqliteQueueStore;
 pub use runtime::ThreadFilterOptions;
 pub use runtime::backup_runtime_db_for_fresh_start;
@@ -110,3 +120,15 @@ pub const DB_INIT_METRIC: &str = "codex.sqlite.init.count";
 pub const DB_INIT_DURATION_METRIC: &str = "codex.sqlite.init.duration_ms";
 /// Rollout fallback attempts. Tags: [caller, reason]
 pub const DB_FALLBACK_METRIC: &str = "codex.sqlite.fallback.count";
+/// SQLite log batch write attempts. Tags: [status, error]
+pub const LOG_WRITE_METRIC: &str = "codex.sqlite.logs.write.count";
+/// SQLite log batch write latency. Tags: [status, error]
+pub const LOG_WRITE_DURATION_METRIC: &str = "codex.sqlite.logs.write.duration_ms";
+/// Estimated bytes in each SQLite log batch. Tags: [status, error]
+pub const LOG_WRITE_BYTES_METRIC: &str = "codex.sqlite.logs.write.bytes";
+/// Number of entries in each SQLite log batch. Tags: [status, error]
+pub const LOG_WRITE_ENTRIES_METRIC: &str = "codex.sqlite.logs.write.entries";
+/// Largest estimated entry size in each SQLite log batch. Tags: [status, error]
+pub const LOG_WRITE_MAX_ENTRY_BYTES_METRIC: &str = "codex.sqlite.logs.write.max_entry_bytes";
+/// SQLite log entries discarded before they can be queued. Tags: [reason]
+pub const LOG_QUEUE_DROPPED_METRIC: &str = "codex.sqlite.logs.queue.dropped";

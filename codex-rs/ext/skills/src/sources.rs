@@ -171,7 +171,7 @@ impl SkillProviders {
 
     pub(crate) async fn read(
         &self,
-        request: SkillReadRequest,
+        request: SkillReadRequest<'_>,
     ) -> Result<SkillReadResult, SkillProviderError> {
         let mut last_error = None;
         for source in self

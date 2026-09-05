@@ -7,6 +7,9 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
+use crate::tools::sandboxing::ToolError;
+use crate::unified_exec::UnifiedExecContext;
+use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::WriteStdinInteractionEvent;
 use crate::unified_exec::WriteStdinRequest;
 use codex_tools::ToolName;
@@ -43,7 +46,10 @@ impl ToolExecutor<ToolInvocation> for WriteStdinHandler {
         true
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(self.handle_call(invocation))
     }
 }
@@ -56,6 +62,9 @@ impl WriteStdinHandler {
         let ToolInvocation {
             session,
             turn,
+            step_context,
+            cancellation_token,
+            call_id,
             payload,
             ..
         } = invocation;
@@ -70,23 +79,37 @@ impl WriteStdinHandler {
         };
 
         let args: WriteStdinArgs = parse_arguments(&arguments)?;
+        let context =
+            UnifiedExecContext::new(session.clone(), step_context, cancellation_token, call_id);
         let response = session
             .services
             .unified_exec_manager
-            .write_stdin(WriteStdinRequest {
-                process_id: args.session_id,
-                input: &args.chars,
-                yield_time_ms: args.yield_time_ms,
-                max_output_tokens: args.max_output_tokens,
-                truncation_policy: turn.model_info.truncation_policy.into(),
-                interaction_event: Some(WriteStdinInteractionEvent {
-                    session: &session,
-                    turn: &turn,
-                }),
-            })
+            .write_stdin(
+                &context,
+                WriteStdinRequest {
+                    process_id: args.session_id,
+                    input: &args.chars,
+                    yield_time_ms: args.yield_time_ms,
+                    max_output_tokens: args.max_output_tokens,
+                    truncation_policy: turn.model_info().truncation_policy.into(),
+                    interaction_event: Some(WriteStdinInteractionEvent {
+                        session: &session,
+                        turn: &turn,
+                    }),
+                },
+            )
             .await
             .map_err(|err| {
-                FunctionCallError::RespondToModel(format!("write_stdin failed: {err}"))
+                let message = match err {
+                    UnifiedExecError::StdinApproval(ToolError::Rejected(reason)) => {
+                        format!("write_stdin rejected: {reason}")
+                    }
+                    UnifiedExecError::StdinApproval(ToolError::Codex(err)) => {
+                        format!("write_stdin approval failed: {err}")
+                    }
+                    err => format!("write_stdin failed: {err}"),
+                };
+                FunctionCallError::RespondToModel(message)
             })?;
 
         Ok(boxed_tool_output(response))
