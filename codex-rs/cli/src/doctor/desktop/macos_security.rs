@@ -140,47 +140,53 @@ fn classify_security_events(output: &str) -> Evidence {
 
 fn enforcement_check(gatekeeper: Evidence, events: Evidence) -> DoctorCheck {
     let id = "desktop.security.enforcement";
+    let product = codex_product_info::Product::current().short_display_name();
+    let command = codex_product_info::Product::current().command_name();
     let (status, summary, remedy) = if events == Evidence::Malware {
         (
             CheckStatus::Fail,
             "macos XProtect blocked or remediated the desktop application",
-            "collect the XProtect detection and ask your security administrator to review the official Codex installation",
+            format!(
+                "collect the XProtect detection and ask your security administrator to review the official {product} installation"
+            ),
         )
     } else if gatekeeper == Evidence::Blocked {
         (
             CheckStatus::Fail,
             "macos gatekeeper rejected the desktop application",
-            "ask your security administrator to review the application policy",
+            "ask your security administrator to review the application policy".to_string(),
         )
     } else if events == Evidence::Blocked {
         (
             CheckStatus::Fail,
             "a recent macos security event blocked the desktop application",
-            "ask your security administrator to review the matching prevention event",
+            "ask your security administrator to review the matching prevention event".to_string(),
         )
     } else if events == Evidence::Exhausted {
         (
             CheckStatus::Warning,
             "macos system-policy diagnostics indicate file descriptor exhaustion",
-            "restart your Mac, retry Codex once, and contact support if the problem returns",
+            format!(
+                "restart your Mac, retry {product} once, and contact support if the problem returns"
+            ),
         )
     } else if events == Evidence::Audit {
         (
             CheckStatus::Warning,
             "recent desktop security events are audit-only",
-            "ask your security administrator to verify the application policy",
+            "ask your security administrator to verify the application policy".to_string(),
         )
     } else if gatekeeper == Evidence::Unavailable {
         (
             CheckStatus::Warning,
             "the desktop security assessment was unavailable",
-            "check access to macos gatekeeper diagnostics",
+            "check access to macos gatekeeper diagnostics".to_string(),
         )
     } else if events == Evidence::Unavailable {
         (
             CheckStatus::Warning,
             "recent macos security enforcement history was unavailable",
-            "check access to macos unified security logs and rerun codex doctor",
+            format!("check access to macos unified security logs and rerun {command} doctor"),
         )
     } else {
         return desktop_check(

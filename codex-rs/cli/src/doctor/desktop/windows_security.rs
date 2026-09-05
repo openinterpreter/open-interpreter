@@ -184,6 +184,7 @@ fn defender_action(event: &str) -> (CheckStatus, &'static str) {
 }
 
 fn classify(channels: &[Option<Vec<Evidence>>]) -> DoctorCheck {
+    let product = codex_product_info::Product::current().short_display_name();
     let visible = channels.iter().any(Option::is_some);
     let mut status = if visible {
         CheckStatus::Ok
@@ -198,16 +199,26 @@ fn classify(channels: &[Option<Vec<Evidence>>]) -> DoctorCheck {
         }
     }
     let summary = match (status, visible) {
-        (CheckStatus::Ok, _) if channels.contains(&None) => "security event coverage is incomplete",
-        (CheckStatus::Ok, _) => "no locally visible recent Codex security enforcement was found",
-        (CheckStatus::Warning, false) => "security event channels could not be inspected",
-        (CheckStatus::Warning, true) => "recent Codex security audit or detection requires review",
-        (CheckStatus::Fail, _) => "endpoint security blocked or quarantined a Codex executable",
+        (CheckStatus::Ok, _) if channels.contains(&None) => {
+            "security event coverage is incomplete".to_string()
+        }
+        (CheckStatus::Ok, _) => {
+            format!("no locally visible recent {product} security enforcement was found")
+        }
+        (CheckStatus::Warning, false) => {
+            "security event channels could not be inspected".to_string()
+        }
+        (CheckStatus::Warning, true) => {
+            format!("recent {product} security audit or detection requires review")
+        }
+        (CheckStatus::Fail, _) => {
+            format!("endpoint security blocked or quarantined a {product} executable")
+        }
     };
     let mut check = desktop_check("desktop.security.enforcement", status, summary).details(details);
     if status != CheckStatus::Ok {
         check = check.remediation(
-            "ask your organization's security administrator to review endpoint security events and the approved Codex application policy",
+            format!("ask your organization's security administrator to review endpoint security events and the approved {product} application policy"),
         );
     }
     check

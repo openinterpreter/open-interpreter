@@ -36,6 +36,7 @@ pub(super) async fn check() -> DoctorCheck {
 }
 
 pub(super) fn endpoint_check(inspection: EndpointInspection) -> DoctorCheck {
+    let product_name = codex_product_info::Product::current().short_display_name();
     let (products, visibility_incomplete) = match inspection {
         EndpointInspection::Complete(products) => (products, false),
         #[cfg(any(target_os = "windows", test))]
@@ -66,24 +67,26 @@ pub(super) fn endpoint_check(inspection: EndpointInspection) -> DoctorCheck {
     }
 
     let targets = if cfg!(target_os = "windows") {
-        "signed Codex app; codex.exe; codex-windows-sandbox-setup.exe; codex-command-runner.exe; codex-code-mode-host.exe"
+        format!(
+            "signed {product_name} app; compatibility executables codex.exe, codex-windows-sandbox-setup.exe, codex-command-runner.exe, and codex-code-mode-host.exe"
+        )
     } else if cfg!(target_os = "macos") {
-        "signing team 2DC432GLL2 plus the installed Codex app identity, signed codex agent, and required helpers"
+        format!(
+            "signing team 2DC432GLL2 plus the installed {product_name} app identity, signed agent, and required helpers"
+        )
     } else {
-        "verified Codex app, codex agent, and required helpers"
+        format!("verified {product_name} app, agent, and required helpers")
     };
     let mut check = DoctorCheck::new(
         "security.endpoint",
         "security",
         CheckStatus::Warning,
-        "endpoint protection detected; Codex exclusions are unverified",
+        format!("endpoint protection detected; {product_name} exclusions are unverified"),
     )
     .detail(format!("endpoint products: {}", products.join(", ")))
     .detail(format!("exclusion targets: {targets}"))
-    .detail("Codex exclusions: not verified")
-    .remediation(
-        "ask your security administrator to verify Codex exclusions and required helper allowances",
-    );
+    .detail(format!("{product_name} exclusions: not verified"))
+    .remediation(format!("ask your security administrator to verify {product_name} exclusions and required helper allowances"));
     if visibility_incomplete {
         check = check.detail("additional endpoint products: unavailable");
     }
@@ -91,33 +94,47 @@ pub(super) fn endpoint_check(inspection: EndpointInspection) -> DoctorCheck {
     for product in products {
         let remedy = match product {
             "CrowdStrike Falcon" => {
-                "CrowdStrike Falcon: Add a certificate or IOA exclusion for Codex. If sensor overhead continues, exclude the Codex agent from sensor visibility. Keep monitoring descendant processes."
+                format!(
+                    "CrowdStrike Falcon: Add a certificate or IOA exclusion for {product_name}. If sensor overhead continues, exclude the {product_name} agent from sensor visibility. Keep monitoring descendant processes."
+                )
             }
             "BeyondTrust Privilege Management" => {
-                "BeyondTrust: Remove Codex from application blocking rules. Add allow rules for Codex helper executables. Do not grant administrator privileges."
+                format!(
+                    "BeyondTrust: Remove {product_name} from application blocking rules. Add allow rules for {product_name} helper executables. Do not grant administrator privileges."
+                )
             }
             "Microsoft Defender" => {
-                "Microsoft Defender: Add a certificate or executable-path exclusion for Codex and its helpers. If Attack Surface Reduction blocks Codex, add a rule exclusion. If Controlled Folder Access blocks Codex, allow the app."
+                format!(
+                    "Microsoft Defender: Add a certificate or executable-path exclusion for {product_name} and its helpers. If Attack Surface Reduction blocks {product_name}, add a rule exclusion. If Controlled Folder Access blocks {product_name}, allow the app."
+                )
             }
             "SentinelOne" => {
-                "SentinelOne: Add a signer, file-hash, or executable-path exclusion for Codex and its helpers."
+                format!(
+                    "SentinelOne: Add a signer, file-hash, or executable-path exclusion for {product_name} and its helpers."
+                )
             }
             "Jamf Protect" => {
-                "Jamf Protect: Add an Override Threat Prevention exception for Codex app and helper signing identities. If analytics cause delays, add an Ignore System Events for Analytics exception."
+                format!(
+                    "Jamf Protect: Add an Override Threat Prevention exception for the {product_name} app and helper signing identities. If analytics cause delays, add an Ignore System Events for Analytics exception."
+                )
             }
             _ => {
-                "Add an exclusion for Codex and its helpers. Use the endpoint product instructions."
+                format!(
+                    "Add an exclusion for {product_name} and its helpers. Use the endpoint product instructions."
+                )
             }
         };
         check = check.issue(
             DoctorIssue::new(
                 CheckStatus::Warning,
-                format!("{product} can interfere with Codex. Verify Codex exclusions."),
+                format!(
+                    "{product} can interfere with {product_name}. Verify {product_name} exclusions."
+                ),
             )
             .measured("not verified")
-            .expected("Codex application and helper exclusions")
+            .expected(format!("{product_name} application and helper exclusions"))
             .remedy(remedy)
-            .field("Codex exclusions"),
+            .field(format!("{product_name} exclusions")),
         );
     }
 

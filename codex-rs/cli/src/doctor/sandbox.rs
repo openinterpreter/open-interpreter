@@ -39,7 +39,7 @@ use super::DoctorIssue;
 use super::push_path_detail;
 
 #[cfg(target_os = "windows")]
-const WINDOWS_SETUP_REMEDIATION: &str = "run codex sandbox setup --elevated --user <end-user> --codex-home <authoritative-home> from an elevated shell";
+const WINDOWS_SETUP_REMEDIATION: &str = "run the sandbox setup command with --elevated --user <end-user> --codex-home <authoritative-home> from an elevated shell";
 
 pub(super) fn sandbox_check(config: &Config, arg0_paths: &Arg0DispatchPaths) -> DoctorCheck {
     let mut details = Vec::new();
@@ -241,7 +241,7 @@ pub(super) fn sandbox_check(config: &Config, arg0_paths: &Arg0DispatchPaths) -> 
                         | SetupErrorCode::OrchestratorHelperReportReadFailed
                         | SetupErrorCode::OrchestratorHelperIncomplete
                         | SetupErrorCode::HelperReadAclHelperSpawnFailed => {
-                            "repair the installed Codex helpers or ask IT to allow their execution"
+                            "repair the installed agent helpers or ask IT to allow their execution"
                         }
                         SetupErrorCode::HelperUserProvisionFailed
                         | SetupErrorCode::HelperUsersGroupCreateFailed
@@ -257,19 +257,19 @@ pub(super) fn sandbox_check(config: &Config, arg0_paths: &Arg0DispatchPaths) -> 
                         | SetupErrorCode::HelperUsersFileWriteFailed
                         | SetupErrorCode::HelperSetupMarkerWriteFailed
                         | SetupErrorCode::HelperSandboxLockFailed => {
-                            "rerun elevated setup for the authoritative Codex home or ask IT"
+                            "rerun elevated setup for the authoritative agent home or ask IT"
                         }
                         SetupErrorCode::HelperFirewallComInitFailed
                         | SetupErrorCode::HelperFirewallPolicyAccessFailed
                         | SetupErrorCode::HelperFirewallPolicyIneffective
                         | SetupErrorCode::HelperFirewallRuleCreateOrAddFailed
                         | SetupErrorCode::HelperFirewallRuleVerifyFailed => {
-                            "ask IT to allow Codex sandbox rules in managed Windows Firewall policy"
+                            "ask IT to allow the agent sandbox rules in managed Windows Firewall policy"
                         }
                         SetupErrorCode::OrchestratorPayloadSerializeFailed
                         | SetupErrorCode::HelperRequestArgsFailed
                         | SetupErrorCode::HelperUnknownError => {
-                            "repair or reinstall the Codex CLI from an approved distribution"
+                            "repair or reinstall the agent CLI from an approved distribution"
                         }
                     };
                     check

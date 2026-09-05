@@ -335,7 +335,8 @@ fn print_human_report(
         );
     }
     if mode == RolloutMigrationMode::DryRun && counts.eligible > 0 {
-        println!("Run `codex migrate-rollouts --apply` to migrate eligible sessions.");
+        let command = codex_product_info::Product::current().command_name();
+        println!("Run `{command} migrate-rollouts --apply` to migrate eligible sessions.");
     }
 
     if verbose {
